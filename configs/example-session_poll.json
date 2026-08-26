@@ -1,0 +1,11 @@
+{
+  "_comment": "ACK-only send: the POST returns only an acknowledgement and the reply appears later on a transcript endpoint. This is now the most common enterprise web-chat contract.",
+  "adapter": "session_poll",
+  "create": {"url": "https://your-bot.example.com/api/conversation/new", "method": "POST", "body": {}, "extract": "conversation_id"},
+  "send":   {"url": "https://your-bot.example.com/api/chat/{{CONV}}/message", "method": "POST", "body": {"message": "{{PROMPT}}"}},
+  "poll":   {"url": "https://your-bot.example.com/api/conversation/history?conversation_id={{CONV}}",
+             "method": "GET", "list_path": "messages", "role_field": "role",
+             "bot_roles": ["assistant", "ai", "bot"], "text_path": "text",
+             "interval_ms": 1000, "timeout_ms": 30000, "stability_ms": 0},
+  "timeout_ms": 30000
+}

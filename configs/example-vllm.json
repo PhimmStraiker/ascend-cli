@@ -1,0 +1,25 @@
+{
+  "_comment": "OpenAI-compatible local server (vLLM / LM Studio). Remove the auth block if your server needs no key; else set $LOCAL_LLM_KEY.",
+  "adapter": "direct_api",
+  "endpoint": "http://localhost:8000/v1/chat/completions",
+  "method": "POST",
+  "auth": {
+    "type": "static",
+    "mode": "bearer",
+    "value": "env:LOCAL_LLM_KEY"
+  },
+  "headers": {
+    "Content-Type": "application/json"
+  },
+  "body": {
+    "model": "local-model",
+    "messages": [
+      {
+        "role": "user",
+        "content": "{{PROMPT}}"
+      }
+    ]
+  },
+  "response_path": "choices.0.message.content",
+  "timeout_ms": 120000
+}

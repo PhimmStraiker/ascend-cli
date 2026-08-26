@@ -1,0 +1,10 @@
+{
+  "_comment": "Ollama local (ollama serve). No auth. Change model as needed.",
+  "adapter": "direct_api",
+  "endpoint": "http://localhost:11434/api/chat",
+  "method": "POST",
+  "headers": {"Content-Type": "application/json"},
+  "body": {"model": "llama3.2", "messages": [{"role": "user", "content": "{{PROMPT}}"}], "stream": false},
+  "response_path": "message.content",
+  "timeout_ms": 120000
+}

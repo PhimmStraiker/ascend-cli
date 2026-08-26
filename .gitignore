@@ -1,0 +1,48 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+*.env
+configs/*.json
+!configs/example*.json
+media/*.mov
+logs/
+*.log
+.DS_Store
+captures/
+dist/
+build/
+*.spec
+
+# Internal-only material (SE/engineering runbooks, customer connectivity results).
+# Excluded because git HISTORY becomes public when the repo does — anything
+# committed here would be permanently visible. Keep it local; share out of band.
+internal/*
+!internal/README.md
+
+# Stray adapter configs at the repo root. These hold customer endpoints, tokens and
+# session material. Only the shipped example-*.json templates are tracked; a config
+# dropped at the root would otherwise be one `git add -A` from permanent public history.
+/*.json
+!pyproject.toml
+*.har
+evidence*.json
+*.egg-info/
+.eggs/
+*.egg
+demo/*.gif
+demo/*.mp4
+demo/*.webm
+
+# Stray manual-chat captures written to the repo root by --out (real prompts + replies).
+/*.jsonl
+runtime/debug_screenshots/
+
+# demo recording outputs
+demo/out/
+*.cast
+*.mp4
+*.gif
+*.mov
+demo/*.mov

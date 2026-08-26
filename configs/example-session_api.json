@@ -1,0 +1,13 @@
+{
+  "_comment": "Two-step: create a session, then send with that id. {{SESSION_ID}} works in the URL and in the body. warmup_message discards a mandatory greeting.",
+  "adapter": "session_api",
+  "session_endpoint": "https://your-bot.example.com/api/conversations",
+  "session_body": {},
+  "session_extract": "conversation_id",
+  "session_variable": "SESSION_ID",
+  "message_endpoint": "https://your-bot.example.com/api/conversations/{{SESSION_ID}}/messages",
+  "message_body": {"message": "{{PROMPT}}"},
+  "response_path": "reply",
+  "warmup_message": "hello",
+  "timeout_ms": 30000
+}

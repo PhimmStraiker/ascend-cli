@@ -1,0 +1,13 @@
+{
+  "_comment": "Raw WebSocket. Frames may be JSON or plain text; if there is no terminal frame, idle_ms ends the turn. Use aggregate=last for cumulative (non-delta) streams.",
+  "adapter": "websocket_direct",
+  "ws_url": "wss://your-bot.example.com/chat",
+  "headers": {},
+  "init_messages": [],
+  "send_template": {"type": "message", "text": "{{PROMPT}}"},
+  "response_path": "text",
+  "done_when": {"path": "type", "equals": "done"},
+  "idle_ms": 1500,
+  "aggregate": "concat",
+  "timeout_ms": 26000
+}

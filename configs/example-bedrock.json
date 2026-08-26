@@ -1,0 +1,11 @@
+{
+  "_comment": "AWS Bedrock. Set AWS creds the standard way (env AWS_* / profile / role). mode: converse | agent | agentcore. For a private/VPC AgentCore runtime the bridge is the only path in.",
+  "adapter": "bedrock",
+  "mode": "converse",
+  "region": "us-east-1",
+  "model_id": "anthropic.claude-3-5-sonnet-20241022-v2:0",
+  "max_tokens": 1024,
+  "_agent_mode": {"mode": "agent", "agent_id": "<AGENT_ID>", "agent_alias_id": "<ALIAS_ID>"},
+  "_agentcore_mode": {"mode": "agentcore", "runtime_arn": "arn:aws:bedrock-agentcore:us-east-1:<acct>:runtime/<name>", "qualifier": "DEFAULT", "response_path": "output"},
+  "timeout_ms": 60000
+}

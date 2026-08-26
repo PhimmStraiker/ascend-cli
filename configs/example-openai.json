@@ -1,0 +1,25 @@
+{
+  "_comment": "OpenAI Chat Completions. Set $OPENAI_API_KEY. Streaming? use example-openai-stream style: adapter sse_stream, text_path choices.0.delta.content.",
+  "adapter": "direct_api",
+  "endpoint": "https://api.openai.com/v1/chat/completions",
+  "method": "POST",
+  "auth": {
+    "type": "static",
+    "mode": "bearer",
+    "value": "env:OPENAI_API_KEY"
+  },
+  "headers": {
+    "Content-Type": "application/json"
+  },
+  "body": {
+    "model": "gpt-4o-mini",
+    "messages": [
+      {
+        "role": "user",
+        "content": "{{PROMPT}}"
+      }
+    ]
+  },
+  "response_path": "choices.0.message.content",
+  "timeout_ms": 60000
+}

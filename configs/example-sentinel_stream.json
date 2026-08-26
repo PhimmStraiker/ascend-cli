@@ -1,0 +1,16 @@
+{
+  "_comment": "Sentinel-framed text/plain body: repeated MARKER_BEGIN{json}MARKER_END frames. start bootstraps a conversation, then each message reuses {{CONV}}/{{KEY}}.",
+  "adapter": "sentinel_stream",
+  "url": "https://your-bot.example.com/-/api/chat",
+  "method": "POST",
+  "begin_marker": "BOT_CHAT_EVENT_BEGIN",
+  "end_marker": "BOT_CHAT_EVENT_END",
+  "start": {"body": {"clientEvent": {"type": "start"}}, "conv_path": "conversationID", "key_path": "encryptionKey"},
+  "message": {"body": {"conversationID": "{{CONV}}", "encryptionKey": "{{KEY}}",
+                       "clientEvent": {"type": "message", "message": {"content": "{{PROMPT}}"}},
+                       "userMessageIndex": "{{INDEX}}"}},
+  "extract": {"events_path": "state.events", "message_path": "message",
+              "author_field": "author", "agent_authors": ["AGENT"],
+              "text_field": "text", "skip_flags": ["isProgressIndicator"], "aggregate": "last"},
+  "timeout_ms": 60000
+}

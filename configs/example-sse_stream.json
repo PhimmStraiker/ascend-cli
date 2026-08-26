@@ -1,0 +1,13 @@
+{
+  "_comment": "Server-sent events: the answer arrives as token frames that must be reassembled. Set format to ndjson for newline-delimited JSON.",
+  "adapter": "sse_stream",
+  "base_url": "https://your-bot.example.com",
+  "chat_path": "/api/chat/stream",
+  "request_template": {"message": "{{PROMPT}}"},
+  "format": "sse",
+  "token_types": ["token", "delta"],
+  "text_path": "content",
+  "done_when": {"path": "type", "equals": "done"},
+  "aggregate": "concat",
+  "timeout_ms": 26000
+}
