@@ -1,0 +1,10 @@
+{
+  "_comment": "Simplest case: one POST, answer in the JSON body. Copy, edit, then run: ascend adapter validate --config <name>",
+  "adapter": "direct_api",
+  "endpoint": "https://your-bot.example.com/api/chat",
+  "method": "POST",
+  "headers": {"Content-Type": "application/json", "Authorization": "Bearer ${YOUR_TOKEN}"},
+  "body": {"message": "{{PROMPT}}"},
+  "response_path": "data.reply",
+  "timeout_ms": 30000
+}

@@ -1,0 +1,28 @@
+{
+  "_comment": "Google Gemini API (generativelanguage). Set $GEMINI_API_KEY. Uses the x-goog-api-key header.",
+  "adapter": "direct_api",
+  "endpoint": "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent",
+  "method": "POST",
+  "auth": {
+    "type": "static",
+    "mode": "api_key",
+    "name": "x-goog-api-key",
+    "value": "env:GEMINI_API_KEY"
+  },
+  "headers": {
+    "Content-Type": "application/json"
+  },
+  "body": {
+    "contents": [
+      {
+        "parts": [
+          {
+            "text": "{{PROMPT}}"
+          }
+        ]
+      }
+    ]
+  },
+  "response_path": "candidates.0.content.parts.0.text",
+  "timeout_ms": 60000
+}

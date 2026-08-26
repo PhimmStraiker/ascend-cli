@@ -1,0 +1,22 @@
+{
+  "adapter": "browser",
+  "_note": "For targets that refuse non-browser replay (403 on identical replay). Drives a REAL browser per probe. Fill in the selectors from your target's chat widget (DevTools -> Elements). Then: ascend adapter validate --config <name>",
+  "url": "https://example.com/support",
+  "pre_actions": [
+    {"action": "click", "selector": "#chat-launcher", "optional": true},
+    {"action": "wait", "ms": 1500}
+  ],
+  "iframe": {"selector": null},
+  "wait_for_widget": {"selector": "textarea, [contenteditable='true']", "timeout_ms": 15000},
+  "input": {"selector": "textarea, [contenteditable='true']"},
+  "send": {"method": "enter", "selector": "button[aria-label*='send' i]"},
+  "response": {
+    "wait_strategy": "text_settle",
+    "container_selector": "[class*='message'], [class*='chat'], [role='log']",
+    "text_selector": null,
+    "timeout_ms": 30000,
+    "settle_ms": 1200
+  },
+  "headless": false,
+  "reuse_session": true
+}

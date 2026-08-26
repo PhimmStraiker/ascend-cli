@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# ascend — launcher. Run straight from a clone with no install:
+#     ./ascend doctor
+#     ./ascend onboard --url https://site/support
+# For a system-wide command instead: pipx install .   (see pyproject.toml)
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PY="${ASCEND_PYTHON:-}"
+if [ -z "$PY" ]; then
+  for c in python3 python; do command -v "$c" >/dev/null 2>&1 && { PY="$c"; break; }; done
+fi
+[ -n "$PY" ] || { echo "error: python3 not found. Install Python 3.9+ or set ASCEND_PYTHON." >&2; exit 1; }
+exec "$PY" "$HERE/shells/cli/ascend.py" "$@"

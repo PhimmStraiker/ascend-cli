@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ascend-cli"
+version = "1.0.0"
+description = "Ascend Bridge v2 — pull-mode red-team relay and adapter toolkit for AI agents"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "Proprietary"}
+dependencies = [
+    "requests>=2.31",
+    "websockets>=12.0",
+]
+
+[project.optional-dependencies]
+# Only needed for `ascend map --url` (live browser capture). The RUNTIME never
+# needs a browser — assessments are pure HTTP.
+capture = ["playwright>=1.40"]
+# Only needed for the `bedrock` adapter (SigV4 signing + eventstream decoding come free).
+aws = ["boto3>=1.34"]
+# Only needed for GCP service-account auth in `vertex_ai` (google-auth on a host w/o ADC).
+gcp = ["google-auth>=2.0"]
+dev = ["pytest>=8.0", "pyinstaller>=6.0"]
+
+[project.scripts]
+ascend = "shells.cli.ascend:_run"
+
+[tool.setuptools]
+packages = ["shells", "shells.cli", "runtime", "runtime.adapters", "runtime.discovery",
+            "runtime.layers", "control", "reporting", "transport"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,214 @@
+openapi: 3.0.3
+info:
+  title: Straiker Bridge — Pull-Mode Protocol
+  version: "2.0"
+  description: >
+    Machine-readable companion to README.md in this same folder. For customers
+    implementing their own bridge client (rather than running the iris-bridge binary/container)
+    to relay assessment probes to a private-network target application. Long-poll /v2/lease
+    for work, call your own target application, submit the result via /v2/result, repeat.
+servers:
+  - url: https://{host}
+    variables:
+      host:
+        default: probe-shadow.example.com
+        description: Provided per-environment by Straiker.
+security:
+  - bearerAuth: []
+paths:
+  /v2/lease:
+    post:
+      summary: Long-poll for probes addressed to your app
+      operationId: leaseProbes
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LeaseRequest"
+            examples:
+              default:
+                value: { consumer: "my-bridge-client-1", max: 10, wait_ms: 25000 }
+              minimal:
+                value: {}
+      responses:
+        "200":
+          description: >
+            Zero or more leased probes. An empty `probes` array means the long-poll timed out
+            with no work available - this is the normal case, not an error; call again.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LeaseResponse"
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v2/result:
+    post:
+      summary: Submit the response your target application gave for a leased probe
+      operationId: submitResult
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResultRequest"
+      responses:
+        "200":
+          description: Accepted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+        "400":
+          description: Missing one or more required fields.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: >
+        Per-application thin-client token, provisioned by Straiker. Determines which app's
+        probes you can lease/answer - never supplied separately in the request body.
+  schemas:
+    LeaseRequest:
+      type: object
+      properties:
+        consumer:
+          type: string
+          description: >
+            Stable identity for this client process, reused across calls. Auto-generated
+            server-side if omitted, but a crash-recovery reclaim notices a stable, reused
+            value faster than a fresh random one on every call. Use a distinct value per
+            parallel client instance.
+          example: my-bridge-client-1
+        max:
+          type: integer
+          minimum: 1
+          maximum: 50
+          default: 10
+          description: Maximum probes to return in one call. Clamped server-side to [1, 50].
+        wait_ms:
+          type: integer
+          minimum: 0
+          maximum: 55000
+          default: 25000
+          description: >
+            Long-poll hold time in milliseconds before returning with whatever's available
+            (possibly nothing). Clamped server-side to [0, 55000].
+    LeaseResponse:
+      type: object
+      required: [consumer, probes]
+      properties:
+        consumer:
+          type: string
+          description: Echoes the request's consumer (or the server-generated one, if omitted).
+        probes:
+          type: array
+          items:
+            $ref: "#/components/schemas/LeasedProbe"
+    LeasedProbe:
+      type: object
+      required: [request_id, msg_id, message]
+      properties:
+        request_id:
+          type: string
+          description: Opaque identifier for this probe. Echo verbatim in /v2/result.
+        msg_id:
+          type: string
+          description: >
+            Opaque delivery receipt for the underlying leased entry. Distinct from
+            request_id - echo verbatim in /v2/result alongside it.
+        message:
+          $ref: "#/components/schemas/ProbeMessage"
+    ProbeMessage:
+      type: object
+      required: [header, metadata, payload]
+      properties:
+        header:
+          type: object
+          properties:
+            type:
+              type: string
+              enum: [probe]
+            id:
+              type: string
+              description: Same value as the containing LeasedProbe.request_id.
+        metadata:
+          type: object
+          properties:
+            timestamp:
+              type: string
+              format: date-time
+            version:
+              type: string
+              example: "1.0.0"
+        payload:
+          type: object
+          required: [body, headers]
+          properties:
+            body:
+              description: >
+                The already-rendered request content meant for your target application -
+                whatever this turn's probe/prompt content is. Shape depends on your app's
+                configured request template.
+              nullable: false
+            headers:
+              type: object
+              additionalProperties:
+                type: string
+              description: >
+                Any headers the assessment config attached for this call. Commonly empty for
+                a bridge app, since your own client supplies its own auth to your target.
+    ResultRequest:
+      type: object
+      required: [request_id, msg_id, payload]
+      properties:
+        request_id:
+          type: string
+          description: Must match the LeasedProbe.request_id you're answering.
+        msg_id:
+          type: string
+          description: Must match the LeasedProbe.msg_id you're answering.
+        payload:
+          $ref: "#/components/schemas/ResultPayload"
+    ResultPayload:
+      type: object
+      required: [status_code, body, headers]
+      properties:
+        status_code:
+          type: integer
+          description: >
+            The real HTTP status your target application returned, or your own client's
+            synthesized status if the call to your target failed (e.g. 500, or 504 on timeout).
+        body:
+          description: Your target's actual response body (any JSON-serializable value).
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+          description: >
+            Optional passthrough of your target's response headers. Content-Length/Date are
+            stripped automatically regardless of what you send.
+    ErrorResponse:
+      type: object
+      properties:
+        detail:
+          type: string

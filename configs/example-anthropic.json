@@ -1,0 +1,28 @@
+{
+  "_comment": "Anthropic Messages API. Set $ANTHROPIC_API_KEY. Streaming? adapter sse_stream, text_path delta.text.",
+  "adapter": "direct_api",
+  "endpoint": "https://api.anthropic.com/v1/messages",
+  "method": "POST",
+  "auth": {
+    "type": "static",
+    "mode": "api_key",
+    "name": "x-api-key",
+    "value": "env:ANTHROPIC_API_KEY"
+  },
+  "headers": {
+    "Content-Type": "application/json",
+    "anthropic-version": "2023-06-01"
+  },
+  "body": {
+    "model": "claude-3-5-haiku-20241022",
+    "max_tokens": 1024,
+    "messages": [
+      {
+        "role": "user",
+        "content": "{{PROMPT}}"
+      }
+    ]
+  },
+  "response_path": "content.0.text",
+  "timeout_ms": 60000
+}

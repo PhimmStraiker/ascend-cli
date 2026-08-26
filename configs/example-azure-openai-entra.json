@@ -1,0 +1,27 @@
+{
+  "_comment": "Azure OpenAI via Entra (Azure AD) service principal. Replace <resource>/<deployment>/<tenant>; set $AZURE_CLIENT_ID, $AZURE_CLIENT_SECRET.",
+  "adapter": "direct_api",
+  "endpoint": "https://<resource>.openai.azure.com/openai/deployments/<deployment>/chat/completions?api-version=2024-06-01",
+  "method": "POST",
+  "auth": {
+    "type": "oauth2",
+    "grant": "client_credentials",
+    "token_url": "https://login.microsoftonline.com/<tenant>/oauth2/v2.0/token",
+    "client_id_ref": "env:AZURE_CLIENT_ID",
+    "client_secret_ref": "env:AZURE_CLIENT_SECRET",
+    "scope": "https://cognitiveservices.azure.com/.default"
+  },
+  "headers": {
+    "Content-Type": "application/json"
+  },
+  "body": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "{{PROMPT}}"
+      }
+    ]
+  },
+  "response_path": "choices.0.message.content",
+  "timeout_ms": 60000
+}
