@@ -50,8 +50,8 @@ All notable changes to the Ascend CLI. Newest first. Format follows
   probe and then went quiet.
 - **Results are delivered with retry, and delivery is counted separately from answering.** A failed
   `submit_result` used to be logged and dropped, so a computed result cost a target call and a ~90s
-  server reclaim, then the probe was re-issued and re-run (the cause of a run crawling for hours
-  under lease-service latency). Submissions now retry with backoff, and the relay tracks `delivered`
+  server reclaim, then the probe was re-issued and re-run (a cause of a run crawling instead of
+  progressing). Submissions now retry with backoff, and the relay tracks `delivered`
   (server-acked) separately from `answered` (handler produced a result). When `delivered` lags
   `answered`, results are being dropped — previously invisible because only `answered` was reported.
 - **`/v2/result` no longer inherits the lease long-poll timeout.** The result POST shared the
@@ -61,6 +61,19 @@ All notable changes to the Ascend CLI. Newest first. Format follows
   `SUB-ERR` columns and warns when timeouts are present, so a relay in a lease-service timeout storm
   no longer reads as healthy. `ascend bridge start` gains `--idle-timeout` so idle cleanup can be
   opted into without dropping to `runtime start`.
+- **The lease long-poll no longer times out on normal server-side hold jitter.** `/v2/lease` is a
+  long-poll — the platform holds the connection open up to `wait_ms` (25s) waiting for a probe — but
+  the client read-timeout allowed only 10s of headroom over that hold, so an ordinary long hold
+  during a probe drought was recorded as a "lease error." The margin is now 25s (`lease_margin`,
+  total ceiling 50s), so a lease read-timeout again signals a genuine problem rather than routine
+  hold jitter.
+- **Slow agentic targets are no longer cut off at ~30s.** Every HTTP/streaming adapter defaulted its
+  per-target timeout to 26–30s to "stay under the 30s bridge ceiling" — fine for a fast chatbot, but
+  it severed any agent that legitimately takes longer to answer. That ceiling was stale; the real cap
+  is the platform's ~90s probe-reclaim window. The default is now 80s (still overridable per target
+  via `timeout_ms`), sitting just under that window. Targets that answer in more than ~90s additionally
+  require the platform to extend the reclaim window (or add lease renewal) — a coordinated change the
+  client cannot make on its own.
 
 ---
 
