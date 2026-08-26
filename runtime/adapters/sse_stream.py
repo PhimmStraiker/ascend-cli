@@ -79,13 +79,13 @@ OPTIONAL CONFIG KEYS
                         (default {"path": "type", "equals": "done"})
       aggregate         "concat" (default) join the token frames, or "last"
       idle_ms           give up after this much silence between frames (default 20000)
-  timeout_ms        - overall budget (default 26000 — stay under the 30s bridge ceiling)
+  timeout_ms        - overall budget in ms (default 80000; raise for slow agentic targets, cap is the ~90s reclaim window)
   verify_tls        - set false for self-signed targets (default true)
 
 TIMEOUT BEHAVIOUR — read this before tuning
 -------------------------------------------
 Agentic targets that run tool chains can take far longer than the Ascend cloud's
-hard 30s ceiling. When the budget runs out mid-stream this adapter returns the
+platform's ~90s probe-reclaim window. When the budget runs out mid-stream this adapter returns the
 text collected SO FAR with metadata `truncated: true`, rather than failing.
 A partial agent answer is real evidence Ascend can score; "[ERROR] Timeout"
 is not. It only fails when nothing at all arrived.
@@ -233,7 +233,7 @@ class SSEStreamAdapter(BotAdapter):
         if not base_url or not chat_path:
             return self._fail("Missing required config: base_url, chat_path", start)
 
-        timeout = config.get("timeout_ms", 26000) / 1000
+        timeout = config.get("timeout_ms", 80000) / 1000
         deadline = start + timeout
         url = _join(base_url, chat_path)
         method = config.get("method", "POST").upper()

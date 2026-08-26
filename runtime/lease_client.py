@@ -46,8 +46,9 @@ class LeaseClient:
     max_probes_per_lease: int = 10
     wait_ms: int = 25000
     result_timeout: float = 20.0   # /v2/result is an ordinary POST; it must NOT inherit the
-    #                                long-poll's (wait_ms + 10)s ceiling, or a slow ack looks like
-    #                                a lease timeout and the result is dropped.
+    #                                long-poll's (wait_ms + margin)s ceiling, or a slow ack looks
+    #                                like a lease timeout and the result is dropped.
+    lease_margin: float = 25.0     # headroom over wait_ms for the /v2/lease long-poll (see below)
     max_workers: int = 10          # set to 1 for stateful/sequential targets
     qpm: Optional[int] = None      # queries-per-minute throttle (None = unlimited)
     capture_path: Optional[str] = None  # jsonl file to record every probe+result
@@ -64,7 +65,12 @@ class LeaseClient:
     def __post_init__(self) -> None:
         self.lease_url = f"{self.base_url}/v2/lease"
         self.result_url = f"{self.base_url}/v2/result"
-        self.http_timeout = (self.wait_ms / 1000) + 10
+        # /v2/lease is a LONG-POLL: the server holds the connection open up to wait_ms waiting for a
+        # probe, so a read-timeout here means the server held LONGER than we allowed — not that a
+        # probe was lost. Give the requested hold generous headroom; a tight margin turns normal
+        # server-side hold jitter during a probe drought into a "lease error" storm. Only a hold
+        # that blows past THIS ceiling is genuinely the platform holding too long.
+        self.http_timeout = (self.wait_ms / 1000) + self.lease_margin
         if self.qpm and self.qpm > 0:
             self._min_interval = 60.0 / self.qpm
         if self.capture_path:
