@@ -881,7 +881,7 @@ def _ensure_bridge(c, app, *, assessment_id=None, args=None):
         return {"app_id": app_id, "ensured": False, "skip": t["skip"]}
     r = S.start(app_id, config=t["config"], adapter=t.get("adapter"), api_key=t["key"],
                 assessment_id=assessment_id, control_token=getattr(c, "token", None),
-                control_base=getattr(args, "base", None), idle_timeout_s=0,
+                control_base=getattr(args, "base", None), idle_timeout_s=_default_idle_timeout_s(),
                 app_name=t.get("app_name"), qpm=getattr(args, "qpm", None),
                 wait_ms=getattr(args, "wait_ms", None))
     if "error" in r:
@@ -1225,6 +1225,28 @@ def cmd_assess_resume(args):
 _STARTUP_GRACE_S = 120.0     # never self-stop within this of startup (ensure-before-create, new apps)
 
 
+def _default_idle_timeout_s():
+    """Default idle-cleanup timeout for a bridge, in seconds.
+
+    OFF (0) by default: the bridge stops when its run reaches a terminal state and never idle-kills
+    a paused/stalled run — reaping during a stall was the cause of bridges dying mid-run. Set
+    $ASCEND_BRIDGE_IDLE_TIMEOUT to a positive number to opt into idle cleanup across EVERY path,
+    including the auto-managed `assess run` / `assess resume` flows that spawn the bridge themselves
+    (a `bridge start` flag can't reach those). Env-override contributed by a design-partner PR.
+    """
+    try:
+        v = int(os.environ.get("ASCEND_BRIDGE_IDLE_TIMEOUT") or 0)
+    except (TypeError, ValueError):
+        return 0
+    return v if v > 0 else 0
+
+
+def _resolve_idle(args):
+    """An explicit --idle-timeout wins (incl. an explicit 0 = force off); otherwise the env default."""
+    a = getattr(args, "idle_timeout", None)
+    return a if a is not None else _default_idle_timeout_s()
+
+
 def _reconcile_decision(assessments, *, now, started_at, last_probe_ts,
                         idle_timeout_s, control_ok):
     """The pure decision at the heart of the self-reconciling bridge: 'serve' | 'stop-terminal' |
@@ -1303,7 +1325,7 @@ def cmd_runtime_start(args):
         # goes terminal (or, if paused, after the idle timeout). It must reach the control plane, so
         # build the client DIRECTLY (never _client() — that would _die on the tenant lock).
         self_reconcile = not getattr(args, "no_self_reconcile", False)
-        idle_timeout_s = int(getattr(args, "idle_timeout", 0) or 0)
+        idle_timeout_s = _resolve_idle(args)
         tracked_id = getattr(args, "assessment_id", None)
         control = None
         if self_reconcile:
@@ -2978,7 +3000,7 @@ def cmd_relay_start(args):
                     qpm=qpm, max_workers=args.max_workers, bridge_base=args.bridge_base,
                     wait_ms=args.wait_ms, app_name=t.get("app_name"),
                     control_token=getattr(c, "token", None), control_base=getattr(args, "base", None),
-                    idle_timeout_s=int(getattr(args, "idle_timeout", 0) or 0))
+                    idle_timeout_s=_resolve_idle(args))
         results.append({"app_id": t["app_id"], "app_name": t.get("app_name"),
                         "started": "error" not in r, **({k: v for k, v in r.items() if k != "app_id"})})
     if args.json:
@@ -3133,13 +3155,15 @@ def cmd_relay_ls(args):
         print(f"\n  {sum(1 for r in rows if r['state'] == 'serving')} serving, "
               f"{sum(1 for r in rows if r['state'] != 'serving')} not")
         # A relay in a lease/result timeout storm still answers probes, so ANSWERED alone looks
-        # healthy. Make the storm loud: DELIV < ANS means results are being dropped and re-run.
+        # healthy. Every computed result (answered or failed) is submitted, so DELIV should track
+        # ANS+FAIL; a lag means results are being dropped and their probes re-run.
         storm = [r for r in rows if (r["stats"] or {}).get("lease_errors")
                  or (r["stats"] or {}).get("submit_errors")]
         if storm:
             print("  !! lease/submit timeouts present on "
-                  f"{len(storm)} bridge(s). When DELIV < ANS, results are being dropped and the")
-            print("     probes re-run — usually the Ascend lease service is slow, not the target.")
+                  f"{len(storm)} bridge(s). When DELIV < ANS+FAIL, computed results are being")
+            print("     dropped and their probes re-run. SUB-ERR and LEASE-ERR count the delivery")
+            print("     and lease failures behind it; a sustained storm is a lease/result service issue.")
     else:
         print("  no bridges on this machine")
         print("  `ascend assess run` auto-starts one; or reconcile all:  ascend bridge sync")
@@ -4264,8 +4288,12 @@ def cmd_discover(args):
     # Plain-language summary FIRST — the technical layer table is for the curious.
     for line in _describe_shape(result):
         print(f"[found] {line}", file=sys.stderr)
-    print(f"[build] confidence {result.get('overall_confidence')} · "
-          f"{', '.join(f'{k}={(v or {}).get('value')}' for k,v in layers.items() if isinstance(v,dict))}",
+    # Built as a plain join (not a nested f-string): reusing the same quote inside an f-string
+    # expression is a SyntaxError before Python 3.12, and this project supports 3.9+.
+    layer_summary = ", ".join(
+        "{}={}".format(k, (v or {}).get("value"))
+        for k, v in layers.items() if isinstance(v, dict))
+    print(f"[build] confidence {result.get('overall_confidence')} · {layer_summary}",
           file=sys.stderr)
     if result.get("unresolved"):
         print(f"[build] needs a look (low confidence): {', '.join(result['unresolved'])} — "
@@ -4870,10 +4898,11 @@ def build_parser():
                    help="long-poll hold in ms (server clamps to 0-55000)")
     s.add_argument("--assessment-id", default=None,
                    help="the assessment this bridge serves; it self-stops when that run ends")
-    s.add_argument("--idle-timeout", type=int, default=0,
-                   help="opt-in idle cleanup: seconds a paused, already-probed bridge waits before "
-                        "self-stopping. 0 (default) = never idle-stop; the bridge stops when the run "
-                        "reaches a terminal state")
+    s.add_argument("--idle-timeout", type=int, default=None,
+                   help="seconds a paused, already-probed bridge waits before self-stopping. "
+                        "0 never idle-stops (the default); the bridge stops when the run reaches a "
+                        "terminal state. $ASCEND_BRIDGE_IDLE_TIMEOUT sets this default for "
+                        "auto-managed runs.")
     s.add_argument("--no-self-reconcile", action="store_true",
                    help="do NOT self-stop on assessment completion (stay up until stopped manually)")
     s.set_defaults(func=cmd_runtime_start)
@@ -5123,10 +5152,11 @@ def build_parser():
                    help="split this total across the started bridges (protects a shared target host)")
     s.add_argument("--max-workers", type=int, default=None)
     s.add_argument("--wait-ms", type=int, default=None)
-    s.add_argument("--idle-timeout", type=int, default=0,
-                   help="opt-in idle cleanup: seconds a paused, already-probed bridge waits before "
-                        "self-stopping. 0 (default) = never idle-stop; the bridge stops when the run "
-                        "reaches a terminal state")
+    s.add_argument("--idle-timeout", type=int, default=None,
+                   help="seconds a paused, already-probed bridge waits before self-stopping. "
+                        "0 never idle-stops (the default); the bridge stops when the run reaches a "
+                        "terminal state. $ASCEND_BRIDGE_IDLE_TIMEOUT sets this default for "
+                        "auto-managed runs.")
     s.add_argument("--foreground", action="store_true",
                    help="run ONE bridge in this terminal (logs here, Ctrl-C stops it) instead of "
                         "detaching — for debugging an adapter. Needs --config.")
