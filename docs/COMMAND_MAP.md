@@ -530,12 +530,13 @@ ascend controls validate a,b --json
 
 ### `ascend doctor`
 
-preflight checks (add --api-compat to verify API fields)
+preflight checks + version-vs-latest (--api-compat, --update)
 
 
 | Flag | Value | Default | What it does |
 |---|---|---|---|
 | `--api-compat` | — | — | verify every API field this CLI depends on (drift = loud failure) |
+| `--update` | — | — | update this install if a newer release is published (git pull for a clone; prints the command for pipx/binary) |
 
 ### `ascend export`
 

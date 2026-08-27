@@ -23,6 +23,16 @@ All notable changes to the Ascend CLI. Newest first. Format follows
   bridge echoes back, and the platform attributes each probe to its assessment.
 
 ### Added
+- **`ascend doctor` reports current vs latest version, and can update in place.** doctor now shows
+  the packaged version against the latest **published GitHub release** and, when behind, prints the
+  exact upgrade command for how this copy was installed. "Latest" is deliberately the latest
+  *release* — not a tag, not `main` — so routine pushes stay invisible; an update surfaces only when
+  a release is cut. A release body may carry a `min-supported: X.Y.Z` marker (or a `[security]`
+  token): if the running version is below it, doctor flags the update as **recommended**. It is a
+  soft check and never changes doctor's exit code. `ascend doctor --update` performs the update for
+  a git-clone install (`git pull --ff-only`) and prints the command for pipx/binary installs. The
+  check is a single unauthenticated GitHub request, no PAT and no telemetry, disabled by
+  `ASCEND_NO_UPDATE_CHECK`.
 - `ascend bridge sync` — reconciles local bridges to platform assessment state (start for
   running/paused apps, stop for terminal). The manual fallback when state changed in the Console.
 - **Live run view for `ascend assess run`.** While an assessment runs, the terminal shows the Ascend
