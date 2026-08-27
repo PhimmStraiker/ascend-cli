@@ -3848,9 +3848,103 @@ def _doctor_api_compat(args):
     sys.exit(EXIT_OK if rep["ok"] else EXIT_ERROR)
 
 
+def _fetch_latest_release(timeout_s=6.0):
+    """GET the latest PUBLISHED GitHub release. One hardcoded host, unauthenticated (no PAT, no
+    telemetry), best-effort. Returns {tag,name,url,body} | {"no_release": True} | None.
+
+    "Latest" is the latest *release* on purpose (releases/latest excludes drafts/pre-releases), so
+    routine pushes and plain tags stay invisible — see runtime/selfupdate.py.
+    """
+    import selfupdate as _su
+    try:
+        import requests
+        r = requests.get(_su.RELEASES_LATEST_URL,
+                         headers={"Accept": "application/vnd.github+json",
+                                  "User-Agent": f"ascend-cli/{VERSION}"},
+                         timeout=timeout_s)
+    except Exception:
+        return None
+    if r.status_code == 404:
+        return {"no_release": True}   # repo has no published release yet
+    if r.status_code != 200:
+        return None                   # rate-limited / transient — treat as unreachable
+    try:
+        d = r.json()
+    except Exception:
+        return None
+    return {"tag": d.get("tag_name"), "name": d.get("name"),
+            "url": d.get("html_url"), "body": d.get("body")}
+
+
+def _install_context():
+    """(kind, upgrade_command) for how this copy was installed."""
+    import selfupdate as _su
+    frozen = bool(getattr(sys, "frozen", False) or getattr(sys, "_MEIPASS", None))
+    kind = _su.install_kind(frozen=frozen, repo_has_git=(REPO / ".git").exists(),
+                            module_path=str(REPO))
+    return kind, _su.update_command(kind, repo_path=str(REPO))
+
+
+def _version_state():
+    """(version-check dict, install kind, upgrade command). Never raises; never blocks doctor."""
+    import selfupdate as _su
+    ver = _su.check(VERSION, _fetch_latest_release)
+    kind, cmd = _install_context()
+    return ver, kind, cmd
+
+
+def _doctor_update(args):
+    """`ascend doctor --update` — update in place for a clone, or print the command otherwise."""
+    import subprocess
+    ver, kind, upd_cmd = _version_state()
+    st = ver["state"]
+    if st not in ("update_available", "update_recommended"):
+        reason = {"up_to_date": f"already up to date (version {ver['current']}, latest "
+                                 f"{ver['latest']})",
+                  "no_release": "no published release to update to",
+                  "skipped": f"update check skipped: {ver.get('reason')}",
+                  "unknown": f"update check unavailable: {ver.get('reason')}"}.get(st, st)
+        if args.json:
+            _out({"ok": True, "updated": False, "version": ver, "message": reason}, args)
+        else:
+            print(reason)
+        sys.exit(EXIT_OK)
+    if kind != "clone":
+        # A pipx/binary copy cannot be safely rewritten from inside its own process.
+        if args.json:
+            _out({"ok": True, "updated": False, "version": ver, "update_command": upd_cmd}, args)
+        else:
+            print(f"a newer version is available ({ver['current']} -> {ver['latest']}).")
+            print(f"  update: {upd_cmd}")
+        sys.exit(EXIT_OK)
+    if not args.json:
+        print(f"updating {ver['current']} -> {ver['latest']}  ({upd_cmd})")
+    try:
+        res = subprocess.run(["git", "-C", str(REPO), "pull", "--ff-only"],
+                             capture_output=True, text=True, timeout=120)
+    except Exception as e:
+        if args.json:
+            _out({"ok": False, "updated": False, "version": ver, "error": str(e)}, args)
+        else:
+            print(f"could not run git: {e}\n  do it manually: {upd_cmd}")
+        sys.exit(EXIT_ERROR)
+    out = ((res.stdout or "") + (res.stderr or "")).strip()
+    okp = res.returncode == 0
+    if args.json:
+        _out({"ok": okp, "updated": okp, "version": ver, "git_output": out}, args)
+    else:
+        if out:
+            print(out)
+        print(f"updated — re-run `ascend version` to confirm ({ver['latest']})." if okp
+              else f"git pull did not fast-forward (local changes or diverged). resolve, then: {upd_cmd}")
+    sys.exit(EXIT_OK if okp else EXIT_ERROR)
+
+
 def cmd_doctor(args):
     if getattr(args, "api_compat", False):
         return _doctor_api_compat(args)
+    if getattr(args, "update", False):
+        return _doctor_update(args)
     import shutil, urllib.request
     checks = []
     tok = args.token or os.environ.get("STRAIKER_PAT") or os.environ.get("STRAIKER_TOKEN")
@@ -3904,13 +3998,37 @@ def cmd_doctor(args):
         ("google-auth (vertex_ai service-account auth)", _has("google.auth")),
         ("tmux        (terminal/CLI agent targets)", shutil.which("tmux") is not None),
     ]
+    # Version vs the latest published GitHub release. A SOFT signal — being behind is never a
+    # doctor failure, so it never touches `ok`/the exit code. Fully swallowed if GitHub is
+    # unreachable or ASCEND_NO_UPDATE_CHECK is set.
+    ver, kind, upd_cmd = _version_state()
+    behind = ver["state"] in ("update_available", "update_recommended")
     if args.json:
-        _out({"ok": ok, "checks": {k: v for k, v in checks}, "optional": {k: v for k, v in soft}}, args)
+        _out({"ok": ok, "checks": {k: v for k, v in checks}, "optional": {k: v for k, v in soft},
+              "version": {"current": ver["current"], "latest": ver["latest"],
+                          "state": ver["state"], "severity": ver["severity"],
+                          "min_supported": ver.get("min_supported"), "install_method": kind,
+                          "update_command": upd_cmd if behind else None,
+                          "reason": ver.get("reason")}}, args)
     else:
         for k, v in checks:
             print(f"  [{'ok' if v else 'XX'}] {k}")
         for k, v in soft:
             print(f"  [{'ok' if v else '..'}] {k} (optional)")
+        cur, lat, st = ver["current"], ver["latest"], ver["state"]
+        if st == "up_to_date":
+            print(f"  [ok] version {cur} (latest) (optional)")
+        elif st == "update_available":
+            print(f"  [..] version {cur} -> {lat} available (optional)")
+            print(f"       update: {upd_cmd}")
+        elif st == "update_recommended":
+            floor = f" (below min-supported {ver['min_supported']})" if ver.get("min_supported") else ""
+            print(f"  [!!] version {cur} -> {lat} — UPDATE RECOMMENDED{floor} (optional)")
+            print(f"       update: {upd_cmd}")
+        elif st == "no_release":
+            print(f"  [..] version {cur} (no published release to compare) (optional)")
+        else:  # skipped / unknown
+            print(f"  [..] version {cur} (update check unavailable: {ver.get('reason')}) (optional)")
         print("doctor:", "OK" if ok else "problems found")
     sys.exit(EXIT_OK if ok else EXIT_ERROR)
 
@@ -5157,9 +5275,12 @@ def build_parser():
     s.set_defaults(func=cmd_status)
 
     s = sub.add_parser("doctor", parents=[GLOBALS], formatter_class=_Fmt,
-                       help="preflight checks (add --api-compat to verify API fields)")
+                       help="preflight checks + version-vs-latest (--api-compat, --update)")
     s.add_argument("--api-compat", action="store_true",
                    help="verify every API field this CLI depends on (drift = loud failure)")
+    s.add_argument("--update", action="store_true",
+                   help="update this install if a newer release is published "
+                        "(git pull for a clone; prints the command for pipx/binary)")
     s.set_defaults(func=cmd_doctor)
     sub.add_parser("version", parents=[GLOBALS], formatter_class=_Fmt, help="print version").set_defaults(func=lambda a: print(VERSION))
     return p
