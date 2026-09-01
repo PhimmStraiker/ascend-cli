@@ -432,6 +432,30 @@ def cmd_app_create(args):
                  error_code="no_scorable_controls")
         ctrl = v["valid"] or ctrl
 
+    if not ctrl:
+        # The platform accepts exactly ONE shape for the control selection: `custom` plus an
+        # explicit id list. Verified live against v3: `control_type: "all"` is rejected 400
+        # ("rejected by the upstream service") and so is omitting the field. So "test everything"
+        # has to be spelled out. Resolve the catalog here rather than send a payload that can
+        # never succeed — `app create --type bridge` with no --controls used to fail 100% of the
+        # time with an error that named none of this.
+        try:
+            raw = c.list_controls()
+            # the catalog comes back as {"object", "controls": [...], "categories": [...]}
+            rows = (raw.get("controls") if isinstance(raw, dict) else None) or _unwrap_list(raw)
+            ctrl = [r.get("id") for r in rows
+                    if isinstance(r, dict) and r.get("id") and not r.get("deprecated")]
+        except Exception as e:
+            _die(f"no --controls given, and the control catalog could not be read "
+                 f"({type(e).__name__}). The platform requires an explicit control set.\n"
+                 f"  list them:  ascend controls list",
+                 error_code="controls_unavailable")
+        if not ctrl:
+            _die("no --controls given and the control catalog came back empty — the platform "
+                 "requires an explicit control set.\n  list them:  ascend controls list",
+                 error_code="controls_unavailable")
+        _say(args, f"no --controls given — registering with all {len(ctrl)} catalog controls")
+
     sev = _parse_kv_pairs(getattr(args, "category_severity", None), "category-severity")
     if sev:
         clamped = api.clamped_severities(sev)
@@ -493,6 +517,17 @@ def cmd_app_create(args):
 
     _say(args, f"Creating {_type_label(at)} application {args.name!r}...")
     app = c.create_app(spec)
+    if app.get("recovered"):
+        # The platform created it but the response was lost in transit. The app is real; for a
+        # bridge app its one-time key went with the dropped response, so it can never be served.
+        print(f"note: {app.get('recovery_note')} — not re-created.", file=sys.stderr)
+        if at == "thin" and not app.get("thin_api_key"):
+            _die(f"application {app.get('id')} exists, but its one-time bridge key was lost with "
+                 f"the dropped response, so no bridge can ever serve it.\n"
+                 f"  delete it and create again:\n"
+                 f"    ascend app delete {app.get('id')}\n"
+                 f"    ascend app create --type bridge --name {args.name!r}",
+                 error_code="bridge_key_lost")
     _say(args, f"created {args.name!r}  ({app.get('id')})", done=True)
     stored = False
     tc = app.get("thin_api_key")
@@ -901,6 +936,44 @@ def _ensure_note(res):
     return None
 
 
+def _bind_assessment(app_id, assessment_id):
+    """Tell a running relay which assessment it is serving. Never raises.
+
+    A relay has to be up BEFORE the run is created (probes scheduled with no relay listening go
+    unanswered and score a false pass), so it cannot learn its assessment id from argv. Writing the
+    id into the relay's status file binds it, and the bridge's reconcile then scopes its stop
+    decision to THIS run instead of inferring "done" from whatever else ran on the app. Called on
+    every poll tick: the relay rewrites the same file each heartbeat, so a lost race just re-binds
+    on the next tick.
+    """
+    if not (app_id and assessment_id):
+        return
+    try:
+        import supervisor as S
+        rec = S.read_status(app_id) or {}
+        if rec and rec.get("assessment_id") != assessment_id:
+            rec["assessment_id"] = assessment_id
+            S.write_status(app_id, rec)
+    except Exception:
+        pass
+
+
+def _release_bridge(app_id, ensure):
+    """Stop a relay THIS command started, once its run is over. Never raises.
+
+    Only a bridge we started is ours to stop: a relay the operator is running themselves (a
+    standalone `runtime start`, or one shared by another run) was reused, not owned, and killing it
+    would cut probes out from under them.
+    """
+    if not (ensure or {}).get("started"):
+        return None
+    try:
+        import supervisor as S
+        return S.stop(app_id)
+    except Exception:
+        return None
+
+
 def _supervise_bridge(c, app, *, assessment_id=None, args=None):
     """Watchdog tick for a followed run: if a bridge-type app's relay has died mid-assessment,
     restart it so probes keep flowing — a dead bridge scores a FALSE PASS. `_ensure_bridge` is
@@ -967,6 +1040,9 @@ def cmd_assess_run(args):
         # restarted so probes keep flowing; a live bridge is a no-op and a native app is skipped.
         _sup_app = _app_by_id(c, appid)
         def _supervised_tick(status, prog, a):
+            # Bind the relay to THIS run as soon as the platform names it, so the bridge scopes its
+            # own stop decision to the run it is actually serving.
+            _bind_assessment(appid, (a or {}).get("id"))
             note = _supervise_bridge(c, _sup_app, args=args)
             if note:
                 print(f"  {note}", file=sys.stderr)
@@ -975,12 +1051,21 @@ def cmd_assess_run(args):
             elif not args.json:
                 _tick(status, prog, a)
         feed_interval = min(args.interval, 4) if tw.enabled else args.interval
-        with tw:
-            res = c.run(appid, args.name, wait=True,
-                        interval=feed_interval, timeout=args.timeout, on_tick=_supervised_tick)
+        try:
+            with tw:
+                res = c.run(appid, args.name, wait=True,
+                            interval=feed_interval, timeout=args.timeout, on_tick=_supervised_tick)
+        finally:
+            # This run is over (or it failed): release the relay WE started. A reused or standalone
+            # relay belongs to someone else and is left running.
+            _release_bridge(appid, ensure)
     else:
         res = c.run(appid, args.name, wait=False,
                     interval=args.interval, timeout=args.timeout, on_tick=None)
+        # --no-wait leaves the relay serving with nobody watching it, so bind it to this run: that
+        # is what lets it stop itself correctly when THIS assessment finishes (and only then).
+        if isinstance(res, dict):
+            _bind_assessment(appid, res.get("assessment_id"))
     if isinstance(res, dict) and res.get("assessment_id"):
         _say(args, f"assessment started  ({res['assessment_id']})", done=True)
     import api
@@ -1284,7 +1369,7 @@ def _resolve_idle(args):
 
 
 def _reconcile_decision(assessments, *, now, started_at, last_probe_ts,
-                        idle_timeout_s, control_ok, terminal_since=None):
+                        idle_timeout_s, control_ok, terminal_since=None, bound_id=None):
     """The pure decision at the heart of the self-reconciling bridge: 'serve' | 'stop-terminal' |
     'stop-idle'. No I/O, so it is unit-tested directly.
 
@@ -1302,11 +1387,23 @@ def _reconcile_decision(assessments, *, now, started_at, last_probe_ts,
     if now < (started_at or 0) + _STARTUP_GRACE_S:
         return "serve"                        # startup grace: ensure-before-create / brand-new app
     from api import TERMINAL_STATUSES
+    # A bridge answers for the ONE assessment it was started for. Judging by "every assessment on
+    # the app" (or the newest one) is what reaped bridges mid-run: an unrelated finished run, or a
+    # gap before the next run exists, reads as "all done" while live probes are still being served.
+    # So scope the decision to the bound run; if it is not in the list yet, that is unverifiable —
+    # keep serving. With NO bound run the bridge cannot prove anything finished, so it never
+    # self-stops on terminal (this is what makes a standalone `runtime start` persistent).
+    if bound_id:
+        assessments = [a for a in assessments if a.get("id") == bound_id]
+        if not assessments:
+            return "serve"
     non_terminal = [a for a in assessments
                     if str(a.get("status", "")).lower() not in TERMINAL_STATUSES]
     if not non_terminal:
-        # Every assessment is EXPLICITLY terminal (or there are none). Stop only after the condition
-        # has held past the grace — a transient between-round gap must not reap the bridge.
+        if not bound_id:
+            return "serve"
+        # The bound run is EXPLICITLY terminal. Stop only after that has held past the grace — a
+        # transient between-round gap must not reap the bridge.
         if terminal_since is None:
             return "serve"
         return "stop-terminal" if (now - terminal_since) >= _TERMINATION_GRACE_S else "serve"
@@ -1322,19 +1419,53 @@ def _reconcile_decision(assessments, *, now, started_at, last_probe_ts,
 
 
 def _reconcile_step(assessments, *, now, started_at, last_probe_ts, idle_timeout_s,
-                    control_ok, terminal_since):
+                    control_ok, terminal_since, bound_id=None):
     """One reconcile iteration for the bridge beat loop. Tracks when the all-terminal/empty
     condition began (so the termination grace can ride through a transient gap between recon
     rounds), then decides. Returns (decision, terminal_since); the loop carries terminal_since
     across iterations. Pure, so the whole lifecycle is unit-testable."""
     from api import TERMINAL_STATUSES
-    all_terminal = not any(
-        str(a.get("status", "")).lower() not in TERMINAL_STATUSES for a in assessments)
+    scoped = [a for a in assessments if a.get("id") == bound_id] if bound_id else assessments
+    all_terminal = bool(scoped) and not any(
+        str(a.get("status", "")).lower() not in TERMINAL_STATUSES for a in scoped)
     terminal_since = (terminal_since or now) if all_terminal else None
     decision = _reconcile_decision(
         assessments, now=now, started_at=started_at, last_probe_ts=last_probe_ts,
-        idle_timeout_s=idle_timeout_s, control_ok=control_ok, terminal_since=terminal_since)
+        idle_timeout_s=idle_timeout_s, control_ok=control_ok, terminal_since=terminal_since,
+        bound_id=bound_id)
     return decision, terminal_since
+
+
+def _relay_app_id(args, key):
+    """The app id a relay registers under.
+
+    A relay's identity is the APP it serves. This used to fall back to the CONFIG NAME, so a
+    manually started `runtime start --config acme` registered itself as "acme" instead of
+    "aapp_…". `is_serving(app_id)` then could not see it, the auto-lifecycle concluded no bridge
+    was up, and it spawned a SECOND relay for the same app — two consumers splitting one app's
+    probes, which presents exactly as "probes stopped flowing". Resolve the real id, and only fall
+    back to the config name when nothing else identifies the app.
+    """
+    env_id = os.environ.get("ASCEND_RELAY_APP_ID")      # set by supervisor.start for its children
+    if env_id:
+        return env_id
+    app = str(getattr(args, "app", "") or "")
+    if app.startswith("aapp_"):
+        return app
+    try:
+        import creds as C
+        rows = C.load_all() or {}
+        if app:                                          # a name was given — match the stored name
+            for aid, rec in rows.items():
+                if (rec.get("app_name") or "") == app:
+                    return aid
+        if key:                                          # else identify by the bridge key in use
+            for aid, rec in rows.items():
+                if rec.get("thin_api_key") == key:
+                    return aid
+    except Exception:
+        pass
+    return args.config
 
 
 def cmd_runtime_start(args):
@@ -1380,7 +1511,7 @@ def cmd_runtime_start(args):
     if status_file:
         import threading
         import supervisor as S
-        app_id = os.environ.get("ASCEND_RELAY_APP_ID") or args.config
+        app_id = _relay_app_id(args, key)
 
         # Self-reconcile: the bridge polls its app's assessment state and self-stops when the app
         # goes terminal (or, if paused, after the idle timeout). It must reach the control plane, so
@@ -1405,28 +1536,40 @@ def cmd_runtime_start(args):
             terminal_since = None
             while True:
                 rec = S.read_status(app_id) or {}
+                # The bridge is often started BEFORE its assessment exists (ensure-before-create),
+                # so the id cannot come from argv alone: the parent writes the real id into this
+                # status file once the run is created, and we pick it up here. That binding is what
+                # scopes the stop decision to OUR run instead of "whatever ran on this app last".
+                bound = tracked_id or rec.get("assessment_id")
                 rec.update({"app_id": app_id, "config": args.config, "adapter": args.adapter,
                             "pid": os.getpid(), "ts": time.time(),
                             "state": "serving" if not client.fatal_error else "fatal",
                             "stats": dict(client.stats),
-                            "assessment_id": tracked_id or rec.get("assessment_id"),
+                            "assessment_id": bound,
                             "fatal_error": client.fatal_error})
                 rec.setdefault("started_at", time.time())
+                # Heartbeat FIRST. Liveness is judged by heartbeat age, and the reconcile below is a
+                # network call that can take as long as the API timeout; writing after it let a slow
+                # control plane push a perfectly healthy bridge toward "stale".
+                try:
+                    S.write_status(app_id, rec)
+                except Exception:
+                    pass
                 # Reconcile on a slower cadence (~every 3rd beat = 30s) to bound control-plane load.
                 if control is not None and n % 3 == 0:
                     try:
                         asmts = _assessments_for(control, app_id)
                         rec["reconcile_error"] = None
                         cur = None
-                        if tracked_id:
-                            cur = next((a for a in asmts if a.get("id") == tracked_id), None)
+                        if bound:
+                            cur = next((a for a in asmts if a.get("id") == bound), None)
                         cur = cur or (_latest(asmts)[0] if asmts else None)
                         rec["asmt_status"] = (cur or {}).get("status")
                         decision, terminal_since = _reconcile_step(
                             asmts, now=time.time(), started_at=rec.get("started_at"),
                             last_probe_ts=client.last_probe_ts,
                             idle_timeout_s=idle_timeout_s, control_ok=True,
-                            terminal_since=terminal_since)
+                            terminal_since=terminal_since, bound_id=bound)
                     except Exception as e:
                         # Could not verify — keep serving. Never self-kill on a transient error:
                         # an unanswered probe scores a FALSE PASS.

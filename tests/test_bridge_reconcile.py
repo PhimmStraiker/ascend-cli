@@ -24,9 +24,10 @@ GRACE = ascend._TERMINATION_GRACE_S
 
 
 def _dec(assessments, *, now=NOW, started_at=0.0, last_probe_ts=0.0, control_ok=True,
-         idle_timeout_s=IDLE, terminal_since=None):
+         idle_timeout_s=IDLE, terminal_since=None, bound_id=None):
     return D(assessments, now=now, started_at=started_at, last_probe_ts=last_probe_ts,
-             idle_timeout_s=idle_timeout_s, control_ok=control_ok, terminal_since=terminal_since)
+             idle_timeout_s=idle_timeout_s, control_ok=control_ok, terminal_since=terminal_since,
+             bound_id=bound_id)
 
 
 # ---- false-pass safety: never self-kill when state is unknown ---------------------------------
@@ -50,24 +51,45 @@ def test_unknown_recon_status_never_reaps():
         assert _dec([{"status": status}], terminal_since=NOW - 9999) == "serve", status
 
 
-# ---- ordinary lifecycle: stop only on a DURABLY terminal run -----------------------------------
-def test_all_terminal_past_grace_stops():
-    assert _dec([{"status": "completed"}, {"status": "failed"}],
-                terminal_since=NOW - (GRACE + 10)) == "stop-terminal"
+# ---- the bound-run rule: a bridge stops only for the run it was started for --------------------
+def test_unbound_bridge_never_self_stops():
+    # With no bound assessment the bridge cannot prove ITS work is finished, so a terminal-looking
+    # app-wide picture must never reap it. This is what makes a standalone `runtime start`
+    # persistent, and what stops an unrelated finished run from killing a live relay.
+    assert _dec([{"id": "a1", "status": "completed"}],
+                terminal_since=NOW - (GRACE + 10)) == "serve"
+    assert _dec([], terminal_since=NOW - (GRACE + 10)) == "serve"
 
 
-def test_all_terminal_within_grace_serves():
-    # all terminal, but only just now -> ride out the grace (could be a between-round gap)
-    assert _dec([{"status": "completed"}], terminal_since=NOW - 1) == "serve"
+def test_another_runs_completion_does_not_reap_a_bound_bridge():
+    # The bound run is still going; a DIFFERENT assessment on the same app finished. Judging by
+    # "every assessment on the app" is exactly what reaped bridges mid-run.
+    assert _dec([{"id": "mine", "status": "running"}, {"id": "other", "status": "completed"}],
+                bound_id="mine", terminal_since=NOW - (GRACE + 10)) == "serve"
+
+
+def test_bound_run_absent_from_the_list_serves():
+    # Our run is not in the payload (propagation lag, partial page). Unverifiable => keep serving.
+    assert _dec([{"id": "other", "status": "completed"}], bound_id="mine",
+                terminal_since=NOW - (GRACE + 10)) == "serve"
+
+
+# ---- ordinary lifecycle: stop only on a DURABLY terminal BOUND run ------------------------------
+def test_bound_run_terminal_past_grace_stops():
+    assert _dec([{"id": "mine", "status": "completed"}, {"id": "other", "status": "failed"}],
+                bound_id="mine", terminal_since=NOW - (GRACE + 10)) == "stop-terminal"
+
+
+def test_bound_run_terminal_within_grace_serves():
+    # terminal, but only just now -> ride out the grace (could be a between-round gap)
+    assert _dec([{"id": "mine", "status": "completed"}], bound_id="mine",
+                terminal_since=NOW - 1) == "serve"
 
 
 def test_terminal_since_none_serves():
-    # the caller has not yet observed the all-terminal condition -> never stop this tick
-    assert _dec([{"status": "completed"}], terminal_since=None) == "serve"
-
-
-def test_no_assessments_past_grace_stops():
-    assert _dec([], terminal_since=NOW - (GRACE + 10)) == "stop-terminal"
+    # the caller has not yet observed the terminal condition -> never stop this tick
+    assert _dec([{"id": "mine", "status": "completed"}], bound_id="mine",
+                terminal_since=None) == "serve"
 
 
 def test_no_assessments_within_grace_serves():
@@ -119,20 +141,28 @@ def test_mixed_paused_and_running_serves():
 def test_reconcile_step_rides_through_recon_lifecycle():
     step = ascend._reconcile_step
     t, ts = 1000.0, None
-    # multiple recon rounds: running probes, an intermediate status between rounds, then a brief
-    # gap with no assessment for one tick — every one of these used to kill the bridge.
-    for snap in ([{"status": "running"}], [{"status": "reconnaissance"}], [{"status": "running"}],
-                 [{"status": "analyzing"}], [{"status": "running"}], [], [{"status": "running"}]):
+    # Multiple recon rounds: running probes, an intermediate status between rounds, a brief gap with
+    # no assessment for one tick, and `paused` — which is NOT hypothetical: a live run against a
+    # slow target was observed going running -> paused (the platform auto-pauses when probes keep
+    # failing) and staying there for 300s+. Every one of these must keep the bridge alive.
+    for snap in ([{"id": "mine", "status": "running"}],
+                 [{"id": "mine", "status": "reconnaissance"}],
+                 [{"id": "mine", "status": "running"}],
+                 [{"id": "mine", "status": "analyzing"}],
+                 [{"id": "mine", "status": "paused"}],
+                 [],
+                 [{"id": "mine", "status": "running"}]):
         t += 30.0
         decision, ts = step(snap, now=t, started_at=0.0, last_probe_ts=t - 5,
-                            idle_timeout_s=0, control_ok=True, terminal_since=ts)
+                            idle_timeout_s=0, control_ok=True, terminal_since=ts, bound_id="mine")
         assert decision == "serve", (snap, decision)
-    # the run genuinely completes and STAYS completed past the grace -> stop exactly once
+    # the bound run genuinely completes and STAYS completed past the grace -> stop exactly once
     stopped_at = None
     for _ in range(int(GRACE / 30) + 3):
         t += 30.0
-        decision, ts = step([{"status": "completed"}], now=t, started_at=0.0, last_probe_ts=t - 5,
-                            idle_timeout_s=0, control_ok=True, terminal_since=ts)
+        decision, ts = step([{"id": "mine", "status": "completed"}], now=t, started_at=0.0,
+                            last_probe_ts=t - 5, idle_timeout_s=0, control_ok=True,
+                            terminal_since=ts, bound_id="mine")
         if decision == "stop-terminal":
             stopped_at = t
             break
