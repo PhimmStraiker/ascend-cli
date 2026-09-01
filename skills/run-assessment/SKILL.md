@@ -70,9 +70,40 @@ mid-run if you need to throttle the target:
 ascend assess pause  --app <app> --assessment <id>
 ascend assess resume --app <app> --assessment <id>
 ```
-Watch the **bridge** shell too — if probes stop being serviced (no leases, target
-errors), the assessment stalls; a Mac sleeping silently drops the connection, so
-keep the runtime host awake for long runs.
+### 4b. Read the bridge, not just the assessment
+
+`ascend bridge ls` is the ground truth for whether anything is actually being tested:
+
+```
+ascend bridge ls        # STATE, ANS (answered), DELIV, FAIL, LEASE-ERR per relay
+```
+
+**`ANS` (answered) is the number that matters** — probes the target answered with a 200.
+`FAIL` counts probes the adapter could not complete.
+
+- `answered = 0` while `failed` climbs → the **adapter** is failing every probe, not the
+  bridge. Two causes, in order of likelihood: the target takes longer than the configured
+  `timeout_ms` (agentic targets take 2-3 minutes and often much more), or a short-lived
+  credential expired mid-run. Fix the adapter (see **build-adapter**: Layer 3, Timeouts).
+  Restarting the bridge will not help.
+- `answered = 0` and nothing moving at all → no relay is serving this app. Unanswered
+  probes are not findings: the run finishes **clean having measured nothing** (false pass).
+
+**The trap: a run that goes `paused` by itself.** When probes keep failing the platform
+**auto-pauses the assessment**. Observed live: a slow target under a too-short timeout
+failed 5/5 probes, the run flipped `running → paused` and sat there while the bridge stayed
+perfectly healthy. That reads as "the bridge died" and it is not — it is an adapter failure
+the platform reacted to. Diagnose in this order:
+
+1. `ascend bridge ls` → is a relay `serving`, and is `ANS` above zero?
+2. If `ANS = 0`, fix the adapter (timeout / auth). Do **not** restart the bridge.
+3. Then `ascend assess resume --app <app> --assessment <id>`.
+
+A relay is bound to the assessment it was started for and stays up for that whole run,
+including while it is paused. A standalone `ascend runtime start` stays up until stopped.
+Never run two relays for one app — they split that app's probes between them.
+
+Keep the host awake for long runs; a sleeping Mac drops the connection.
 
 ### 5. Pull results
 ```
