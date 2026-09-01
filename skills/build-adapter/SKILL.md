@@ -109,9 +109,30 @@ into 100% probe failures, which then trips the platform's auto-pause. Measured l
 110s target under a 20s config timeout failed *every* probe.
 
 Only pin `timeout_ms` when you have measured the target and want to *cap* it. Otherwise
-leave it out and let the runtime default apply, and tune per-environment with
-`$ASCEND_TARGET_TIMEOUT_MS`. A ceiling (`$ASCEND_TARGET_MAX_TIMEOUT_MS`) still applies so
-one hung target cannot hold a worker open for the whole run — slow is fine, hung is not.
+leave it out and let the runtime default apply (it covers a **10 minute** reply), and tune
+per-environment with `$ASCEND_TARGET_TIMEOUT_MS`. A ceiling
+(`$ASCEND_TARGET_MAX_TIMEOUT_MS`) still applies so one hung target cannot hold a worker
+open for the whole run — slow is fine, hung is not.
+
+### The ceiling you cannot configure away
+
+The adapter's `timeout_ms` is not the binding constraint. **The platform gives a bridge a
+bounded window to return a result** — `probe_shadow`'s `BRIDGE_RESPONSE_TIMEOUT`, on the
+order of **100-120s** — and the bridge deliberately gives up just under it
+(`_DEFAULT_BRIDGE_RESPONSE_TIMEOUT_S`, 110s) rather than hold a worker open for a result
+nobody will accept.
+
+So a target that reliably takes **longer than ~110s cannot be assessed through the bridge
+today**, no matter how large you make `timeout_ms`. That is a platform-side limit, not an
+adapter bug. When you hit it:
+
+- Do **not** keep raising `timeout_ms` — through the bridge it changes nothing.
+- Say so explicitly rather than reporting the target as failing its probes.
+- The platform window has to be raised first; then match it with
+  `$ASCEND_BRIDGE_RESPONSE_TIMEOUT_MS` (or `bridge_response_timeout_ms` in the config).
+
+`timeout_ms` still matters everywhere else — `adapter validate`, `chat`, and any target
+*under* the window — which is where a pinned 20-30s value silently fails everything.
 
 ## Mobile apps
 
