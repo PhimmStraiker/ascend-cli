@@ -57,7 +57,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from .base import BotAdapter
+from .base import BotAdapter, resolve_timeout_s
 
 logger = logging.getLogger(__name__)
 
@@ -238,7 +238,7 @@ class CopilotStudioAdapter(BotAdapter):
         if not user_id.startswith("dl_"):
             user_id = f"dl_{user_id}"
         locale = config.get("locale", "en-US")
-        timeout = config.get("timeout_ms", 60000) / 1000
+        timeout = resolve_timeout_s(config)
         poll_interval = config.get("poll_interval_ms", 1000) / 1000
         bot_settle = config.get("bot_settle_ms", 1500) / 1000
         deadline = start + timeout

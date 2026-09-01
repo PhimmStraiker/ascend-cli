@@ -8,6 +8,19 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 ## [Unreleased]
 
 ### Fixed
+- **The target timeout no longer assumes a fast target.** Adapters each hardcoded their own 30-60s
+  ceiling and `adapter build` pinned the *discovery* timeout (often 20-30s) into the config it
+  wrote. Agentic targets routinely reply in 2-3 minutes and some take far longer, so those values
+  turned a healthy slow target into 100% probe failures — and because failed probes make the
+  platform auto-pause the assessment, it presented as "the bridge broke". There is now one resolver
+  (`adapters.base.resolve_timeout_s`): the config's `timeout_ms` wins, else
+  `$ASCEND_TARGET_TIMEOUT_MS`, else an agentic-safe default, always clamped to
+  `$ASCEND_TARGET_MAX_TIMEOUT_MS` so a genuinely hung target still cannot hold a worker open for
+  the whole run. `adapter build` no longer pins a short value.
+- **Dead relay state is pruned.** Every app ever served left pid/status files behind, so `bridge ls`
+  filled with corpses (one was still listed 173 hours after it died) and a relay that was genuinely
+  wrong got lost in the noise. Relays dead for more than a day are dropped from the listing;
+  recently-dead ones are kept for triage, and logs are never removed.
 - **A bridge now stops only for the assessment it is bound to.** The relay used to infer "my work is
   done" from *every* assessment on the app (or simply the newest one). A finished unrelated run, or
   a gap before the next run existed, therefore read as "all done" and reaped a relay that was still

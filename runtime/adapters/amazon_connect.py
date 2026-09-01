@@ -35,7 +35,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from .base import BotAdapter
+from .base import BotAdapter, resolve_timeout_s
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ class AmazonConnectAdapter(BotAdapter):
         if not token_endpoint or not start_endpoint:
             return self._fail("token_endpoint and start_endpoint are required", start)
 
-        timeout = config.get("timeout_ms", 45000) / 1000
+        timeout = resolve_timeout_s(config)
         poll_interval = config.get("poll_interval_ms", 1500) / 1000
         poll_timeout = config.get("poll_timeout_ms", 30000) / 1000
         reuse_session = config.get("reuse_session", False)

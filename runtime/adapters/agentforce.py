@@ -57,7 +57,7 @@ from typing import Any, Dict, Optional
 
 import requests
 
-from .base import BotAdapter
+from .base import BotAdapter, resolve_timeout_s
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +101,7 @@ class AgentforceAdapter(BotAdapter):
                 raise ValueError("Missing client_id/client_secret (or their *_env references)")
 
             token_url = f"{instance_url}/services/oauth2/token"
-            timeout = config.get("timeout_ms", 60000) / 1000
+            timeout = resolve_timeout_s(config)
             logger.info("Agentforce: minting client_credentials token")
             resp = requests.post(
                 token_url,
@@ -194,7 +194,7 @@ class AgentforceAdapter(BotAdapter):
         if missing:
             return self._fail(f"Missing required config: {', '.join(missing)}", start)
 
-        timeout = config.get("timeout_ms", 60000) / 1000
+        timeout = resolve_timeout_s(config)
 
         try:
             token = self._get_token(config)

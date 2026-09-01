@@ -48,7 +48,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from .base import BotAdapter
+from .base import BotAdapter, resolve_timeout_s
 from .websocket_direct import _json_escape, _dot
 
 logger = logging.getLogger(__name__)
@@ -83,7 +83,7 @@ class SessionPollAdapter(BotAdapter):
     async def send_prompt(self, prompt: str, config: Dict[str, Any]) -> Dict[str, Any]:
         start = time.time()
         shared_headers = {"Content-Type": "application/json", **(config.get("headers") or {})}
-        http_timeout = config.get("timeout_ms", 60000) / 1000
+        http_timeout = resolve_timeout_s(config)
         create = config.get("create") or {}
         send = config.get("send") or {}
         poll = config.get("poll") or {}
