@@ -19,8 +19,11 @@ from typing import Any, Dict, Optional
 # than tight, and both ends are tunable without editing code.
 #
 # There is still a ceiling, because a genuinely hung target must not pin a worker forever.
-DEFAULT_TARGET_TIMEOUT_MS = 600_000        # 10 min — a real agent took exactly this and a 5 min
-#                                            default failed it at 300s; "slow" has no small bound
+# 12 min, deliberately ABOVE the ~10 min envelope we claim to support. A default equal to the
+# target's latency has no headroom and loses the race: a live 10-minute target failed under a
+# 600_000 default because the reply landed a couple of seconds the wrong side of it. A timeout is
+# an upper bound, so it has to sit above the slowest reply we intend to serve, not on top of it.
+DEFAULT_TARGET_TIMEOUT_MS = 720_000
 MAX_TARGET_TIMEOUT_MS = 900_000            # 15 min — beyond this the target is hung, not slow
 
 
