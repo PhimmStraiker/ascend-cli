@@ -518,23 +518,24 @@ def cmd_app_create(args):
     _say(args, f"Creating {_type_label(at)} application {args.name!r}...")
     app = c.create_app(spec)
     if app.get("recovered"):
-        # The platform created it but the response was lost in transit. The app is real; for a
-        # bridge app its one-time key went with the dropped response, so it can never be served.
+        # The platform created it but the response was lost in transit. The app is real.
         print(f"note: {app.get('recovery_note')} — not re-created.", file=sys.stderr)
-        if at == "thin" and not app.get("thin_api_key"):
-            _die(f"application {app.get('id')} exists, but its one-time bridge key was lost with "
-                 f"the dropped response, so no bridge can ever serve it.\n"
-                 f"  delete it and create again:\n"
-                 f"    ascend app delete {app.get('id')}\n"
-                 f"    ascend app create --type bridge --name {args.name!r}",
-                 error_code="bridge_key_lost")
     _say(args, f"created {args.name!r}  ({app.get('id')})", done=True)
     stored = False
     tc = app.get("thin_api_key")
+    if at == "thin" and not tc and app.get("id"):
+        # The bridge key is NOT write-once: the platform returns it on GET and in the app list as
+        # well as at creation (verified). So a create response that arrived without it — a dropped
+        # or truncated response — costs nothing. Read it back rather than making the operator
+        # delete a perfectly good application and start over.
+        try:
+            tc = (c.get_app(app["id"]) or {}).get("thin_api_key")
+        except Exception:
+            tc = None
     if at == "thin":
-        # The API returns this key exactly ONCE. If it is absent (an API change, a wrong
-        # api_type), storing None would print "stored" and leave an app no bridge can ever
-        # serve. Fail loudly.
+        # By this point the key came from the create response or was read back off the app. If it
+        # is STILL missing (an API change, a wrong api_type), storing None would print "stored" and
+        # leave an app no bridge can ever serve. Fail loudly.
         _require_thin_key(tc, app.get("id"))
         try:
             import creds as C
