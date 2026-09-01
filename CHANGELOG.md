@@ -7,6 +7,16 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ## [Unreleased]
 
+### Known limitation — slow targets are bounded by the platform, not the CLI
+The platform gives a bridge a bounded window to return a probe result (`probe_shadow`'s
+`BRIDGE_RESPONSE_TIMEOUT`, on the order of 100-120s), and the bridge gives up just under it rather
+than hold a worker open for a result nobody will accept. **A target that reliably takes longer than
+~110s cannot be assessed through the bridge today**, whatever the adapter's `timeout_ms` says —
+agentic targets that take 2-3 minutes are already past it. Raising the adapter timeout alone does
+not help and only wastes a target call. The server-side window has to be raised first; the bridge
+side is now configurable to match, via `bridge_response_timeout_ms` in the config or
+`$ASCEND_BRIDGE_RESPONSE_TIMEOUT_MS` (default 110s, previously a hardcoded 110s).
+
 ### Fixed
 - **The target timeout no longer assumes a fast target.** Adapters each hardcoded their own 30-60s
   ceiling and `adapter build` pinned the *discovery* timeout (often 20-30s) into the config it
@@ -14,9 +24,11 @@ All notable changes to the Ascend CLI. Newest first. Format follows
   turned a healthy slow target into 100% probe failures — and because failed probes make the
   platform auto-pause the assessment, it presented as "the bridge broke". There is now one resolver
   (`adapters.base.resolve_timeout_s`): the config's `timeout_ms` wins, else
-  `$ASCEND_TARGET_TIMEOUT_MS`, else an agentic-safe default, always clamped to
+  `$ASCEND_TARGET_TIMEOUT_MS`, else a default that covers a **10 minute** reply, always clamped to
   `$ASCEND_TARGET_MAX_TIMEOUT_MS` so a genuinely hung target still cannot hold a worker open for
-  the whole run. `adapter build` no longer pins a short value.
+  the whole run. `adapter build` no longer pins a short value. The default was raised from 5 to 10
+  minutes after a live 10-minute target failed at exactly the 5 minute mark — "slow" has no small
+  bound, so the ceiling, not the default, is what guards against a hung target.
 - **Dead relay state is pruned.** Every app ever served left pid/status files behind, so `bridge ls`
   filled with corpses (one was still listed 173 hours after it died) and a relay that was genuinely
   wrong got lost in the noise. Relays dead for more than a day are dropped from the listing;

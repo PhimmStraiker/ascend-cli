@@ -9,6 +9,7 @@ chunked text/json framing), multi-step session APIs, browser widgets, etc.
 """
 import copy
 import logging
+import os
 import time
 from typing import Any, Dict, Optional, Tuple
 
@@ -21,15 +22,44 @@ logger = logging.getLogger("ascendbridge.call_target")
 # 1h Entra/OAuth token TTL, so a long assessment never sends an expired token.
 _DEFAULT_AUTH_REFRESH_S = 2700.0
 
+# How long the bridge waits for the adapter before abandoning one probe.
+#
+# This is NOT a free choice, and raising it alone does not make a slow target work. The PLATFORM
+# gives a bridge a bounded window to return a result (probe_shadow's BRIDGE_RESPONSE_TIMEOUT, on the
+# order of 100-120s); a result delivered after that window is wasted work — the target call was
+# spent, the worker was held, and nothing is scored. So the default sits just under that window and
+# fails fast instead.
+#
+# It is configurable because the window is a server-side constant that can be changed: for agentic
+# targets that legitimately take 2-3 minutes or more, the platform side has to be raised FIRST, and
+# then this is raised to match. Until then a target slower than this window cannot be assessed
+# through the bridge, whatever the adapter's own `timeout_ms` says.
+_DEFAULT_BRIDGE_RESPONSE_TIMEOUT_S = 110.0
+
+
+def _bridge_response_timeout_s(config: Optional[Dict[str, Any]]) -> float:
+    """Per-probe ceiling for the bridge: config `bridge_response_timeout_ms`, else
+    $ASCEND_BRIDGE_RESPONSE_TIMEOUT_MS, else just under the platform's response window."""
+    for source in ((config or {}).get("bridge_response_timeout_ms"),
+                   os.environ.get("ASCEND_BRIDGE_RESPONSE_TIMEOUT_MS")):
+        try:
+            ms = int(source or 0)
+        except (TypeError, ValueError):
+            continue
+        if ms > 0:
+            return ms / 1000.0
+    return _DEFAULT_BRIDGE_RESPONSE_TIMEOUT_S
+
 
 class TargetCaller:
     """Builds a lease-client handler bound to one adapter config."""
 
     def __init__(self, adapter_type: str, config_name: str,
                  config: Optional[Dict[str, Any]] = None,
-                 timeout_s: float = 110.0) -> None:
-        # 110s stays under probe_shadow's 120s BRIDGE_RESPONSE_TIMEOUT.
+                 timeout_s: Optional[float] = None) -> None:
         raw = config if config is not None else load_config(config_name)
+        if timeout_s is None:
+            timeout_s = _bridge_response_timeout_s(raw)
         # Keep the pristine, unmerged config so we can re-materialize a fresh token mid-run.
         self._raw = copy.deepcopy(raw)
         # Resolve any auth block up-front so the LIVE relay sends the same credentials
