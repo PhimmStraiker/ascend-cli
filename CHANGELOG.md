@@ -7,6 +7,44 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ## [Unreleased]
 
+### Fixed
+- **A bridge now stops only for the assessment it is bound to.** The relay used to infer "my work is
+  done" from *every* assessment on the app (or simply the newest one). A finished unrelated run, or
+  a gap before the next run existed, therefore read as "all done" and reaped a relay that was still
+  serving live probes. The stop decision is now scoped to the bound run, and a relay with **no**
+  bound run never self-stops on a terminal status — which is also what makes a standalone
+  `ascend runtime start` genuinely persistent. `assess run` binds the real assessment id to the relay
+  as soon as the platform names it (a relay must be up *before* the run is created, so it cannot get
+  the id from argv).
+- **A manually started relay registered itself under the config name instead of the app id.**
+  `runtime start --config acme` filed its state as `acme`, so `is_serving(aapp_…)` could never see
+  it, the auto-lifecycle concluded no bridge was running, and it started a **second** relay for the
+  same app — two consumers splitting one app's probes, which presents as "probes stopped flowing".
+- **`assess run` no longer kills a relay it does not own.** It releases only a bridge it started
+  itself; a reused or standalone relay is left running.
+- **The heartbeat is written before the reconcile network call.** Liveness is judged by heartbeat
+  age, so a slow control-plane call could push a perfectly healthy bridge toward "stale".
+- **`app create` no longer sends a payload the platform always rejects.** With no `--controls` the
+  CLI sent `control_type: "all"`, which v3 rejects (400 "rejected by the upstream service") — and
+  omitting the field is rejected too. The only accepted shape is `custom` plus an explicit id list,
+  so the CLI now resolves the control catalog and registers with every non-deprecated control.
+- **`app create` recovers from a lost response.** The POST is routinely dropped *after* the platform
+  created the app ("Response ended prematurely"), which reported a failure for an app that exists and
+  led to duplicates. It now re-reads the app by name and reports it as recovered. Because a bridge
+  app's key is returned exactly once, a lost response also loses that key — the CLI now says so and
+  gives the delete/re-create commands instead of leaving an app no bridge can ever serve.
+
+### Added
+- **Auth lifecycle for HTTP adapters (`auth` config block).** A short-lived credential — a mobile
+  app's bearer, an OAuth access token — expires part-way through a long run; every later probe then
+  returns 401 and scores as a target "refusal", so the assessment finishes looking clean while
+  measuring nothing. `direct_api` now supports `lifecycle: refresh_on_ttl | reauth_on_401 |
+  cookie_rotation` with a token endpoint, dot-path extraction, TTL/skew, and a single automatic
+  re-mint-and-retry on a 401/403. Tokens are minted under a lock and shared across worker threads so
+  concurrent probes cannot stampede the token endpoint. With no `auth` block behavior is unchanged.
+- **`demo/localhost_agent.py --slow-secs`** simulates a slow/agentic target (agents commonly take
+  2-3 minutes), so bridge behavior against long-running targets can be tested for real.
+
 ### Changed
 - **App type `thin` is now `bridge`** everywhere a user sees it: `app create --type` choices are now
   `bridge|api|gcp|bedrock` (default `bridge`), and `app create|list|status` output and help all say

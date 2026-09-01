@@ -30,6 +30,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
 
@@ -203,6 +204,7 @@ PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 
 class Handler(BaseHTTPRequestHandler):
     llm = None  # set in main()
+    slow_secs = 0.0  # artificial per-reply delay to simulate a slow/agentic target (QA fixture)
 
     def do_GET(self):
         if self.path.split("?")[0] in ("/", "/index.html"):
@@ -227,6 +229,8 @@ class Handler(BaseHTTPRequestHandler):
         if not messages:
             return self._json(400, {"error": 'no message; send {"message": "..."}'})
         try:
+            if self.slow_secs:
+                time.sleep(self.slow_secs)   # simulate a slow/agentic target (QA fixture)
             return self._json(200, {"reply": self.llm.reply(messages)})
         except Exception as e:  # a model/credential error should be visible, not swallowed
             return self._json(502, {"error": f"model call failed: {type(e).__name__}: {e}"})
@@ -261,6 +265,10 @@ def main():
                          "hammered by an assessment; try claude-sonnet-5 for a smarter demo)")
     ap.add_argument("--region", default=os.environ.get("AWS_REGION", "us-east-2"),
                     help="AWS region for Bedrock (default us-east-2)")
+    ap.add_argument("--slow-secs", type=float,
+                    default=float(os.environ.get("ACME_SLOW_SECS", "0") or 0),
+                    help="artificial per-reply delay in seconds to simulate a slow/agentic "
+                         "target (QA fixture; also ACME_SLOW_SECS env)")
     args = ap.parse_args()
 
     try:
@@ -282,6 +290,10 @@ def main():
         sys.exit(1)
 
     Handler.llm = llm
+    Handler.slow_secs = args.slow_secs
+    if args.slow_secs:
+        print(f"  SLOW fixture: sleeping {args.slow_secs}s before every reply "
+              f"(simulating a slow/agentic target)")
     srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     home = f"http://127.0.0.1:{args.port}/"
     url = f"http://127.0.0.1:{args.port}/chat"
