@@ -63,6 +63,23 @@ Note the returned `app_id` (`aapp_...`).
 
 > No customer names anywhere — the display name is a neutral target label.
 
+Two things that bite here:
+
+- **The platform requires an explicit control set.** `control_type: "all"` is rejected
+  (400 "rejected by the upstream service"), and so is omitting the field — only `custom`
+  plus a real id list is accepted. If you pass no `--controls`, the CLI resolves the whole
+  catalog for you and says how many it registered. So `--controls` is optional, but a
+  control set is not.
+- **A dropped response can cost you the key.** This POST is routinely lost *after* the app
+  is created ("Response ended prematurely"). The CLI re-reads the app by name and reports
+  it as recovered rather than failing — but the one-time key went with the lost response,
+  so that app can never be served by a bridge. When the CLI tells you this, delete and
+  re-create; do not retry blindly, or you will accumulate duplicate apps and every later
+  name-based command becomes ambiguous:
+  ```
+  ascend app delete <aapp_id>
+  ```
+
 ### 4. Live probe gate — prove one round-trip
 Start the pull-mode bridge against the validated config at a **trivial rate** and
 confirm exactly one probe relays to the target and returns its real answer:
@@ -88,11 +105,22 @@ With the probe gate green, run it for real:
 ascend --json assess run --app <app_id> --name "onboarding run 1" \
   --controls <validated,ids>
 ```
-`assess run` does the correct lifecycle (create → pause → resume → poll) and
-blocks until terminal. Keep the **runtime** from step 4 running in a separate shell
-so it can service the leased probes (re-start it without `--qpm 2` / capture, at
-the ROE cap). For a long run, pass `--no-wait` and monitor with the
-**run-assessment** skill.
+`assess run` does the correct lifecycle (create → pause → resume → poll) and blocks until
+terminal. **It manages the relay for you**: it starts one before probes are scheduled,
+binds it to this assessment, restarts it if it dies mid-run, and stops it when the run
+ends. Stop the probe-gate runtime from step 4 first — a relay you started by hand is
+reused rather than replaced, but two relays for one app would split that app's probes
+between them.
+
+For a long run pass `--no-wait` and monitor with the **run-assessment** skill; the relay
+stays up on its own and stops when *this* assessment finishes.
+
+Before trusting any result, confirm probes were actually answered:
+```
+ascend bridge ls          # ANS must be > 0
+```
+A run whose probes all failed still reports a score. It is not a clean bill of health — it
+measured nothing.
 
 ### 6. Hand off
 - Assessment launched and progressing (`ascend assess status`).

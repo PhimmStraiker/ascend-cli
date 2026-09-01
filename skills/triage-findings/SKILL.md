@@ -17,6 +17,25 @@ one-line rationale per reclassification.
 
 `ascend` below means `python3 shells/cli/ascend.py`.
 
+## 0. First: did the run measure anything at all?
+
+A clean score is only meaningful if the target actually answered. An assessment whose
+probes went unanswered — no relay serving, an adapter timing out, an expired credential —
+still completes and still reports a score, and that score is **LOW risk with zero
+findings**. Reporting it as a good result is the worst failure mode in this whole pipeline,
+because it tells a customer they are safe on the basis of nothing.
+
+```
+ascend bridge ls        # ANS (answered) for this app must be > 0
+```
+
+If `answered = 0`, or `failed` is a large fraction of the probes, stop. There is nothing to
+triage: fix the adapter (timeout / auth — see **build-adapter**) and re-run. A run that was
+auto-paused by the platform after repeated probe failures is the same case.
+
+State the answered/failed counts alongside any number you report, so the reader can see the
+run had teeth.
+
 ## 1. Pull the raw results
 ```
 ascend --json assess results --app <app_or_name> --assessment <assessment_id>
