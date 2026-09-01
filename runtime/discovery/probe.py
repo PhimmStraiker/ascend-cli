@@ -1493,7 +1493,18 @@ def build_config(result: ProbeResult, *, timeout_ms: Optional[int] = None) -> Di
             f"{result.message} | next: {result.hint}")
 
     headers = dict(result.headers or {})
-    tmo = int(timeout_ms if timeout_ms is not None else max(10_000, int(result.timeout_s * 1000)))
+    # Never pin a SHORT timeout into a built config. `result.timeout_s` is how long we were willing
+    # to wait while DISCOVERING the contract; it says nothing about how long the target takes under
+    # assessment. Agentic targets routinely reply in 2-3 minutes (some far longer), and a pinned
+    # 20-30s turns a healthy slow target into 100% probe failures — measured live, after which the
+    # platform auto-paused the run and it looked like the bridge had broken. Unless the operator
+    # pinned a value, fall back to the runtime's agentic-safe, env-tunable default.
+    try:
+        from adapters.base import DEFAULT_TARGET_TIMEOUT_MS as _AGENTIC_FLOOR_MS
+    except Exception:                                   # discovery imported outside the runtime path
+        _AGENTIC_FLOOR_MS = 300_000
+    tmo = int(timeout_ms if timeout_ms is not None
+              else max(_AGENTIC_FLOOR_MS, int(result.timeout_s * 1000)))
 
     if result.transport in ("sse", "ndjson"):
         parts = urlsplit(result.endpoint)

@@ -42,7 +42,7 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 
-from .base import BotAdapter
+from .base import BotAdapter, resolve_timeout_s
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +65,7 @@ class WebSocketAdapter(BotAdapter):
 
         headers = config.get("headers", {}) or {}
         subprotocols = config.get("subprotocols") or None
-        timeout = config.get("timeout_ms", 60000) / 1000
+        timeout = resolve_timeout_s(config)
         idle = config.get("idle_ms", 1500) / 1000
         done_when = config.get("done_when")
         rpath = config.get("response_path")

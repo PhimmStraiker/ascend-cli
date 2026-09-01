@@ -50,7 +50,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from .base import BotAdapter, utf8_text
+from .base import BotAdapter, utf8_text, resolve_timeout_s
 from .websocket_direct import _json_escape, _dot
 
 logger = logging.getLogger(__name__)
@@ -85,7 +85,7 @@ class SentinelStreamAdapter(BotAdapter):
         if not url:
             return self._fail("sentinel_stream needs a url", start_t)
         method = config.get("method", "POST").upper()
-        timeout = config.get("timeout_ms", 60000) / 1000
+        timeout = resolve_timeout_s(config)
         headers = {"Content-Type": "application/json", **(config.get("headers") or {})}
         begin = config.get("begin_marker", DEFAULT_BEGIN)
         end = config.get("end_marker", DEFAULT_END)
