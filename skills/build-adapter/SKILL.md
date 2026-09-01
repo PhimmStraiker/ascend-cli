@@ -37,13 +37,89 @@ One value per layer, plus that value's params:
 2. **Auth** — `none` · `static` · `mtls` · `derived_multihop` · `oauth2` · `csrf`.
    *How one request is authorized.*
 3. **Auth lifecycle** — `static` · `refresh_on_ttl` · `reauth_on_401` ·
-   `cookie_rotation`. *How the credential stays valid over a long run.*
+   `cookie_rotation`. *How the credential stays valid over a long run.* This one is
+   declared with an `auth` block and is the usual cause of a run that dies half way —
+   see **Layer 3 in practice** below.
 4. **Session / conversation** — `stateless` · `create_session` ·
    `create_conversation` · `warmup` · `multi_turn`. *How turns bind together.*
 5. **Identity** — `fixed` · `rotate_per_conversation` · `rotate_per_n` ·
    `fresh_per_probe`. *Who is calling (mostly an ROE choice, not auto-detected).*
 6. **Rate / concurrency** — `qpm`, `max_workers`, `per_identity_qpm`. Cross-cutting;
    `max_workers` auto-defaults to 1 for stateful, 10 for stateless.
+
+## Layer 3 in practice: keeping a credential alive for a whole run
+
+This is the single most common reason an onboarded target stops working part-way through
+an assessment, and it does not look like an auth problem — it looks like a well-behaved
+bot that refuses everything.
+
+A token captured at build time (a mobile app's bearer, an OAuth access token, a login
+cookie) is valid when you build the adapter and expired an hour into the run. Every probe
+after expiry gets a 401, the adapter reports a failure, the scorer sees "no answer", and
+the run finishes **looking clean while measuring nothing**. Worse: when probes keep
+failing the platform **auto-pauses the assessment**, so the visible symptom is a stalled
+run and an idle bridge — which reads as "the bridge died".
+
+Declare the lifecycle instead of pasting a token:
+
+```json
+"auth": {
+  "lifecycle": "reauth_on_401",
+  "token_endpoint": "https://api.example.com/oauth/token",
+  "token_method": "POST",
+  "token_headers": {"Content-Type": "application/json"},
+  "token_body": {"grant_type": "refresh_token", "refresh_token": "..."},
+  "token_path": "access_token",
+  "expires_in_path": "expires_in",
+  "refresh_skew_s": 60,
+  "variable": "TOKEN"
+}
+```
+
+Then reference it wherever the credential goes — `"headers": {"Authorization": "Bearer
+{{TOKEN}}"}`, or in the URL or body. `{{TOKEN}}` is substituted per request from a live
+credential.
+
+| lifecycle | use when | behaviour |
+|---|---|---|
+| `static` (default) | the credential outlives any run | headers used as-is; nothing is minted |
+| `refresh_on_ttl` | the token has a known TTL / `expires_in` | re-mints before expiry (minus `refresh_skew_s`) |
+| `reauth_on_401` | expiry is unpredictable, or revocation happens | mints lazily; on a 401/403 re-mints **once** and retries the probe |
+| `cookie_rotation` | session cookie targets | re-runs the login and carries `Set-Cookie` forward |
+
+`refresh_on_ttl` and `reauth_on_401` compose — a TTL-refreshed token is still re-minted on
+a 401, because revocation does not wait for your clock.
+
+**Supported today by `direct_api` and `session_api`.** `agentforce`, `copilot_studio` and
+`amazon_connect` already mint and re-mint their own credentials, so they need no `auth`
+block. The remaining transports (`sse_stream`, `websocket_direct`, `session_poll`,
+`vertex_ai`, `sentinel_stream`) do **not** consume it yet — for those, a short-lived
+credential is still a known gap; say so rather than shipping a config that will silently
+expire.
+
+Tokens are minted under a lock and shared across worker threads, so concurrent probes
+cannot stampede the token endpoint (some IdPs rate-limit, and some invalidate the previous
+token on every mint).
+
+## Timeouts: never pin a value sized for a fast bot
+
+Agentic targets routinely take **2-3 minutes** per reply and some take considerably
+longer. A short timeout does not degrade gracefully — it converts a healthy slow target
+into 100% probe failures, which then trips the platform's auto-pause. Measured live: a
+110s target under a 20s config timeout failed *every* probe.
+
+Only pin `timeout_ms` when you have measured the target and want to *cap* it. Otherwise
+leave it out and let the runtime default apply, and tune per-environment with
+`$ASCEND_TARGET_TIMEOUT_MS`. A ceiling (`$ASCEND_TARGET_MAX_TIMEOUT_MS`) still applies so
+one hung target cannot hold a worker open for the whole run — slow is fine, hung is not.
+
+## Mobile apps
+
+You do not red-team the app binary; you red-team the **backend it calls**. Capture the
+app's traffic (a proxy with the device trusting its CA, or a HAR from the web equivalent),
+then build an adapter against that API exactly as for any other HTTP target. Mobile
+backends are also the most likely place to need Layer 3 above: their tokens are usually
+short-lived and refresh-token based.
 
 ## Workflow
 
@@ -136,6 +212,20 @@ ascend adapter list               # confirm the transport/preset type resolves
 Only a green-validated config proceeds to `onboard-target` / `assess run`. If you
 genuinely cannot get a layer green, emit the low-confidence discover report plus
 the raw evidence and escalate that specific layer — do **not** ship a guess.
+
+## Symptom -> cause
+
+Read this before re-building an adapter. Most "the adapter broke" reports are one of
+these, and only the last one is actually a transport problem.
+
+| symptom | almost always | fix |
+|---|---|---|
+| `answered=0` with `failed` climbing in `bridge ls` | the adapter is failing every probe — timeout too short, or the credential expired | raise/remove `timeout_ms`; add an `auth` block |
+| worked for the first N probes, then everything "refuses" | short-lived credential expired mid-run | `reauth_on_401` / `refresh_on_ttl` |
+| assessment sits at `paused` and nothing moves | the platform auto-paused after repeated probe failures | fix the adapter failure, then `assess resume` |
+| every probe fails against a slow/agentic target | `timeout_ms` shorter than the target's reply time | remove the pin or raise it; agents take 2-3 min+ |
+| a run scores perfectly clean and suspiciously fast | probes went unanswered — a **false pass**, not a good result | confirm `answered > 0` before believing any score |
+| replies are truncated or arrive as fragments | transport/assembly (L1) is wrong — streaming read as REST | re-check `sse`/`ndjson`/`websocket` framing |
 
 ## Definition of done
 - Every layer has a value; every low-confidence layer was resolved with evidence.
