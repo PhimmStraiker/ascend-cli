@@ -43,9 +43,10 @@ All notable changes to the Ascend CLI. Newest first. Format follows
   so the CLI now resolves the control catalog and registers with every non-deprecated control.
 - **`app create` recovers from a lost response.** The POST is routinely dropped *after* the platform
   created the app ("Response ended prematurely"), which reported a failure for an app that exists and
-  led to duplicates. It now re-reads the app by name and reports it as recovered. Because a bridge
-  app's key is returned exactly once, a lost response also loses that key — the CLI now says so and
-  gives the delete/re-create commands instead of leaving an app no bridge can ever serve.
+  led operators to retry into duplicates. It now re-reads the app by name and reports it as
+  recovered. The bridge key survives this: `thin_api_key` is **not** write-once — the platform
+  returns it on GET and in the app list — so when a create response arrives without it the CLI reads
+  it back off the app instead of leaving an app no bridge can serve.
 
 ### Added
 - **Auth lifecycle for HTTP adapters (`auth` config block).** A short-lived credential — a mobile
