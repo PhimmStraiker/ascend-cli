@@ -23,6 +23,7 @@ from typing import Any, Dict
 import requests
 from urllib.parse import quote
 
+from . import auth_lifecycle
 from .base import BotAdapter, utf8_text, tls_kwargs, tls_min_adapter
 from .websocket_direct import _json_escape
 
@@ -66,23 +67,46 @@ class DirectAPIAdapter(BotAdapter):
         except (TypeError, ValueError) as e:
             return self._fail(f"body template render failed: {e}", start)
 
+        # L3 auth lifecycle (opt-in). A short-lived credential — a mobile app's bearer, an OAuth
+        # access token — expires part-way through a long run. Without this, every probe after
+        # expiry comes back 401 and scores as a target "refusal": a whole assessment of garbage
+        # that reads as clean. With an `auth` block we mint/refresh and retry ONCE on a 401. With
+        # no `auth` block this is a no-op and the request is built exactly as it always was.
+        resp = None
+        for attempt in range(2):
+            try:
+                ep, hdrs, sk, mgr = auth_lifecycle.apply_auth(
+                    config, endpoint, headers, send_kwargs)
+            except auth_lifecycle.AuthError as e:
+                # Say "the credential could not be minted", never a fake target failure.
+                return self._fail(f"auth lifecycle: {e}", start, status_code=401)
+            try:
+                logger.info(f"DirectAPI: {method} {ep}")
+                tls_min = config.get("tls_min")
+                if tls_min:
+                    # a minimum-TLS pin needs a Session (the adapter is mounted per-scheme)
+                    sess = requests.Session()
+                    ad = tls_min_adapter(tls_min)
+                    if ad:
+                        sess.mount("https://", ad)
+                    resp = sess.request(method, ep, headers=hdrs, timeout=timeout,
+                                        **tls_kwargs(config), **sk)
+                else:
+                    resp = requests.request(method, ep, headers=hdrs, timeout=timeout,
+                                            **tls_kwargs(config), **sk)
+            except requests.RequestException as e:
+                return self._fail(f"HTTP error: {e}", start, status_code=getattr(getattr(e, "response", None), "status_code", None))
+            if (resp.status_code in (401, 403) and mgr is not None
+                    and mgr.retries_on_401() and attempt == 0):
+                logger.info("DirectAPI: HTTP %s on a managed credential — re-minting and "
+                            "retrying this probe once", resp.status_code)
+                mgr.invalidate()
+                continue
+            break
         try:
-            logger.info(f"DirectAPI: {method} {endpoint}")
-            tls_min = config.get("tls_min")
-            if tls_min:
-                # a minimum-TLS pin needs a Session (the adapter is mounted per-scheme)
-                sess = requests.Session()
-                ad = tls_min_adapter(tls_min)
-                if ad:
-                    sess.mount("https://", ad)
-                resp = sess.request(method, endpoint, headers=headers, timeout=timeout,
-                                    **tls_kwargs(config), **send_kwargs)
-            else:
-                resp = requests.request(method, endpoint, headers=headers, timeout=timeout,
-                                        **tls_kwargs(config), **send_kwargs)
             resp.raise_for_status()
         except requests.RequestException as e:
-            return self._fail(f"HTTP error: {e}", start, status_code=getattr(getattr(e, "response", None), "status_code", None))
+            return self._fail(f"HTTP error: {e}", start, status_code=resp.status_code)
 
         extract_path = config.get("response_path")
         # Try JSON; fall back to raw text for plain-text bots.

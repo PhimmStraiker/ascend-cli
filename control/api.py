@@ -378,7 +378,42 @@ class AscendAPI:
         return self._req("GET", f"/ascend/applications/{app_id}")
 
     def create_app(self, spec: Dict[str, Any]) -> Any:
-        return self._req("POST", "/ascend/applications", json_body=_clean_templates(spec))
+        """Create an application, and never report a failure that actually succeeded.
+
+        The POST is routinely lost in transit AFTER the platform created the app (observed against
+        v3: 'Response ended prematurely' / RemoteDisconnected, more often with a large control
+        list). Reported as a plain error, the operator retries and accumulates duplicate apps —
+        and duplicates make every later name-based command ambiguous.
+
+        A bridge app's `thin_api_key` is returned exactly ONCE, so a lost response also loses the
+        key: the recovered app is real but has no usable credential. Say that explicitly, because
+        the only remedy is to delete it and create again.
+        """
+        try:
+            return self._req("POST", "/ascend/applications", json_body=_clean_templates(spec))
+        except Exception as exc:
+            found = self._find_app_by_name(spec.get("name"))
+            if found is None:
+                raise
+            return {**found, "recovered": True,
+                    "recovery_note": (
+                        f"the response was lost ({type(exc).__name__}), but the platform DID "
+                        f"create this application")}
+
+    def _find_app_by_name(self, name: Optional[str]):
+        """Look for a just-created app by name. Returns None if the lookup itself fails."""
+        if not name:
+            return None
+        try:
+            payload = self._req("GET", "/ascend/applications")
+        except Exception:
+            return None
+        rows = payload if isinstance(payload, list) else (
+            payload.get("data") or payload.get("applications") or payload.get("items") or [])
+        for row in rows if isinstance(rows, list) else []:
+            if isinstance(row, dict) and row.get("name") == name:
+                return row
+        return None
 
     def patch_app(self, app_id: str, patch: Dict[str, Any]) -> Any:
         return self._req("PATCH", f"/ascend/applications/{app_id}", json_body=_clean_templates(patch))
