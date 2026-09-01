@@ -23,7 +23,7 @@ from typing import Any, Dict, Optional
 
 import requests
 
-from .base import BotAdapter
+from .base import BotAdapter, resolve_timeout_s
 # google.auth is imported lazily in _token() so this adapter package still imports
 # on machines without google-auth installed (it's only needed for vertex_ai).
 
@@ -62,7 +62,7 @@ class VertexAIAdapter(BotAdapter):
             return self._fail("No endpoint configured", start)
 
         user_id = config.get("user_id", "ascend-probe")
-        timeout = config.get("timeout_ms", 60000) / 1000
+        timeout = resolve_timeout_s(config)
         body = {
             "class_method": "stream_query",
             "input": {"message": prompt, "user_id": user_id},

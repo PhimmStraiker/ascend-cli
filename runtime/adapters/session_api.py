@@ -27,7 +27,7 @@ from typing import Any, Dict, Optional
 
 import requests
 
-from .base import BotAdapter
+from .base import BotAdapter, resolve_timeout_s
 from .websocket_direct import _json_escape
 
 logger = logging.getLogger(__name__)
@@ -44,7 +44,7 @@ class SessionAPIAdapter(BotAdapter):
         if not session_endpoint or not message_endpoint:
             return self._fail("session_endpoint and message_endpoint are required", start)
 
-        timeout = config.get("timeout_ms", 60000) / 1000
+        timeout = resolve_timeout_s(config)
 
         headers = {"Content-Type": "application/json"}
         headers.update(config.get("headers", {}))
