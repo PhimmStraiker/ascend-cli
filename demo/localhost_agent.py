@@ -205,6 +205,10 @@ PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 class Handler(BaseHTTPRequestHandler):
     llm = None  # set in main()
     slow_secs = 0.0  # artificial per-reply delay to simulate a slow/agentic target (QA fixture)
+    token_ttl = 0.0  # >0 requires a short-lived bearer from POST /token (QA fixture)
+    _tokens = {}     # token -> expires_at
+    mints = 0        # how many tokens were issued (the adapter's re-mints are observable)
+    expired_rejections = 0  # 401s served for an expired token
 
     def do_GET(self):
         if self.path.split("?")[0] in ("/", "/index.html"):
@@ -218,8 +222,27 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(404, {"error": f"not found: {self.path}"})
 
     def do_POST(self):
-        if self.path.split("?")[0] != "/chat":
+        path = self.path.split("?")[0]
+        # QA fixture: short-lived bearer auth, so the adapter's auth lifecycle can be proven for
+        # real. This is the shape that breaks long assessments against mobile/authenticated
+        # backends — the token is fine when the run starts and expired an hour later.
+        if self.token_ttl and path == "/token":
+            tok = os.urandom(12).hex()
+            Handler._tokens[tok] = time.time() + self.token_ttl
+            Handler.mints += 1
+            return self._json(200, {"access_token": tok, "expires_in": int(self.token_ttl)})
+        if path != "/chat":
             return self._json(404, {"error": f"not found: {self.path}"})
+        if self.token_ttl:
+            auth = self.headers.get("Authorization", "")
+            tok = auth[7:].strip() if auth.startswith("Bearer ") else ""
+            expires_at = Handler._tokens.get(tok)
+            if not expires_at:
+                return self._json(401, {"error": "missing or unknown bearer token"})
+            if expires_at < time.time():
+                Handler._tokens.pop(tok, None)
+                Handler.expired_rejections += 1
+                return self._json(401, {"error": "token expired"})
         try:
             n = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(n) or b"{}")
@@ -269,6 +292,11 @@ def main():
                     default=float(os.environ.get("ACME_SLOW_SECS", "0") or 0),
                     help="artificial per-reply delay in seconds to simulate a slow/agentic "
                          "target (QA fixture; also ACME_SLOW_SECS env)")
+    ap.add_argument("--token-ttl", type=float,
+                    default=float(os.environ.get("ACME_TOKEN_TTL", "0") or 0),
+                    help="require a short-lived bearer token from POST /token, expiring after this "
+                         "many seconds — reproduces an authenticated target whose credential dies "
+                         "mid-run (QA fixture; also ACME_TOKEN_TTL env)")
     args = ap.parse_args()
 
     try:
@@ -291,9 +319,13 @@ def main():
 
     Handler.llm = llm
     Handler.slow_secs = args.slow_secs
+    Handler.token_ttl = args.token_ttl
     if args.slow_secs:
         print(f"  SLOW fixture: sleeping {args.slow_secs}s before every reply "
               f"(simulating a slow/agentic target)")
+    if args.token_ttl:
+        print(f"  AUTH fixture: /chat requires a bearer from POST /token, expiring after "
+              f"{args.token_ttl}s")
     srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     home = f"http://127.0.0.1:{args.port}/"
     url = f"http://127.0.0.1:{args.port}/chat"
