@@ -19,7 +19,8 @@ from typing import Any, Dict, Optional
 # than tight, and both ends are tunable without editing code.
 #
 # There is still a ceiling, because a genuinely hung target must not pin a worker forever.
-DEFAULT_TARGET_TIMEOUT_MS = 300_000        # 5 min — covers the common 2-3 min agentic reply
+DEFAULT_TARGET_TIMEOUT_MS = 600_000        # 10 min — a real agent took exactly this and a 5 min
+#                                            default failed it at 300s; "slow" has no small bound
 MAX_TARGET_TIMEOUT_MS = 900_000            # 15 min — beyond this the target is hung, not slow
 
 
