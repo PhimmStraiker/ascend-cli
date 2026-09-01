@@ -51,12 +51,20 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 - **Auth lifecycle for HTTP adapters (`auth` config block).** A short-lived credential — a mobile
   app's bearer, an OAuth access token — expires part-way through a long run; every later probe then
   returns 401 and scores as a target "refusal", so the assessment finishes looking clean while
-  measuring nothing. `direct_api` now supports `lifecycle: refresh_on_ttl | reauth_on_401 |
-  cookie_rotation` with a token endpoint, dot-path extraction, TTL/skew, and a single automatic
-  re-mint-and-retry on a 401/403. Tokens are minted under a lock and shared across worker threads so
-  concurrent probes cannot stampede the token endpoint. With no `auth` block behavior is unchanged.
-- **`demo/localhost_agent.py --slow-secs`** simulates a slow/agentic target (agents commonly take
-  2-3 minutes), so bridge behavior against long-running targets can be tested for real.
+  measuring nothing. `direct_api` and `session_api` now support `lifecycle: refresh_on_ttl |
+  reauth_on_401 | cookie_rotation` with a token endpoint, dot-path extraction, TTL/skew, and a
+  single automatic re-mint-and-retry on a 401/403. Tokens are minted under a lock and shared across
+  worker threads so concurrent probes cannot stampede the token endpoint. With no `auth` block
+  behavior is unchanged. Verified live against a token-gated target: 4/4 probes succeeded across two
+  token expiries (credential re-minted twice), while the same config without an `auth` block failed
+  401 as before.
+- **`demo/localhost_agent.py` QA fixtures.** `--slow-secs` simulates a slow/agentic target (agents
+  commonly take 2-3 minutes) and `--token-ttl` requires a short-lived bearer from `POST /token`, so
+  both the bridge's behavior against long-running targets and the adapter auth lifecycle can be
+  proven against a real server instead of a mock.
+- **`qa/live_lifecycle.sh`** — the live ship gate: real platform, real app, real agent, asserting the
+  invariants that unit tests kept missing (relay registered under the app id, unbound relay stays
+  up, probes actually answered, relay released after the run).
 
 ### Changed
 - **App type `thin` is now `bridge`** everywhere a user sees it: `app create --type` choices are now
