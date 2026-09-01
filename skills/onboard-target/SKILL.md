@@ -54,12 +54,17 @@ ascend app create --type bridge --name "<display name>" \
   --system-prompt "<optional description>" \
   --controls <validated,ids> --size small --qpm <roe_cap>
 ```
-This prints the `tc_key` (`thin_api_key`) **once**. Capture it into the
-environment immediately — it is not retrievable later:
+This prints the `tc_key` (`thin_api_key`). The CLI stores it for you (`ascend keys list`),
+and `ascend runtime start --app <id>` resolves it from that store, so you rarely need to
+handle it by hand. To use it directly:
 ```
 export STRAIKER_BRIDGE_API_KEY=tc-...
 ```
 Note the returned `app_id` (`aapp_...`).
+
+> The key is **not** write-once, despite older guidance saying so: the platform returns
+> `thin_api_key` on `GET /ascend/applications/{id}` and in the app list. So losing the
+> create output is recoverable — never delete a working app just to see the key again.
 
 > No customer names anywhere — the display name is a neutral target label.
 
@@ -70,15 +75,11 @@ Two things that bite here:
   plus a real id list is accepted. If you pass no `--controls`, the CLI resolves the whole
   catalog for you and says how many it registered. So `--controls` is optional, but a
   control set is not.
-- **A dropped response can cost you the key.** This POST is routinely lost *after* the app
-  is created ("Response ended prematurely"). The CLI re-reads the app by name and reports
-  it as recovered rather than failing — but the one-time key went with the lost response,
-  so that app can never be served by a bridge. When the CLI tells you this, delete and
-  re-create; do not retry blindly, or you will accumulate duplicate apps and every later
-  name-based command becomes ambiguous:
-  ```
-  ascend app delete <aapp_id>
-  ```
+- **The response is routinely dropped *after* the app is created** ("Response ended
+  prematurely"). The CLI re-reads the app by name, reports it as recovered rather than
+  failing, and reads the bridge key back off the app — so nothing is lost. Do **not** retry
+  blindly on a create error: check `ascend app list` first, or you will accumulate duplicate
+  apps and every later name-based command becomes ambiguous.
 
 ### 4. Live probe gate — prove one round-trip
 Start the pull-mode bridge against the validated config at a **trivial rate** and

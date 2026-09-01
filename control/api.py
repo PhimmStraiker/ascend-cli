@@ -385,9 +385,9 @@ class AscendAPI:
         list). Reported as a plain error, the operator retries and accumulates duplicate apps —
         and duplicates make every later name-based command ambiguous.
 
-        A bridge app's `thin_api_key` is returned exactly ONCE, so a lost response also loses the
-        key: the recovered app is real but has no usable credential. Say that explicitly, because
-        the only remedy is to delete it and create again.
+        The recovered record carries the app's `thin_api_key` too — that key is NOT write-once,
+        the platform returns it on GET and in the app list as well as at creation — so a dropped
+        response costs nothing but the round trip.
         """
         try:
             return self._req("POST", "/ascend/applications", json_body=_clean_templates(spec))
