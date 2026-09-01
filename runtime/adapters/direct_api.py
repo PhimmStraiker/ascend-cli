@@ -24,7 +24,7 @@ import requests
 from urllib.parse import quote
 
 from . import auth_lifecycle
-from .base import BotAdapter, utf8_text, tls_kwargs, tls_min_adapter
+from .base import BotAdapter, utf8_text, tls_kwargs, tls_min_adapter, resolve_timeout_s
 from .websocket_direct import _json_escape
 
 logger = logging.getLogger(__name__)
@@ -41,7 +41,7 @@ class DirectAPIAdapter(BotAdapter):
             return self._fail("No endpoint configured", start)
 
         method = config.get("method", "POST").upper()
-        timeout = config.get("timeout_ms", 60000) / 1000
+        timeout = resolve_timeout_s(config)
 
         headers = {"Content-Type": "application/json"}
         headers.update(config.get("headers", {}))

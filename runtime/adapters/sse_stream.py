@@ -101,7 +101,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from .base import BotAdapter
+from .base import BotAdapter, resolve_timeout_s
 from .websocket_direct import _dot, _json_escape
 
 logger = logging.getLogger(__name__)
@@ -233,7 +233,7 @@ class SSEStreamAdapter(BotAdapter):
         if not base_url or not chat_path:
             return self._fail("Missing required config: base_url, chat_path", start)
 
-        timeout = config.get("timeout_ms", 60000) / 1000
+        timeout = resolve_timeout_s(config)
         deadline = start + timeout
         url = _join(base_url, chat_path)
         method = config.get("method", "POST").upper()

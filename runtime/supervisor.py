@@ -39,6 +39,7 @@ import tenant as _tenant
 
 REPO = Path(__file__).resolve().parent.parent
 HEARTBEAT_STALE_S = 180.0        # no heartbeat for this long => "dead", not "serving"
+STALE_REAP_S = 86_400.0          # a relay dead this long is history, not state (see prune())
 
 
 def relays_dir() -> Path:
@@ -233,8 +234,38 @@ def stop(app_id: str, *, grace_s: float = 8.0) -> Dict[str, Any]:
     return {"app_id": app_id, "stopped": True, "pid": pid, "how": "SIGKILL (was draining a lease)"}
 
 
+def prune(max_age_s: float = STALE_REAP_S) -> List[str]:
+    """Drop state for relays that are dead AND long past their last heartbeat.
+
+    Relay state otherwise accumulates forever: every app ever served leaves pid/status/log files
+    behind, so `bridge ls` fills up with long-dead entries (one was still being listed 173 hours
+    after it died) and a relay that is genuinely wrong gets lost in the noise. A recently-dead relay
+    is kept, because that is exactly what someone triaging a failure needs to see. Logs are the
+    diagnostics and are never removed here — only the pid/status files that make a corpse look like
+    an entry.
+    """
+    removed: List[str] = []
+    now = time.time()
+    for status_file in sorted(relays_dir().glob("*.json")):
+        app_id = status_file.stem
+        pid = read_pid(app_id)
+        if pid is not None and pid_alive(pid):
+            continue                                   # live relay
+        ts = (read_status(app_id) or {}).get("ts") or 0
+        if ts and (now - ts) < max_age_s:
+            continue                                   # recently dead — keep it for triage
+        for key in ("pid", "status"):
+            try:
+                paths_for(app_id)[key].unlink()
+            except (FileNotFoundError, OSError):
+                pass
+        removed.append(app_id)
+    return removed
+
+
 def ls() -> List[Dict[str, Any]]:
     """Every relay this machine knows about, with liveness + last heartbeat stats."""
+    prune()                       # long-dead corpses are not state; keep the list meaningful
     out: List[Dict[str, Any]] = []
     for pid_file in sorted(relays_dir().glob("*.pid")):
         app_id = pid_file.stem
