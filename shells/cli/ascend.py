@@ -1509,10 +1509,25 @@ def cmd_runtime_start(args):
     # answered/failed counts if we publish them. Without this a dead bridge is indistinguishable
     # from a quiet one — and a dead bridge silently produces a FALSE PASS.
     status_file = getattr(args, "status_file", None)
-    if status_file:
+    import supervisor as S
+    app_id = _relay_app_id(args, key)
+
+    # Register this relay so the REST of the CLI can see it. `bridge ls`, `is_serving()` and the
+    # auto-lifecycle all key off the pid/status files, and a hand-started bridge wrote NEITHER — so
+    # `assess run` concluded nothing was serving and started a SECOND relay for the same app, with
+    # two consumers splitting that app's probes. That is the "probes stopped flowing" report. A
+    # supervised child already has its pid recorded by supervisor.start(), so this is a no-op there.
+    owns_pidfile = False
+    if str(app_id).startswith("aapp_"):
+        try:
+            if not S.is_running(app_id):
+                S._write_pid(app_id, os.getpid())
+                owns_pidfile = True
+        except Exception:
+            pass
+
+    if status_file or str(app_id).startswith("aapp_"):
         import threading
-        import supervisor as S
-        app_id = _relay_app_id(args, key)
 
         # Self-reconcile: the bridge polls its app's assessment state and self-stops when the app
         # goes terminal (or, if paused, after the idle timeout). It must reach the control plane, so
@@ -1597,7 +1612,16 @@ def cmd_runtime_start(args):
                 time.sleep(10)
 
         threading.Thread(target=_beat, daemon=True).start()
-    client.run_forever()
+    try:
+        client.run_forever()
+    finally:
+        # Never leave a pidfile behind pointing at a process that has exited: `is_serving()` reaps
+        # a stale pid, but a corpse still shows up as an entry until something looks at it.
+        if owns_pidfile:
+            try:
+                S._clear(app_id)
+            except Exception:
+                pass
 
 
 # ----------------------------------------------------------------------------- adapter
