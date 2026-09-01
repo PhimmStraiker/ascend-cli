@@ -1223,6 +1223,8 @@ def cmd_assess_resume(args):
 
 # ----------------------------------------------------------------------------- runtime
 _STARTUP_GRACE_S = 120.0     # never self-stop within this of startup (ensure-before-create, new apps)
+_TERMINATION_GRACE_S = 90.0  # once a run reads all-terminal/empty, wait this long before stopping, so a
+#                              transient gap between recon rounds is not mistaken for a finished run
 
 
 def _default_idle_timeout_s():
@@ -1248,32 +1250,57 @@ def _resolve_idle(args):
 
 
 def _reconcile_decision(assessments, *, now, started_at, last_probe_ts,
-                        idle_timeout_s, control_ok):
+                        idle_timeout_s, control_ok, terminal_since=None):
     """The pure decision at the heart of the self-reconciling bridge: 'serve' | 'stop-terminal' |
     'stop-idle'. No I/O, so it is unit-tested directly.
 
-    The only reliable stop signal is the run reaching a TERMINAL state. The bridge rides through
-    created/paused/stalled states rather than self-kill during a platform hiccup — an unanswered
-    probe scores a FALSE PASS, so the safe direction is always to keep serving. Idle cleanup is
-    OPT-IN (idle_timeout_s > 0) and reaps ONLY a run that is genuinely paused, has actually relayed
-    a probe, and has since gone quiet. It never reaps a created/queued/running run, nor one that has
-    never been probed. Per-app: a shared bridge stays up while ANY assessment is non-terminal."""
+    A run is "over" ONLY when it is EXPLICITLY terminal — a status in api.TERMINAL_STATUSES, the same
+    set the rest of the CLI uses. A status the CLI does not enumerate (e.g. an intermediate
+    recon-phase state the platform emits between rounds) is NOT terminal, and the safe direction is
+    always to keep serving: an unanswered probe scores a FALSE PASS. Even once every assessment is
+    explicitly terminal, the bridge rides out _TERMINATION_GRACE_S before stopping, so a brief gap
+    between recon rounds (indistinguishable from a finished run) does not reap it. `terminal_since`
+    is when the caller first saw the all-terminal/empty condition (None while anything is still
+    non-terminal). Idle cleanup is OPT-IN and reaps only a genuinely paused, already-probed,
+    then-quiet run."""
     if not control_ok:
         return "serve"                        # could not read the platform — never self-kill
     if now < (started_at or 0) + _STARTUP_GRACE_S:
         return "serve"                        # startup grace: ensure-before-create / brand-new app
-    active = [a for a in assessments
-             if str(a.get("status", "")).lower() in RUNNING_STATES]
-    if not active:
-        return "stop-terminal"                # every assessment on this app is terminal
+    from api import TERMINAL_STATUSES
+    non_terminal = [a for a in assessments
+                    if str(a.get("status", "")).lower() not in TERMINAL_STATUSES]
+    if not non_terminal:
+        # Every assessment is EXPLICITLY terminal (or there are none). Stop only after the condition
+        # has held past the grace — a transient between-round gap must not reap the bridge.
+        if terminal_since is None:
+            return "serve"
+        return "stop-terminal" if (now - terminal_since) >= _TERMINATION_GRACE_S else "serve"
+    # Something is still live: running/created/paused/queued OR a status the CLI does not enumerate.
+    # Keep serving. Opt-in idle cleanup may still reap a genuinely paused, already-probed, quiet run.
     if not idle_timeout_s or idle_timeout_s <= 0:
         return "serve"                        # default: stop only on terminal, never idle-kill
-    # Opt-in idle cleanup, and only for a run that genuinely paused AFTER doing work.
     if not last_probe_ts:
         return "serve"                        # never probed — the run never really started
-    if any(str(a.get("status", "")).lower() != "paused" for a in active):
-        return "serve"                        # anything running/queued/created — keep serving
+    if any(str(a.get("status", "")).lower() != "paused" for a in non_terminal):
+        return "serve"                        # anything running/created/queued/unknown — keep serving
     return "stop-idle" if (now - last_probe_ts) >= idle_timeout_s else "serve"
+
+
+def _reconcile_step(assessments, *, now, started_at, last_probe_ts, idle_timeout_s,
+                    control_ok, terminal_since):
+    """One reconcile iteration for the bridge beat loop. Tracks when the all-terminal/empty
+    condition began (so the termination grace can ride through a transient gap between recon
+    rounds), then decides. Returns (decision, terminal_since); the loop carries terminal_since
+    across iterations. Pure, so the whole lifecycle is unit-testable."""
+    from api import TERMINAL_STATUSES
+    all_terminal = not any(
+        str(a.get("status", "")).lower() not in TERMINAL_STATUSES for a in assessments)
+    terminal_since = (terminal_since or now) if all_terminal else None
+    decision = _reconcile_decision(
+        assessments, now=now, started_at=started_at, last_probe_ts=last_probe_ts,
+        idle_timeout_s=idle_timeout_s, control_ok=control_ok, terminal_since=terminal_since)
+    return decision, terminal_since
 
 
 def cmd_runtime_start(args):
@@ -1341,6 +1368,7 @@ def cmd_runtime_start(args):
 
         def _beat():
             n = 0
+            terminal_since = None
             while True:
                 rec = S.read_status(app_id) or {}
                 rec.update({"app_id": app_id, "config": args.config, "adapter": args.adapter,
@@ -1360,10 +1388,11 @@ def cmd_runtime_start(args):
                             cur = next((a for a in asmts if a.get("id") == tracked_id), None)
                         cur = cur or (_latest(asmts)[0] if asmts else None)
                         rec["asmt_status"] = (cur or {}).get("status")
-                        decision = _reconcile_decision(
+                        decision, terminal_since = _reconcile_step(
                             asmts, now=time.time(), started_at=rec.get("started_at"),
                             last_probe_ts=client.last_probe_ts,
-                            idle_timeout_s=idle_timeout_s, control_ok=True)
+                            idle_timeout_s=idle_timeout_s, control_ok=True,
+                            terminal_since=terminal_since)
                     except Exception as e:
                         # Could not verify — keep serving. Never self-kill on a transient error:
                         # an unanswered probe scores a FALSE PASS.

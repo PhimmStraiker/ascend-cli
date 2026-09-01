@@ -57,6 +57,13 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 - False-pass safety is preserved: a bridge never self-stops when it cannot verify assessment state.
 
 ### Fixed
+- **The bridge no longer dies between recon rounds.** The self-reconcile decision classified any
+  assessment status outside a hand-written running list as terminal, so an intermediate recon-phase
+  status the platform emits between rounds read as "done" and the bridge stopped itself after every
+  round. It now treats a run as over only when every assessment is EXPLICITLY terminal (the same
+  `TERMINAL_STATUSES` set the rest of the CLI uses); any unrecognized or intermediate status keeps
+  the bridge serving, honoring the never-self-kill-when-unsure rule. A termination grace also rides
+  through a brief all-terminal gap between rounds before stopping.
 - **The CLI imports on Python 3.9–3.11 again.** A nested same-quote f-string in `ascend discover`
   is a SyntaxError before Python 3.12, so `ascend` failed to start on the 3.9–3.11 range listed in
   `pyproject.toml`. It is now a plain string join. Reported and fixed by a design partner.
