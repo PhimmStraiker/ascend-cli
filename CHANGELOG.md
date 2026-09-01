@@ -24,11 +24,14 @@ side is now configurable to match, via `bridge_response_timeout_ms` in the confi
   turned a healthy slow target into 100% probe failures — and because failed probes make the
   platform auto-pause the assessment, it presented as "the bridge broke". There is now one resolver
   (`adapters.base.resolve_timeout_s`): the config's `timeout_ms` wins, else
-  `$ASCEND_TARGET_TIMEOUT_MS`, else a default that covers a **10 minute** reply, always clamped to
-  `$ASCEND_TARGET_MAX_TIMEOUT_MS` so a genuinely hung target still cannot hold a worker open for
-  the whole run. `adapter build` no longer pins a short value. The default was raised from 5 to 10
-  minutes after a live 10-minute target failed at exactly the 5 minute mark — "slow" has no small
-  bound, so the ceiling, not the default, is what guards against a hung target.
+  `$ASCEND_TARGET_TIMEOUT_MS`, else a default that sits **above** the ~10 minute envelope we intend
+  to serve, always clamped to `$ASCEND_TARGET_MAX_TIMEOUT_MS` so a genuinely hung target still
+  cannot hold a worker open for the whole run. `adapter build` no longer pins a short value.
+  The default was set by measurement, not taste: a live 10-minute target failed under a 5 minute
+  default at exactly 300s, then failed *again* under a 10 minute default because a timeout equal to
+  the reply time has no headroom and loses the race by a second or two. A timeout is an upper bound,
+  so it has to sit above the slowest reply it is meant to serve. (Through the bridge the platform's
+  own response window is the tighter limit — see the known limitation above.)
 - **Dead relay state is pruned.** Every app ever served left pid/status files behind, so `bridge ls`
   filled with corpses (one was still listed 173 hours after it died) and a relay that was genuinely
   wrong got lost in the noise. Relays dead for more than a day are dropped from the listing;

@@ -109,7 +109,7 @@ into 100% probe failures, which then trips the platform's auto-pause. Measured l
 110s target under a 20s config timeout failed *every* probe.
 
 Only pin `timeout_ms` when you have measured the target and want to *cap* it. Otherwise
-leave it out and let the runtime default apply (it covers a **10 minute** reply), and tune
+leave it out and let the runtime default apply (it sits above the ~10 minute envelope), and tune
 per-environment with `$ASCEND_TARGET_TIMEOUT_MS`. A ceiling
 (`$ASCEND_TARGET_MAX_TIMEOUT_MS`) still applies so one hung target cannot hold a worker
 open for the whole run — slow is fine, hung is not.
