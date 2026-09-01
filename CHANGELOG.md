@@ -23,6 +23,10 @@ All notable changes to the Ascend CLI. Newest first. Format follows
   bridge echoes back, and the platform attributes each probe to its assessment.
 
 ### Added
+- **`ascend assess run` supervises its bridge.** While a run is followed (the default), every poll
+  re-ensures the relay: if the bridge dies mid-run for any reason, it is restarted so probes keep
+  flowing (a dead bridge scores a FALSE PASS). A live bridge is a no-op, native apps are skipped, and
+  the watchdog never raises. No external watchdog script needed.
 - **`ascend doctor` reports current vs latest version, and can update in place.** doctor now shows
   the packaged version against the latest **published GitHub release** and, when behind, prints the
   exact upgrade command for how this copy was installed. "Latest" tracks published *releases* only,

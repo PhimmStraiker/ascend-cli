@@ -901,6 +901,30 @@ def _ensure_note(res):
     return None
 
 
+def _supervise_bridge(c, app, *, assessment_id=None, args=None):
+    """Watchdog tick for a followed run: if a bridge-type app's relay has died mid-assessment,
+    restart it so probes keep flowing — a dead bridge scores a FALSE PASS. `_ensure_bridge` is
+    idempotent, so this is safe to call on every poll: a live bridge is a cheap no-op and a native
+    app is skipped. Returns a one-line note ONLY when it actually restarted a down bridge, else
+    None. Never raises."""
+    import supervisor as S
+    try:
+        if isinstance(app, str):
+            app = _app_by_id(c, app)
+        if not needs_bridge(app):
+            return None
+        if S.is_serving(app.get("id")):
+            return None                       # alive — nothing to do
+        r = _ensure_bridge(c, app, assessment_id=assessment_id, args=args)
+        if r.get("started"):
+            return f"bridge went down mid-run — restarted (pid {r.get('pid')})"
+        if r.get("skip") or r.get("error"):
+            return f"! bridge down and could not be restarted: {r.get('skip') or r.get('error')}"
+    except Exception as e:                     # supervision must never break the run's poll loop
+        return f"! bridge watchdog error: {type(e).__name__}"
+    return None
+
+
 def cmd_assess_run(args):
     c = _client(args)
     refs = _app_refs(args)
@@ -939,11 +963,21 @@ def cmd_assess_run(args):
             completed = int(round((prog or 0) * total)) if total else 0
             tw.push_progress(completed, failed, total)
             tw.set_subtitle(f"running · {refs[0]} · {status}  {int(round((prog or 0) * 100))}%")
+        # Watchdog: every poll, re-ensure the relay. If it died mid-run (for ANY reason) it is
+        # restarted so probes keep flowing; a live bridge is a no-op and a native app is skipped.
+        _sup_app = _app_by_id(c, appid)
+        def _supervised_tick(status, prog, a):
+            note = _supervise_bridge(c, _sup_app, args=args)
+            if note:
+                print(f"  {note}", file=sys.stderr)
+            if tw.enabled:
+                _tw_tick(status, prog, a)
+            elif not args.json:
+                _tick(status, prog, a)
         feed_interval = min(args.interval, 4) if tw.enabled else args.interval
         with tw:
             res = c.run(appid, args.name, wait=True,
-                        interval=feed_interval, timeout=args.timeout,
-                        on_tick=(_tw_tick if tw.enabled else (None if args.json else _tick)))
+                        interval=feed_interval, timeout=args.timeout, on_tick=_supervised_tick)
     else:
         res = c.run(appid, args.name, wait=False,
                     interval=args.interval, timeout=args.timeout, on_tick=None)
