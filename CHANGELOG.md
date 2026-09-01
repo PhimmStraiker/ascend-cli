@@ -29,6 +29,13 @@ All notable changes to the Ascend CLI. Newest first. Format follows
   `ascend runtime start` genuinely persistent. `assess run` binds the real assessment id to the relay
   as soon as the platform names it (a relay must be up *before* the run is created, so it cannot get
   the id from argv).
+- **A hand-started relay is now visible to the rest of the CLI.** `ascend runtime start` wrote no
+  pidfile at all (only the supervised path did) and only wrote status when `--status-file` was
+  passed, so `bridge ls` and `is_serving()` could not see it. `assess run` therefore concluded no
+  bridge was serving and started a **second** relay for the same app, with two consumers splitting
+  that app's probes — the "probes stopped flowing" report. A relay now registers itself under the
+  app it serves and deregisters on exit, so a standalone bridge is reused rather than duplicated.
+  This is what makes standalone and CLI-managed bridges mutually exclusive in practice.
 - **A manually started relay registered itself under the config name instead of the app id.**
   `runtime start --config acme` filed its state as `acme`, so `is_serving(aapp_…)` could never see
   it, the auto-lifecycle concluded no bridge was running, and it started a **second** relay for the
