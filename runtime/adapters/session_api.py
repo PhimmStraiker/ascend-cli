@@ -27,6 +27,7 @@ from typing import Any, Dict, Optional
 
 import requests
 
+from . import auth_lifecycle
 from .base import BotAdapter, resolve_timeout_s
 from .websocket_direct import _json_escape
 
@@ -46,8 +47,17 @@ class SessionAPIAdapter(BotAdapter):
 
         timeout = resolve_timeout_s(config)
 
-        headers = {"Content-Type": "application/json"}
-        headers.update(config.get("headers", {}))
+        base_headers = {"Content-Type": "application/json"}
+        base_headers.update(config.get("headers", {}))
+        base_endpoint = session_endpoint
+
+        def _authed():
+            """(endpoint, headers, manager) with a live credential substituted in.
+
+            Rebuilt from the ORIGINAL config each attempt: once {{TOKEN}} has been substituted the
+            placeholder is gone, so re-applying to already-rendered headers would be a no-op.
+            """
+            return auth_lifecycle.apply_auth(config, base_endpoint, base_headers, None)
 
         # --- Step 1: Create session ---
         session_body = config.get("session_body", {})
@@ -55,17 +65,38 @@ class SessionAPIAdapter(BotAdapter):
         session_body_str = session_body_str.replace("{{UUID}}", str(uuid.uuid4()))
         session_body = json.loads(session_body_str)
 
-        try:
-            logger.info(f"SessionAPI: creating session at {session_endpoint}")
-            resp = requests.post(
-                session_endpoint, json=session_body, headers=headers, timeout=timeout
-            )
-            resp.raise_for_status()
-            session_data = resp.json()
-        except requests.RequestException as e:
-            return self._fail(f"Session creation failed: {e}", start)
-        except json.JSONDecodeError:
-            return self._fail("Session response is not JSON", start)
+        # A session target's credential expires mid-run exactly like any other, and a stale one
+        # turns every later probe into a 401 that scores as a target refusal. No-op without `auth`.
+        session_data = None
+        for attempt in range(2):
+            try:
+                session_endpoint, headers, _, mgr = _authed()
+            except auth_lifecycle.AuthError as e:
+                return self._fail(f"auth lifecycle: {e}", start, status_code=401)
+            try:
+                logger.info(f"SessionAPI: creating session at {session_endpoint}")
+                resp = requests.post(
+                    session_endpoint, json=session_body, headers=headers, timeout=timeout
+                )
+            except requests.RequestException as e:
+                return self._fail(f"Session creation failed: {e}", start)
+            if (resp.status_code in (401, 403) and mgr is not None
+                    and mgr.retries_on_401() and attempt == 0):
+                logger.info("SessionAPI: HTTP %s creating a session — re-minting the credential "
+                            "and retrying once", resp.status_code)
+                mgr.invalidate()
+                continue
+            try:
+                resp.raise_for_status()
+                session_data = resp.json()
+            except requests.RequestException as e:
+                return self._fail(f"Session creation failed: {e}", start)
+            except json.JSONDecodeError:
+                return self._fail("Session response is not JSON", start)
+            break
+        if session_data is None:
+            return self._fail("Session creation failed after re-authenticating", start,
+                              status_code=401)
 
         extract_path = config.get("session_extract", "sessionId")
         session_value = _extract(session_data, extract_path)
