@@ -54,14 +54,30 @@ exactly once). `assess pause`/`resume` are already safe to repeat.
 
 ```bash
 ascend status --json                                    # 1. read state
-ascend adapter build --api "$URL" --bearer "$TOK" --out bot.json  # 2. get a VALIDATED config
-ascend app create --name Bot --config bot --controls sys_prompt_leak --if-not-exists
-ascend assess run --app Bot --name 'run 1'              # 3. run — auto-starts the bridge for a
+ascend target add "$URL" --bearer "$TOK" --name Bot --json   # 2. onboard: adapter + app + key,
+                                                        #    validated. Pass a URL, a cURL/HAR
+                                                        #    file, or a config name — it detects
+                                                        #    which; do not pre-classify it.
+ascend target check Bot --json                          # 3. re-prove it against the LIVE target
+ascend assess run --app Bot --name 'run 1'              # 4. run — auto-starts the bridge for a
                                                         #    bridge-type app, self-stops at the end
-ascend assess watch --all --json                        # 4. follow (NDJSON, one object per tick)
-ascend reports --app Bot --detail --json                # 5. read results
-ascend ci --app Bot --assessment "$AID" --fail-on-severity high   # 6. decide
+ascend assess watch --all --json                        # 5. follow (NDJSON, one object per tick)
+ascend reports --app Bot --detail --json                # 6. read results
+ascend ci --app Bot --assessment "$AID" --fail-on-severity high   # 7. decide
 ```
+
+Step 2 replaces the older three-command form, which still works unchanged and is what `target add`
+calls underneath — reach for it when you need a piece on its own:
+
+```bash
+ascend adapter build --api "$URL" --bearer "$TOK" --out bot.json   # config only
+ascend app create --name Bot --config bot --if-not-exists          # registration only
+ascend keys add --app Bot --key tc-…                               # key only
+```
+
+**Run `target check` before every assessment.** A target that has drifted — auth expired, response
+shape moved, endpoint changed — still produces a *clean-looking* run that measured nothing. `check`
+is the difference between a pass and a false pass.
 
 `assess run` auto-manages the bridge, so there is no manual serve step. If run state changed in the
 Console (a Console-side pause/resume), reconcile with `ascend bridge sync` (start for running/paused
@@ -185,6 +201,11 @@ all HTTP uses one pooled connection, so a second command in the same window cost
 ## The CLI versus MCP
 
 For an agent with shell access the CLI needs no install or config step, and it composes: pipe
-`--json` into `jq`/`python`, tail a bridge log, chain steps in one command. An MCP layer applies to
-clients that can't run a shell, or when you want to restrict an agent to a fixed set of verbs. An
-MCP passthrough exists in `shells/mcp/` for that case.
+`--json` into `jq`/`python`, tail a bridge log, chain steps in one command. It is also the cheaper
+surface — an agent pays only for the `--help` it reads, where an MCP server injects every tool
+schema into the context on every conversation.
+
+An MCP layer applies to clients that can't run a shell, or when you want to restrict an agent to a
+fixed set of verbs. The passthrough in `shells/mcp/` exposes a curated subset — deliberately not a
+mirror of every command — led by `ascend_target_add` and `ascend_target_check`, so an agent can go
+from a bare URL to a result without leaving MCP.
