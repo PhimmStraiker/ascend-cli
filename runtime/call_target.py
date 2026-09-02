@@ -3,7 +3,7 @@ call_target.py — the SDK seam, wired to the adapter framework.
 
 `bridge_client.py` leaves one function for you to write: take a leased probe's
 body/headers, call your target, return (status_code, response). Here that seam
-dispatches into the proven adapter framework (13 adapters) with a conversation/
+dispatches into the proven adapter framework (15 adapters) with a conversation/
 session model, so a single implementation handles REST, SSE, WebSocket (incl.
 chunked text/json framing), multi-step session APIs, browser widgets, etc.
 """
@@ -86,8 +86,26 @@ class TargetCaller:
 
     @property
     def is_stateful(self) -> bool:
-        return (self.adapter_type in STATEFUL_ADAPTERS
-                and not self.config.get("conversation_key"))
+        """Whether probes must run one at a time to avoid sharing conversation state.
+
+        Statefulness is not purely a property of the adapter — it can be created by the CONFIG.
+        `sse_stream` is not in STATEFUL_ADAPTERS, but a `create` block without `per_prompt` mints
+        exactly one conversation and reuses it for every prompt (see sse_stream._conversation).
+        Such a config was still getting the stateless default of 10 workers, so ten probes
+        interleaved inside a single conversation: each one saw the others' turns as its own
+        context. That corrupts multi-turn results in both directions — a probe can be scored
+        against a reply provoked by a different probe — and it does so silently, because every
+        probe still gets answered and the run still completes.
+
+        `conversation_key` remains the escape hatch: it means the adapter keys conversations per
+        probe, so parallelism is safe again.
+        """
+        if self.config.get("conversation_key"):
+            return False
+        if self.adapter_type in STATEFUL_ADAPTERS:
+            return True
+        create = self.config.get("create") or {}
+        return bool(create.get("url")) and not create.get("per_prompt")
 
     def recommended_workers(self) -> int:
         """Sequential for stateful/multi-turn targets unless they expose a key."""

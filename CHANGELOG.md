@@ -34,6 +34,45 @@ All notable changes to the Ascend CLI. Newest first. Format follows
   artifact itself says which it is. It stops once the target is registered and proven, because
   spending an assessment is a separate decision (`--run` to continue straight into one).
 
+### Fixed
+- **A config now resolves the same way from every directory.** Config lookup picked the first
+  configs *directory* that existed and then searched only inside it. Every checkout of this repo
+  ships a `configs/` of examples, so running the CLI from a checkout made `~/.ascend/configs`
+  invisible: a target created from one directory was "config not found" from another, and after
+  upgrading by re-installing, a working target could disappear entirely. What the operator saw was
+  a bridge — because `runtime start` exits before it ever leases, and a relay that never starts is
+  indistinguishable from one that dropped. The app's *key* kept resolving throughout (keys live in
+  `~/.ascend` and never depended on the working directory), which is exactly what made it read as
+  a flaky bridge rather than a lookup bug. Configs are now searched per *file* across every config
+  directory, `adapter configs` lists all of them and says where new ones are written, and precedence
+  is unchanged — an explicit `$ASCEND_CONFIG_DIR` still wins, and a local `configs/` still shadows
+  home, so nothing that resolves today resolves differently.
+
+### Added
+- **The MCP shim can onboard a target.** It exposed nine tools that could run and read an
+  assessment but could not *create* the thing being assessed, so an agent driving Ascend over MCP
+  hit a wall at the first step and had to drop to a shell. `ascend_target_add` and
+  `ascend_target_check` close that gap, and lead the tool list because an agent reads it top-down.
+
+### Documentation
+- **The shipped docs and the architecture diagrams now describe the tool as it is.** They still
+  taught the old shape — onboarding framed as picking among source flags, `target` absent
+  everywhere, and the interactive map's lifecycle stepping through build → register → assess. The
+  README, architecture, lifecycle, surface, usage and adapter guides now lead with `target`, and
+  the interactive map's lifecycle is `identify → add target → assess → analyze`, with `app`,
+  `adapter` and `keys` documented as the machinery underneath rather than as the way in.
+- Corrected while auditing them, since a wrong reference is worse than a missing one: the adapter
+  count was documented as 13 or 14 in five places and is **15**; the stateful-adapter set was
+  documented as 8 and is **12**; `terminal` was listed as a transport and does not exist; the
+  usage guide claimed the `app` verbs only covered bridge apps and sent readers to a Python
+  snippet, when `app create --type` has covered all four types for some time; the README claimed
+  45 commands against a generated reference that counts 53; and the architecture diagram gave the
+  cloud lease service and your local bridge process the same node id, so they rendered as one box
+  with a self-loop. The two are now named separately, in the glossary as well.
+- Documented the per-probe window (~110–120s, timed from when a probe is **queued**) and the fact
+  that exceeding it returns a synthetic timeout indistinguishable from a target failure — the
+  single most misread behaviour in this system, because it presents as a dropped bridge.
+
 ### Changed
 - The skills carry a troubleshooting playbook and a per-target-pattern catalog: which adapter
   suits which target shape, and the way each one specifically fails. Most failures here present

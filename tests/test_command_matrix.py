@@ -12,9 +12,26 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 
-GROUPS = ["app", "controls", "assess", "runtime", "adapter", "map", "discover",
-          "export", "ci", "chat", "onboard", "results", "doctor", "version",
-          "relay", "keys", "tenant"]
+def _all_groups():
+    """Every group argparse actually knows, derived — not a hand-kept list.
+
+    The hand-kept list silently fell five groups behind (`bridge`, `policy`, `reports`,
+    `status`, `target` were never exercised). Root help is tiered now, so most groups are not
+    listed at the top level and a broken one would be invisible until a user hit it. Deriving
+    the list means adding a group automatically adds its coverage.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_acli_matrix", REPO / "shells/cli/ascend.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    import argparse
+    for action in mod.build_parser()._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return sorted(action.choices)
+    raise AssertionError("no subparsers found on the root parser")
+
+
+GROUPS = _all_groups()
 
 
 def run(*args, env=None):
@@ -64,3 +81,30 @@ def test_version_prints_and_exits_zero():
     r = run("version")
     assert r.returncode == 0
     assert r.stdout.strip()
+
+
+# --- every SUBcommand parses too -----------------------------------------------------------
+# Root help is tiered, so `app`, `adapter`, `keys` and the rest are no longer listed at the top
+# level. Hiding a command from a menu must not be able to break it: the promise made when the
+# help was tiered was that nothing was removed or renamed.
+def _all_subcommands():
+    import argparse
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_acli_subs", REPO / "shells/cli/ascend.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    out = []
+    for action in mod.build_parser()._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for gname, gparser in action.choices.items():
+                for sub in gparser._actions:
+                    if isinstance(sub, argparse._SubParsersAction):
+                        out += [(gname, s) for s in sorted(sub.choices)]
+    return out
+
+
+@pytest.mark.parametrize("group,verb", _all_subcommands())
+def test_every_subcommand_help_parses(group, verb):
+    r = run(group, verb, "--help")
+    assert r.returncode == 0, f"{group} {verb} --help exited {r.returncode}: {r.stderr[:200]}"
+    assert "Traceback" not in (r.stdout + r.stderr)

@@ -11,44 +11,83 @@ ascend doctor          # confirm the PAT exchanges, the API + bridge are reachab
 
 ---
 
-## 1. Onboard a reachable API target (direct `api` app)
+## 1. Onboard a target
 
-Use this when the target is a plain REST endpoint with stable auth that Ascend can call
-itself, with no runtime process and no bridge. Registration is a control-plane call; the CLI
-`app` verbs cover bridge apps, so build the `api` spec through `control/api.py`:
+A **target** is the thing you assess. It used to be four objects you held in your head and kept in
+sync by hand — an adapter config, an application record, a stored bridge key, a purpose string —
+and any one of them drifting broke a run in a way that looked like something else. `ascend target`
+is one noun for all four:
 
-```python
-# register_direct.py
-import sys; sys.path.insert(0, "control")
-import api
-
-c = api.AscendAPI()  # reads $STRAIKER_PAT
-spec = api.build_api_spec(
-    name="My Bot",
-    url="https://bot.example.com/v1/chat",
-    system_prompt="You are a helpful assistant.",
-    request_template={"prompt": "{{PROMPT}}"},
-    response_template={"response": "{{RESPONSE}}"},
-    headers={"Authorization": "Bearer …"},
-    control_ids=["sys_prompt_leak", "pii_leak"],
-    assessment_size="small", qpm=4,
-)
-app = c.create_app(spec)
-print(app["id"])
+```bash
+ascend target add https://your-bot.example.com/chat \
+  --name 'My Bot' --controls sys_prompt_leak,pii_leak
 ```
 
-Then run the assessment directly (Section 3). Note the no-space `{{PROMPT}}` / `{{RESPONSE}}`
-gotcha: the templates are enforced literal.
+`target add` detects what you handed it, so there is no source flag to choose first:
+
+| what you have | what you run |
+|---|---|
+| a URL | `ascend target add https://your-bot.example.com/chat` |
+| a request copied out of devtools (**Copy as cURL**) | `ascend target add ./request.curl` |
+| a browser session exported from devtools | `ascend target add ~/Downloads/session.har` |
+| a config already on disk | `ascend target add mybot` |
+
+One call builds the adapter, proves it against the live endpoint, registers the application as a
+`bridge` app and stores the `tc-` key — then **stops**. Registering a target and spending an
+assessment are separate decisions:
+
+```bash
+ascend target add ./request.curl --run       # continue straight into an assessment
+ascend target add ./request.curl --dry-run   # stop after validation; register nothing
+```
+
+Then, day to day:
+
+```bash
+ascend target list             # adapter, config, whether registered, whether serving
+ascend target show 'My Bot'    # app id, adapter, endpoint, masked key, last verified reply
+ascend target check 'My Bot'   # re-prove it against the LIVE endpoint, and time it
+ascend target rm 'My Bot'      # delete the application and drop its stored key
+```
+
+`target check` is the first thing to run when a run comes back suspiciously clean. It exits
+non-zero when the adapter can no longer talk to the target — an expired session token is the usual
+cause — and warns when the measured reply time cannot survive the platform's per-probe window.
+
+Nothing was removed to make room for this. `app`, `adapter`, `keys` and `onboard` are the machinery
+underneath `target` and behave exactly as before; the sections below drive them directly, for when
+the individual steps matter.
 
 ---
 
-## 2. Onboard a bridge target (adapter + relay)
+## 2. Onboard a reachable API target (direct `api` app)
+
+Use this when the target is a plain REST endpoint with stable auth that Ascend can call itself,
+with no runtime process and no bridge. `adapter build` already produces the url, templates and
+headers an `api` app needs, so the built config feeds the create:
+
+```bash
+ascend adapter build --api https://bot.example.com/v1/chat --bearer "$TOK" --out mybot.json
+ascend app create --type api --name 'My Bot' --config mybot \
+  --target-api-key "$TOK" --controls sys_prompt_leak,pii_leak
+```
+
+Then run the assessment directly (Section 4) — there is no bridge to start. Note the no-space
+`{{PROMPT}}` / `{{RESPONSE}}` gotcha: the templates are enforced literal.
+
+---
+
+## 3. Onboard a bridge target (adapter + relay)
 
 Use this for anything Ascend can't call directly: browser widgets, session handshakes, SSE
 reassembly, OAuth, WebSocket framing, or egress from inside your network. A **bridge** app has
 its adapter on your side; the CLI relays each probe to the target. You do NOT start the relay by
 hand for a normal run. `ascend assess run` starts it before probes are scheduled and it
 self-stops when the run reaches a terminal state.
+
+`ascend target add` (Section 1) collapses steps 1 and 2 into one call, and `--run` takes step 3
+as well. Do them by hand when you are writing the config yourself — for an adapter whose contract
+no capture can infer.
 
 **Step 1: register the bridge app** (`bridge` is the default type; prints the `tc-` key ONCE):
 
@@ -77,11 +116,20 @@ ascend app create --name 'My Bot' --config mybot \
 Sanity-check it before running:
 
 ```bash
-ascend adapter list                 # the 11 adapter types
-ascend adapter show mybot           # echo the config back
+ascend adapter list                 # the 15 adapter types
+ascend adapter configs              # every config on disk, and where new ones are written
+ascend adapter show mybot           # echo the config back (secrets masked)
 ```
 
-**Step 3: run the assessment** (Section 3). It auto-starts the bridge for this app up front, so
+A config is resolved per **file**, across every config directory in turn: `$ASCEND_CONFIG_DIR`,
+then `./configs`, then `~/.ascend/configs`, then the examples bundled with the CLI. Precedence is
+unchanged, and new configs are still written to a single directory — the one `adapter configs`
+names. Lookup used to stop at the first directory that *existed*; since every checkout ships a
+`configs/` of examples, running from a checkout hid `~/.ascend/configs` entirely, so a config
+written in one directory was "config not found" in another. The app's key resolved fine either way
+(keys live in `~/.ascend`), which is what made it read as a flaky bridge rather than a lookup bug.
+
+**Step 3: run the assessment** (Section 4). It auto-starts the bridge for this app up front, so
 the first probes are never dropped, and the bridge self-stops when the run ends:
 
 ```bash
@@ -94,7 +142,7 @@ unanswered run cannot score a false pass.
 
 ---
 
-## 3. Run and monitor an assessment
+## 4. Run and monitor an assessment
 
 The lifecycle is *create → pause → resume → poll*. `ascend assess run` does it in
 one command:
@@ -135,15 +183,16 @@ Bridge lifecycle across pause/resume:
 
 ---
 
-## 4. Multi-turn / session targets
+## 5. Multi-turn / session targets
 
 Some targets carry conversation state (a session id, a thread, an open widget). In pull-mode
 Ascend sends only the *prompt*; the bridge owns continuity. This is handled automatically:
-the eight **stateful** adapters (`session_api`, `browser`, `amazon_connect`, `scrt2_direct`,
-`agentforce`, `slack_direct`, `copilot_studio`, `websocket_direct`) run at concurrency **1** by
-default so exactly one conversation is ever in flight, and a persistent adapter instance threads
-the turns. `ascend assess run` auto-starts the bridge at the right concurrency for the config,
-with no flag needed:
+the twelve **stateful** adapters (`session_api`, `session_poll`, `sentinel_stream`, `browser`,
+`amazon_connect`, `scrt2_direct`, `agentforce`, `slack_direct`, `copilot_studio`,
+`websocket_direct`, `bedrock`, `custom`) run at concurrency **1** by default so exactly one
+conversation is ever in flight, and a persistent adapter instance threads the turns.
+`ascend assess run` auto-starts the bridge at the right concurrency for the config, with no flag
+needed:
 
 ```bash
 ascend assess run --app 'My Bot' --name 'run 1' --controls sys_prompt_leak,pii_leak
@@ -157,7 +206,7 @@ The full model, covering sequential-vs-concurrent policy, `conversation_key`, an
 
 ---
 
-## 5. Browser and terminal targets
+## 6. Browser and terminal targets
 
 **Browser** (`browser` adapter): for chat widgets with no API. Needs Playwright:
 
@@ -179,7 +228,7 @@ ascend doctor            # look for: [ok] tmux present (terminal targets only)
 
 ---
 
-## 6. Reporting and CI
+## 7. Reporting and CI
 
 - **Export findings**: `ascend export --format sarif|json|csv|markdown` turns a completed
   assessment into a file you can attach or submit.

@@ -68,6 +68,70 @@ _GLOBALS = (("token", "--token"), ("base", "--base"), ("bridge_base", "--bridge-
 # The manifest is intentionally a pure data structure so it can be asserted on in
 # tests with no subprocess and no network.
 TOOLS: list[dict[str, Any]] = [
+    # The target tools lead the manifest on purpose: an agent reads tools/list top-down, so the
+    # golden path has to be the first thing it sees — the same reason the CLI tiers its root help.
+    # Before these existed the shim could run an assessment but could not CREATE a target, so an
+    # agent could never get from "here is a URL" to a result without leaving MCP entirely.
+    {
+        "name": "ascend_target_add",
+        "description": (
+            "Onboard a target from a URL, a cURL/HAR file, or a saved config name, and register it "
+            "with Ascend. `source` is auto-detected — do not pre-classify it. This is the one call "
+            "that goes from nothing to a ready target; follow it with ascend_target_check."
+        ),
+        "cli": ["target", "add"],
+        "params": {
+            "source": {"kind": "positional", "required": True},
+            "name": {"kind": "option", "flag": "--name"},
+            "system_prompt": {"kind": "option", "flag": "--system-prompt"},
+            "controls": {"kind": "option", "flag": "--controls"},
+            "bearer": {"kind": "option", "flag": "--bearer"},
+            "api_key": {"kind": "option", "flag": "--api-key"},
+            "size": {"kind": "option", "flag": "--size"},
+            "qpm": {"kind": "option", "flag": "--qpm"},
+            "run": {"kind": "flag", "flag": "--run"},
+        },
+        "schema": {
+            "source": {"type": "string", "description":
+                       "a URL, a path to a cURL/HAR file, or an existing config name"},
+            "name": {"type": "string", "description": "application name (default: derived from the URL)"},
+            "system_prompt": {"type": "string", "description":
+                              "what the target is — steers which probes are relevant"},
+            "controls": {"type": "string", "description":
+                         "comma-separated control ids (default: the full non-deprecated catalog)"},
+            "bearer": {"type": "string", "description": "bearer token for the target"},
+            "api_key": {"type": "string", "description": "NAME:VALUE[:in=header|query]"},
+            "size": {"type": "string", "enum": ["small", "medium", "large"]},
+            "qpm": {"type": "integer", "description": "queries per minute cap"},
+            "run": {"type": "boolean", "description":
+                    "also start an assessment immediately (default: register only)"},
+        },
+        "required": ["source"],
+    },
+    {
+        "name": "ascend_target_check",
+        "description": (
+            "Re-prove a target against its LIVE endpoint: sends a real prompt through the adapter "
+            "and reports auth, extraction and per-probe-window problems. Run this before every "
+            "assessment — a stale adapter otherwise produces a clean-looking run that measured nothing."
+        ),
+        "cli": ["target", "check"],
+        "params": {
+            "target": {"kind": "positional", "required": True},
+            "prompt": {"kind": "option", "flag": "--prompt"},
+            "expect": {"kind": "option", "flag": "--expect"},
+            "timeout": {"kind": "option", "flag": "--timeout"},
+            "adapter": {"kind": "option", "flag": "--adapter"},
+        },
+        "schema": {
+            "target": {"type": "string", "description": "target name, config name, or aapp_ id"},
+            "prompt": {"type": "string", "description": "prompt to send (default: a benign hello)"},
+            "expect": {"type": "string", "description": "require this substring in the reply"},
+            "timeout": {"type": "number", "description": "per-request timeout in seconds"},
+            "adapter": {"type": "string", "description": "override the adapter type"},
+        },
+        "required": ["target"],
+    },
     {
         "name": "ascend_app_list",
         "description": "List Ascend applications in the tenant (id, api_type, name).",

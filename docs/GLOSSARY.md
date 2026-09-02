@@ -10,10 +10,11 @@ left-hand column.
 |---|---|---|
 | **target** | The AI system being tested: a chatbot, an agent, a model endpoint. | the bot, the agent |
 | **app** | The target's registration in Ascend (`aapp_…`). Carries the controls, size, and how the platform reaches the target. | application (except in API field names) |
-| **adapter** | The code that talks to one *shape* of target: `direct_api`, `sse_stream`, `bedrock`… 14 of them. | connector, driver |
+| **adapter** | The code that talks to one *shape* of target: `direct_api`, `sse_stream`, `bedrock`… 15 of them. | connector, driver |
 | **adapter config** (or **config**) | A saved JSON file describing one specific target: its URL, body shape, where the answer lives, its auth. Produced by `ascend adapter build`. | profile, target file |
 | **bridge (app type)** | An app whose adapter runs on **your** side; the CLI relays its probes. One of `bridge\|api\|gcp\|bedrock`, and the default. See [APP_TYPES.md](APP_TYPES.md). | thin (the old name, gone from the user surface) |
 | **the bridge** (process) | The CLI running that relay: it leases probes from Ascend and puts them through your adapter. The CLI **is** the bridge, baked in; there is no separate binary to install. Managed by `ascend bridge`. | relay (the old name; still works as an alias) |
+| **lease service** | The Straiker-side endpoint the bridge leases probes from and posts results to (`/v2/lease`, `/v2/result`). Always up; not something you run. Naming it separately is what stops "the bridge is down" from being ambiguous. | the bridge (it is the other end of it) |
 | **bridge key** (`tc-…`) | The credential the bridge presents. Returned **once**, when a bridge app is created. | thin key, thin API key, tc key, relay key |
 | **assessment** | One red-team run against one app. Has a status, a score, a severity, and probes. | run (as a noun) |
 | **probe** | One adversarial prompt sent to the target. An assessment is made of thousands. | test, attack (as a count) |
