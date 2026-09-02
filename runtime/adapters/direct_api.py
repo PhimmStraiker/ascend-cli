@@ -16,6 +16,7 @@ Config keys:
 """
 
 import json
+import re
 import time
 import logging
 from typing import Any, Dict
@@ -66,8 +67,19 @@ class DirectAPIAdapter(BotAdapter):
         except (TypeError, ValueError) as e:
             return self._fail(f"body template render failed: {e}", start)
 
+        # A credential can ride in the query string (`--api-key ...:in=query`, Gemini's `?key=`),
+        # which this tool bakes into the endpoint itself. Never log or report the raw URL.
+        def _safe(text):
+            try:
+                from manual import redact_url
+                return redact_url(text) if isinstance(text, str) and text.startswith("http") \
+                    else re.sub(r"([?&](?:key|api_?key|access_token|token)=)[^&\s]+",
+                                r"\1[REDACTED]", str(text), flags=re.I)
+            except Exception:
+                return text
+
         try:
-            logger.info(f"DirectAPI: {method} {endpoint}")
+            logger.info(f"DirectAPI: {method} {_safe(endpoint)}")
             tls_min = config.get("tls_min")
             if tls_min:
                 # a minimum-TLS pin needs a Session (the adapter is mounted per-scheme)
@@ -82,7 +94,8 @@ class DirectAPIAdapter(BotAdapter):
                                         **tls_kwargs(config), **send_kwargs)
             resp.raise_for_status()
         except requests.RequestException as e:
-            return self._fail(f"HTTP error: {e}", start, status_code=getattr(getattr(e, "response", None), "status_code", None))
+            return self._fail(f"HTTP error: {_safe(e)}", start,
+                                  status_code=getattr(getattr(e, "response", None), "status_code", None))
 
         extract_path = config.get("response_path")
         # Try JSON; fall back to raw text for plain-text bots.

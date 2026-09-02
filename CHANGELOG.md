@@ -7,6 +7,19 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ## [Unreleased]
 
+### Security
+- **`app list` and `app get` no longer print bridge keys.** The platform returns `thin_api_key` on
+  GET and in the application list, not only at creation, so a read-only listing emitted every
+  bridge-type app's key in full — into CI logs, agent transcripts and screen shares, from the
+  command least likely to be suspected of holding a secret. They are masked now, as `creds` already
+  promised everywhere else. `app create` still shows the key once, on purpose.
+- **A credential in a URL query string is now redacted.** Masking matched on key *names* only,
+  while the CLI itself bakes credentials into the endpoint (`--api-key ...:in=query`, a Gemini-style
+  `?key=`). The credential therefore survived redaction in a *value*: printed by `adapter show`
+  while it claimed "secrets masked", logged on every probe, written to capture transcripts, and
+  posted to the platform inside a failing probe's error text. Redaction is value-aware now, and the
+  adapter scrubs the URL before logging or reporting it.
+
 ### Added
 - **`ascend target` — one noun for the thing you actually assess.** A target used to be spread
   across an adapter config, an application record, a stored key and a purpose string, and you had
