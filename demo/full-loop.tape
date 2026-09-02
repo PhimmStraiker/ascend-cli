@@ -18,11 +18,10 @@ Set Theme "Catppuccin Mocha"
 Set TypingSpeed 40ms
 Set Padding 22
 
-# --- hidden setup: cd + auth from the project .env (no secret in this file) ---
+# --- hidden setup: cd to the clone; STRAIKER_PAT must already be exported ---
 Hide
-Type "cd '/Users/phimmasonephonpaseuth/Projects/Straiker Projects/ascend-cli'" Enter
-Type "source '/Users/phimmasonephonpaseuth/Projects/Straiker Projects/.env'" Enter
-Type "export STRAIKER_PAT=$STRAIKER_PLATFORM_API_KEY" Enter
+Type "cd \"${ASCEND_REPO:-$PWD}\"" Enter
+Type "export STRAIKER_PAT=\"${STRAIKER_PAT:?export your PAT before recording}\"" Enter
 Type "rm -f captures/demo-vhs.jsonl" Enter
 Type "clear" Enter
 Show
