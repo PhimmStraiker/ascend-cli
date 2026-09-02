@@ -32,7 +32,7 @@ adapter configs & capabilities
 
 ### `ascend adapter build`
 
-Build an adapter config for a target and PROVE it against the live target before writing anything. The source is a flag: --har <file>   a browser HAR you exported  (most reliable) --curl <file>  one request copied as cURL --url <page>   a live page — the CLI drives a real browser --api <url>    an HTTP API endpoint --spec <base>  an OpenAPI/Swagger spec Nothing is written unless it answered: an unvalidated config is a guess.
+Build an adapter config for a target and PROVE it against the live target before writing anything. Give it whichever source you have — --api, --curl, --har, --url or --spec, listed below. Nothing is written unless it answered: an unvalidated config is a guess.
 
 - **`evidence`** (optional) — evidence JSON path
 
