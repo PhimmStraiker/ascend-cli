@@ -2500,6 +2500,20 @@ def cmd_onboard(args):
     except Exception as e:
         _ok(f"could not save the bridge key ({e}); copy it now: {tc}")
 
+    # `target add` stops here. The target exists, its adapter is proven against the live endpoint,
+    # and its key is stored — which is everything needed to run it later. Whether to spend an
+    # assessment now is a separate decision (`target add --run`, or `ascend assess run`).
+    if getattr(args, "stop_after_register", False):
+        label = args.name or name
+        _out({"target": label, "app_id": app_id, "config": cfg_name, "adapter": adapter,
+              "validated": True, "key_stored": True}, args,
+             human=(f"\ntarget '{label}' is ready\n"
+                    f"  app       {app_id}\n"
+                    f"  adapter   {adapter}   (config '{cfg_name}', proven against the live target)\n"
+                    f"  run it    ascend assess run --app '{label}'\n"
+                    f"  re-check  ascend target check '{label}'"))
+        return
+
     # 4. bridge ----------------------------------------------------------------
     _step(4, total, "starting the probe bridge in the background")
     import logging, threading, runtime.run as runtime_run
@@ -2568,6 +2582,187 @@ def cmd_onboard(args):
 
 
 # ----------------------------------------------------------------------------- results
+def _detect_source(thing):
+    """Work out what the operator handed us, so they do not have to pick a flag.
+
+    A target is onboarded from whatever evidence someone could get: a URL, a request copied out of
+    devtools, an exported browser session, a spec, or a config already on disk. Making them choose
+    between five mutually-exclusive flags first is a question they usually cannot answer — the
+    artifact itself says which it is. Returns (flag, value) or (None, reason).
+    """
+    if not thing:
+        return None, "nothing to detect"
+    s = str(thing).strip()
+    if s == "-":
+        return "curl", s                                  # a request piped in on stdin
+    low = s.lower()
+    if low.startswith(("http://", "https://")):
+        # A spec URL is unambiguous; anything else is treated as an endpoint, which is the cheap
+        # probe. A page that needs a real browser is `--url`, and the error path says so.
+        if any(k in low for k in ("openapi", "swagger", "/v2/api-docs")):
+            return "spec", s
+        return "api", s
+    p = Path(os.path.expanduser(s))
+    if p.is_file():
+        suf = p.suffix.lower()
+        if suf == ".har":
+            return "har", str(p)
+        if suf in (".curl", ".txt", ".sh"):
+            return "curl", str(p)
+        if suf == ".json":
+            # A HAR is JSON too, and so is a saved config — look inside rather than guess.
+            try:
+                head = p.read_text(errors="ignore")[:4000]
+            except OSError:
+                head = ""
+            if '"log"' in head and '"entries"' in head:
+                return "har", str(p)
+            if '"adapter"' in head:
+                return "config", p.stem
+            return "curl", str(p)
+        try:
+            if "curl " in p.read_text(errors="ignore")[:4000]:
+                return "curl", str(p)
+        except OSError:
+            pass
+        return None, f"{p.name}: not a HAR, a cURL request, or a saved config"
+    # not a URL and not a file — maybe it is the name of a config already on disk
+    try:
+        if (config_dir() / f"{s}.json").is_file():
+            return "config", s
+    except Exception:
+        pass
+    return None, (f"{s!r} is not a URL, a file, or a known config. Give a URL, a cURL/HAR file, "
+                  f"or run `ascend adapter configs` to see saved configs")
+
+
+def cmd_target_add(args):
+    """Onboard a target from whatever evidence exists, and stop once it is registered."""
+    src = getattr(args, "source", None)
+    if src:
+        flag, value = _detect_source(src)
+        if not flag:
+            _die(f"could not tell what {src!r} is: {value}", error_code="unknown_source",
+                 hint="ascend target add https://host/chat   ·   ascend target add ./request.curl")
+        if flag == "spec":
+            # A spec describes many endpoints; picking the chat one is a discovery step of its own.
+            _die(f"{src} looks like an OpenAPI/Swagger spec, which needs the endpoint chosen first.",
+                 error_code="spec_needs_build",
+                 hint=(f"ascend adapter build --spec {src} --out mybot\n"
+                       f"  then:  ascend target add mybot"))
+        if any(getattr(args, f, None) for f in ("api", "url", "curl", "har", "spec", "config")):
+            _die("give either a source argument or an explicit source flag, not both")
+        setattr(args, flag, value)
+        _say(args, f"detected {flag} source: {value}")
+    elif not any(getattr(args, f, None) for f in ("api", "url", "curl", "har", "spec", "config")):
+        _die("nothing to onboard: pass a URL, a cURL/HAR file, or a saved config",
+             hint="ascend target add https://host/chat")
+    # `--run` continues into the assessment; otherwise stop once the target is registered.
+    args.stop_after_register = not getattr(args, "run", False)
+    return cmd_onboard(args)
+
+
+def cmd_target_list(args):
+    """Every target this machine can run: its app, its proven adapter, and whether it is serving."""
+    import creds as C
+    recs = C.load_all() or {}
+    live = None
+    try:
+        live = {a.get("id"): a for a in _unwrap_list(_client(args).list_apps())}
+    except Exception:
+        live = None
+    try:
+        import supervisor as S
+        serving = {r["app_id"] for r in S.ls() if r.get("state") == "serving"}
+    except Exception:
+        serving = set()
+    rows = []
+    for aid, r in sorted(recs.items(), key=lambda kv: (kv[1].get("app_name") or "")):
+        rows.append({"target": r.get("app_name"), "app_id": aid, "config": r.get("config"),
+                     "adapter": r.get("adapter"),
+                     "registered": ("-" if live is None else ("yes" if aid in live else "GONE")),
+                     "bridge": "serving" if aid in serving else "-"})
+    if args.json:
+        _out(rows, args)
+        return
+    if not rows:
+        print("no targets yet.\n  add one:  ascend target add https://your-bot/chat")
+        return
+    print(f"  {'TARGET':28} {'ADAPTER':14} {'CONFIG':16} {'REGISTERED':11} BRIDGE")
+    for r in rows:
+        print(f"  {str(r['target'])[:28]:28} {str(r['adapter'] or '-')[:14]:14} "
+              f"{str(r['config'] or '-')[:16]:16} {r['registered']:11} {r['bridge']}")
+    print(f"\n{len(rows)} target(s)")
+
+
+def cmd_target_show(args):
+    """Everything bound to one target, in one place."""
+    import creds as C
+    app_id = args.target if str(args.target).startswith("aapp_") else _resolve_app(_client(args), args.target)
+    rec = C.get(app_id) or {}
+    cfg_name = rec.get("config")
+    cfg = {}
+    if cfg_name:
+        try:
+            cfg = _load_named_config(cfg_name)
+        except Exception:
+            cfg = {}
+    probe = cfg.get("_probe") or {}
+    out = {"target": rec.get("app_name"), "app_id": app_id, "config": cfg_name,
+           "adapter": rec.get("adapter") or cfg.get("adapter"),
+           "endpoint": cfg.get("endpoint") or cfg.get("url") or cfg.get("message_endpoint"),
+           "key": C.mask(rec.get("thin_api_key")),
+           "auth": (cfg.get("auth") or {}).get("type"),
+           "auth_lifecycle": (cfg.get("auth_lifecycle") or {}).get("type"),
+           "verified_answer": (probe.get("verified_answer") or "")[:160] or None}
+    if args.json:
+        _out(out, args)
+        return
+    for k, v in out.items():
+        if v is not None:
+            print(f"  {k:16} {v}")
+    print(f"\n  re-check it:  ascend target check '{out['target'] or app_id}'")
+
+
+def cmd_target_check(args):
+    """Re-prove a target against its live endpoint (delegates to the adapter hard gate)."""
+    import creds as C
+    ref = args.target
+    app_id = ref if str(ref).startswith("aapp_") else None
+    cfg_name = None
+    if app_id is None:
+        for aid, r in (C.load_all() or {}).items():
+            if (r.get("app_name") or "") == ref or r.get("config") == ref:
+                app_id, cfg_name = aid, r.get("config")
+                break
+    else:
+        cfg_name = (C.get(app_id) or {}).get("config")
+    args.config = cfg_name or ref
+    args.file = None
+    return cmd_adapter_validate(args)
+
+
+def cmd_target_rm(args):
+    """Forget a target: delete the application and drop its stored key."""
+    import creds as C
+    ref = args.target
+    app_id = ref if str(ref).startswith("aapp_") else _resolve_app(_client(args), ref)
+    removed_key = False
+    if not getattr(args, "keep_key", False):
+        try:
+            removed_key = C.remove(app_id)
+        except Exception:
+            removed_key = False
+    deleted = False
+    try:
+        _client(args).delete_app(app_id)
+        deleted = True
+    except Exception as e:
+        print(f"warning: could not delete the application ({type(e).__name__})", file=sys.stderr)
+    _out({"app_id": app_id, "app_deleted": deleted, "key_removed": removed_key}, args,
+         human=f"removed {app_id}  (app_deleted={deleted}, key_removed={removed_key})")
+
+
 def _looks_like_jsonl(path, sample=20):
     """Does this file actually contain JSON records? Checked before trusting a zero-turn result."""
     seen = 0
@@ -4779,28 +4974,71 @@ class _Fmt(argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescriptionHelpFo
 # same set of commands arranged in the order they are actually used.
 LIFECYCLE_HELP = """\
 START HERE
-  onboard                point at a target and get a running assessment — this is the whole
-                         flow in one command. Give it whatever you have:
-                           --api <url>    an HTTP endpoint          --har <file>  an exported browser session
-                           --curl <file>  a request copied as cURL  --url <page>  a live page (drives a browser)
+  target add <thing>     onboard a target from whatever you already have — it works out which
+                         it is. Add --run to go straight into an assessment.
+                           a URL              https://your-bot/chat
+                           a request          ./request.curl   (copy as cURL from devtools)
+                           a browser session  ./session.har
+                           a saved config     mybot
   doctor                 preflight: your key, API + bridge reachability, dependencies
 
 EVERYDAY
-  adapter build          connect to a target -> a VALIDATED config (same sources as onboard)
-  adapter validate       re-prove a saved config against the live target, and time it
-  app create             register a target with Ascend (--config <adapter> binds it)
-  assess run             run the assessment (the bridge is started and stopped for you)
-  assess watch           follow live runs; the BRIDGE column flags a run nobody is answering
+  target list            your targets: adapter, whether registered, whether serving
+  target check <t>       re-prove a target against its live endpoint, and time it
+  assess run --app <t>   run the assessment (the bridge is started and stopped for you)
+  assess watch --all     follow live runs; the BRIDGE column flags a run nobody is answering
   results                read the findings
 
 MORE
-  app · adapter · assess · bridge · chat · ci · controls · export
-  keys · policy · reports · status · tenant · version
+  app · adapter · assess · bridge · chat · ci · controls · export · keys
+  onboard · policy · reports · status · target · tenant · version
   Run `ascend <command> --help` for any of these — each has its own flags and examples.
+  `app`, `adapter` and `keys` are the machinery underneath `target`, still fully supported.
 
-Every command takes --json. `ascend onboard --help` is the fastest way in.
+Every command takes --json. `ascend target add --help` is the fastest way in.
 Full reference: docs/COMMAND_MAP.md  ·  building adapters: docs/BUILD_ADAPTER.md
 """
+
+
+def _add_onboard_args(s, *, require_source):
+    """Every argument the onboard flow reads. Shared by `onboard` and `target add` so the two
+    cannot drift apart — `target add` takes the same evidence, it just stops once registered."""
+    src = s.add_mutually_exclusive_group(required=require_source)
+    src.add_argument("--api", metavar="URL",
+                     help="an HTTP API endpoint (or base URL) — one probe, no browser. The "
+                          "simple-contract one-liner.")
+    src.add_argument("--url", help="live page with a chat widget: capture the contract in a real browser")
+    src.add_argument("--curl", metavar="FILE", help="a curl command in a file (or '-' for stdin)")
+    src.add_argument("--har", help="HAR file exported from your own browser (no browser needed here)")
+    src.add_argument("--config", help="an existing config in the config dir (skip discovery)")
+    s.add_argument("--name", help="application name in Ascend (default: derived from the URL)")
+    s.add_argument("--system-prompt", help="what the target is, for the assessment context")
+    s.add_argument("--controls", help="comma-separated control ids (validated before the run)")
+    s.add_argument("--adapter", help="override the adapter type (default: from the config)")
+    s.add_argument("--bearer", metavar="TOKEN", help="Authorization: Bearer <token> (with --api/--curl)")
+    s.add_argument("--api-key", metavar="NAME:VALUE[:in=header|query]", help="API key (with --api)")
+    s.add_argument("--header", action="append", metavar="'Name: value'", help="raw header (repeatable)")
+    s.add_argument("--body-field", action="append", metavar="key=value",
+                   help="extra JSON body field (repeatable) — for a key/tenant that lives in the body")
+    s.add_argument("--prompt-hint", help="with --curl: the literal prompt text used in that command")
+    s.add_argument("--insecure", action="store_true", help="skip TLS verification (self-signed internal)")
+    s.add_argument("--size", default="small", choices=["small", "medium", "large"],
+                   help="assessment size")
+    s.add_argument("--qpm", type=int, default=20, help="queries per minute against the target")
+    s.add_argument("--prompt", default="Hello, what can you help me with?",
+                   help="benign prompt used for capture and validation")
+    s.add_argument("--settle", type=int, default=8, help="seconds to wait for the widget/reply during capture")
+    s.add_argument("--headless", action="store_true", help="headless capture (bot protection often blocks it)")
+    s.add_argument("--manual", action="store_true", help="you drive the widget; we record")
+    s.add_argument("--timeout", type=float, default=60.0, help="per-request timeout for validation")
+    s.add_argument("--dry-run", action="store_true",
+                   help="stop after validating the config — do not register or run anything")
+    s.add_argument("--wait", action="store_true", help="block until the assessment completes, then print findings")
+    s.add_argument("--detail", action="store_true", help="with --wait, show key findings per control")
+    s.add_argument("--interval", type=int, default=20, help="poll interval while waiting")
+    s.add_argument("--timeout-assess", type=int, default=7200, help="max seconds to wait for completion")
+    s.add_argument("--assessment-name", help="assessment name (default: '<app> run 1')")
+    s.add_argument("-v", "--verbose", action="store_true", help="debug logging for the bridge")
 
 
 def _add_build_args(s):
@@ -5267,43 +5505,51 @@ def build_parser():
                 "  ascend onboard --config mybot --wait\n"
                 "  ascend onboard --url https://site/support --dry-run   # stop after validation"),
         )
-    src = s.add_mutually_exclusive_group(required=True)
-    src.add_argument("--api", metavar="URL",
-                     help="an HTTP API endpoint (or base URL) — one probe, no browser. The "
-                          "simple-contract one-liner.")
-    src.add_argument("--url", help="live page with a chat widget: capture the contract in a real browser")
-    src.add_argument("--curl", metavar="FILE", help="a curl command in a file (or '-' for stdin)")
-    src.add_argument("--har", help="HAR file exported from your own browser (no browser needed here)")
-    src.add_argument("--config", help="an existing config in the config dir (skip discovery)")
-    s.add_argument("--name", help="application name in Ascend (default: derived from the URL)")
-    s.add_argument("--system-prompt", help="what the target is, for the assessment context")
-    s.add_argument("--controls", help="comma-separated control ids (validated before the run)")
-    s.add_argument("--adapter", help="override the adapter type (default: from the config)")
-    s.add_argument("--bearer", metavar="TOKEN", help="Authorization: Bearer <token> (with --api/--curl)")
-    s.add_argument("--api-key", metavar="NAME:VALUE[:in=header|query]", help="API key (with --api)")
-    s.add_argument("--header", action="append", metavar="'Name: value'", help="raw header (repeatable)")
-    s.add_argument("--body-field", action="append", metavar="key=value",
-                   help="extra JSON body field (repeatable) — for a key/tenant that lives in the body")
-    s.add_argument("--prompt-hint", help="with --curl: the literal prompt text used in that command")
-    s.add_argument("--insecure", action="store_true", help="skip TLS verification (self-signed internal)")
-    s.add_argument("--size", default="small", choices=["small", "medium", "large"],
-                   help="assessment size")
-    s.add_argument("--qpm", type=int, default=20, help="queries per minute against the target")
-    s.add_argument("--prompt", default="Hello, what can you help me with?",
-                   help="benign prompt used for capture and validation")
-    s.add_argument("--settle", type=int, default=8, help="seconds to wait for the widget/reply during capture")
-    s.add_argument("--headless", action="store_true", help="headless capture (bot protection often blocks it)")
-    s.add_argument("--manual", action="store_true", help="you drive the widget; we record")
-    s.add_argument("--timeout", type=float, default=60.0, help="per-request timeout for validation")
-    s.add_argument("--dry-run", action="store_true",
-                   help="stop after validating the config — do not register or run anything")
-    s.add_argument("--wait", action="store_true", help="block until the assessment completes, then print findings")
-    s.add_argument("--detail", action="store_true", help="with --wait, show key findings per control")
-    s.add_argument("--interval", type=int, default=20, help="poll interval while waiting")
-    s.add_argument("--timeout-assess", type=int, default=7200, help="max seconds to wait for completion")
-    s.add_argument("--assessment-name", help="assessment name (default: '<app> run 1')")
-    s.add_argument("-v", "--verbose", action="store_true", help="debug logging for the bridge")
+    _add_onboard_args(s, require_source=True)
     s.set_defaults(func=cmd_onboard)
+
+    # target — the same flow, named for the thing it produces. `target add` stops once the target
+    # is registered and proven; `--run` carries on into an assessment.
+    tg = sub.add_parser("target", parents=[GLOBALS], formatter_class=_Fmt,
+                        help="add, list, inspect and re-check the targets you assess"
+                        ).add_subparsers(dest="verb", required=True)
+    s = tg.add_parser("add", parents=[GLOBALS], formatter_class=_Fmt,
+                      help="onboard a target from a URL, a cURL/HAR file, or a saved config",
+                      epilog=("examples:\n"
+                              "  ascend target add https://your-bot.example.com/chat\n"
+                              "  ascend target add ./request.curl --name 'Support Bot'\n"
+                              "  ascend target add ~/Downloads/session.har\n"
+                              "  ascend target add mybot --run          # existing config, then assess"))
+    s.add_argument("source", nargs="?",
+                   help="a URL, a cURL/HAR file, or a saved config name — detected for you")
+    _add_onboard_args(s, require_source=False)
+    s.add_argument("--run", action="store_true",
+                   help="continue into an assessment once the target is registered")
+    s.set_defaults(func=cmd_target_add)
+
+    s = tg.add_parser("list", parents=[GLOBALS], formatter_class=_Fmt,
+                      help="every target: its adapter, whether it is registered, whether it is serving")
+    s.set_defaults(func=cmd_target_list)
+
+    s = tg.add_parser("show", parents=[GLOBALS], formatter_class=_Fmt,
+                      help="everything bound to one target, in one place")
+    s.add_argument("target", help="target name or aapp_ id")
+    s.set_defaults(func=cmd_target_show)
+
+    s = tg.add_parser("check", parents=[GLOBALS], formatter_class=_Fmt,
+                      help="re-prove a target against its live endpoint (the hard gate)")
+    s.add_argument("target", help="target name, config name, or aapp_ id")
+    s.add_argument("--prompt", default="Hello, what can you help me with?", help="prompt to send")
+    s.add_argument("--expect", help="require this substring in the reply")
+    s.add_argument("--timeout", type=float, default=60.0, help="per-request timeout in seconds")
+    s.add_argument("--adapter", help="override the adapter type (default: from the config)")
+    s.set_defaults(func=cmd_target_check, file=None)
+
+    s = tg.add_parser("rm", parents=[GLOBALS], formatter_class=_Fmt,
+                      help="delete the application and drop its stored key")
+    s.add_argument("target", help="target name or aapp_ id")
+    s.add_argument("--keep-key", action="store_true", help="leave the stored bridge key in place")
+    s.set_defaults(func=cmd_target_rm)
 
     s = sub.add_parser("results", parents=[GLOBALS], formatter_class=_Fmt,
                        help="read results: a Console CSV export, or a local capture",
