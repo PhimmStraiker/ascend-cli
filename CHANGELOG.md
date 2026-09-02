@@ -7,6 +7,19 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ## [Unreleased]
 
+### Added
+- **`adapter validate` now says when a target cannot be assessed at all.** A config can be perfectly
+  correct and still unusable: the platform bounds how long each probe may take (~120s), and that
+  clock starts when the probe is **queued**, not when the bridge calls the target. Exceeding it
+  surfaces as a synthetic failure indistinguishable from a target error, which feeds the platform's
+  target-health streak and auto-pauses the assessment — so the run reports no findings having
+  measured nothing. `validate` now reports the measured reply time and warns when it is at or beyond
+  the window ("raising the adapter timeout does NOT help") or close enough that queueing alone can
+  blow it. The operator learns this from one probe instead of from a whole failed run.
+- **`$ASCEND_PLATFORM_PROBE_WINDOW_MS`** sets the window the CLI assumes the platform enforces. It
+  exists so that when the platform-side window is raised for agentic targets, nothing in the CLI
+  needs a code change — set the env var and the warnings, and the guidance they carry, move with it.
+
 ## [1.1.0] — 2026-09-01
 
 ### Known limitation — slow targets are bounded by the platform, not the CLI
