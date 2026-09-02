@@ -12,7 +12,7 @@ Config keys:
   headers       - Dict of additional headers (e.g. Authorization)
   body          - Request body template with {{PROMPT}} placeholder
   response_path - Dot-notation path to extract response (e.g. "choices.0.message.content")
-  timeout_ms    - Request timeout in milliseconds (default: adapters.base.resolve_timeout_s / $ASCEND_TARGET_TIMEOUT_MS, and bounded by the bridge's per-probe window)
+  timeout_ms    - Request timeout in milliseconds (optional; otherwise derived from the platform's per-probe window)
 """
 
 import json

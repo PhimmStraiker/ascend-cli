@@ -45,7 +45,7 @@ Optional config keys:
   bot_settle_ms     - after the first bot activity, keep polling this long for more
                       activities in the same turn before returning (default 1500)
   locale            - message locale (default en-US)
-  timeout_ms        - overall per-prompt budget in ms (default: adapters.base.resolve_timeout_s / $ASCEND_TARGET_TIMEOUT_MS, and bounded by the bridge's per-probe window).
+  timeout_ms        - overall per-prompt budget in ms (optional; otherwise derived from the platform's per-probe window)
 """
 
 import json
