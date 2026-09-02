@@ -185,13 +185,21 @@ class TestGradientBar:
         widths = {d: ui.vwidth(ui.gradient_bar(frac, width=width, depth=d)) for d in DEPTHS}
         assert len(set(widths.values())) == 1, widths
 
-    def test_each_tier_emits_escapes_when_it_should(self):
+    def test_each_tier_emits_colour_when_it_should(self):
         """Pins the depth-ordering bug: every tier once fell through to plain, and the width
-        test still passed because identical-and-broken is still identical."""
-        assert ui.gradient_bar(0.5, width=24, depth=0).count(ESC) == 0
-        assert ui.gradient_bar(0.5, width=24, depth=8).count(ESC) > 0
-        assert ui.gradient_bar(0.5, width=24, depth=256).count(ESC) > 0
-        assert ui.gradient_bar(0.5, width=24, depth=24).count(ESC) > 0
+        test still passed because identical-and-broken is still identical.
+
+        Counting escapes is NOT enough -- the bar emits a literal reset regardless, so a version
+        that sets no colour at all still contains \033. This asserts a colour-SETTING sequence,
+        which is what actually broke.
+        """
+        colour = re.compile(r"\x1b\[(?:3[0-7]|9[0-7]|38;[25]);?")
+        assert not colour.search(ui.gradient_bar(0.5, width=24, depth=0))
+        assert colour.search(ui.gradient_bar(0.5, width=24, depth=8)), "8-colour set no colour"
+        assert re.search(r"\x1b\[38;5;\d+m", ui.gradient_bar(0.5, width=24, depth=256)), \
+            "256-colour tier emitted no 38;5; sequence"
+        assert re.search(r"\x1b\[38;2;\d+;\d+;\d+m", ui.gradient_bar(0.5, width=24, depth=24)), \
+            "truecolour tier emitted no 38;2; sequence"
 
     def test_256_colour_tier_run_length_compresses(self):
         """Quantising to the xterm cube makes adjacent cells share a code, so the ramp emits an
