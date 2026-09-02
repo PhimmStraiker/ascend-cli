@@ -7,6 +7,8 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ## [Unreleased]
 
+## [1.1.1] — 2026-09-02
+
 ### Security
 - **`app list` and `app get` no longer print bridge keys.** The platform returns `thin_api_key` on
   GET and in the application list, not only at creation, so a read-only listing emitted every
