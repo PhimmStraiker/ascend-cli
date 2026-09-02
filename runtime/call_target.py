@@ -40,15 +40,10 @@ _DEFAULT_BRIDGE_RESPONSE_TIMEOUT_S = 110.0
 def _bridge_response_timeout_s(config: Optional[Dict[str, Any]]) -> float:
     """Per-probe ceiling for the bridge: config `bridge_response_timeout_ms`, else
     $ASCEND_BRIDGE_RESPONSE_TIMEOUT_MS, else just under the platform's response window."""
-    for source in ((config or {}).get("bridge_response_timeout_ms"),
-                   os.environ.get("ASCEND_BRIDGE_RESPONSE_TIMEOUT_MS")):
-        try:
-            ms = int(source or 0)
-        except (TypeError, ValueError):
-            continue
-        if ms > 0:
-            return ms / 1000.0
-    return _DEFAULT_BRIDGE_RESPONSE_TIMEOUT_S
+    from adapters.base import resolve_ms          # one precedence rule, shared with the target side
+    return resolve_ms(config, "bridge_response_timeout_ms",
+                      "ASCEND_BRIDGE_RESPONSE_TIMEOUT_MS",
+                      int(_DEFAULT_BRIDGE_RESPONSE_TIMEOUT_S * 1000)) / 1000.0
 
 
 class TargetCaller:
@@ -69,22 +64,39 @@ class TargetCaller:
         self.config_name = config_name if isinstance(config_name, str) else "inline"
         self.timeout_s = timeout_s
         self.router = ConversationRouter()
-        # oauth2 tokens expire mid-run; re-materialize on a TTL (B5).
-        auth = self._raw.get("auth")
-        self._auth_refreshable = isinstance(auth, dict) and auth.get("type") == "oauth2"
-        self._refresh_s = float(self._raw.get("auth_refresh_ms", _DEFAULT_AUTH_REFRESH_S * 1000)) / 1000.0
-        self._last_auth = time.monotonic()
+        # Layer 3 decides WHEN credentials must be re-acquired. That decision object already
+        # exists (layers/auth.py AuthLifecycle) and covers all four kinds including a JWT `exp`
+        # and a 401 challenge, so it is wired in here — at the one seam every adapter goes
+        # through — rather than each adapter growing its own copy of the same logic.
+        self._lifecycle = self._build_lifecycle()
+        self._lifecycle.mark_refreshed()          # merge_auth() above just materialized
+
+    def _build_lifecycle(self):
+        from layers.auth import AuthLifecycle
+        block = self._raw.get("auth_lifecycle")
+        if block is None:
+            # Back-compat: an oauth2 config with no explicit lifecycle used to refresh on a fixed
+            # TTL. Express exactly that rather than silently downgrading it to `static`.
+            auth = self._raw.get("auth")
+            if isinstance(auth, dict) and auth.get("type") == "oauth2":
+                ttl = float(self._raw.get("auth_refresh_ms",
+                                          _DEFAULT_AUTH_REFRESH_S * 1000)) / 1000.0
+                block = {"type": "refresh_on_ttl", "ttl_s": ttl}
+        try:
+            return AuthLifecycle(block)
+        except Exception as exc:                  # a bad block must not take the relay down
+            logger.warning("auth_lifecycle ignored (%s); treating credentials as static", exc)
+            return AuthLifecycle(None)
+
+    def _reauth(self, why: str) -> None:
+        self.config = merge_auth(copy.deepcopy(self._raw))
+        self._lifecycle.mark_refreshed()
+        logger.info("auth: re-acquired credentials (%s)", why)
 
     def _maybe_refresh_auth(self) -> None:
-        """Re-mint a short-lived oauth2 token before it expires, so a long assessment
-        doesn't start 401ing halfway through. No-op for static/none auth."""
-        if not self._auth_refreshable:
-            return
-        if (time.monotonic() - self._last_auth) < self._refresh_s:
-            return
-        self.config = merge_auth(copy.deepcopy(self._raw))
-        self._last_auth = time.monotonic()
-        logger.info("auth: refreshed oauth2 credentials mid-run")
+        """Re-acquire credentials when Layer 3 says they are stale. No-op for static auth."""
+        if self._lifecycle.needs_refresh():
+            self._reauth("ttl")
 
     @property
     def is_stateful(self) -> bool:
@@ -106,9 +118,25 @@ class TargetCaller:
         except Exception as e:
             return 400, {"response": "", "_error": f"prompt-extract: {e}"}
         conv = conversation_key(message, self.config)
+        status, out = self._send_once(prompt, conv)
+        # An auth challenge means the credential died mid-run, not that the target refused. Without
+        # this, every probe after expiry scores as a refusal and the assessment finishes looking
+        # clean while measuring nothing. Re-acquire and retry the probe exactly once.
+        if self._lifecycle.should_reauth(status):
+            self._reauth(f"HTTP {status}")
+            status, out = self._send_once(prompt, conv)
+        return status, out
+
+    def _send_once(self, prompt: str, conv: Optional[str]) -> Tuple[int, Dict[str, Any]]:
         result = self.router.send(
             self.adapter_type, self.config, self.config_name,
             prompt, conv, self.timeout_s)
+        meta = result.get("metadata") or {}
+        try:
+            self._lifecycle.note_response(int(meta.get("status_code") or 0),
+                                          meta.get("headers"))
+        except Exception:                          # lifecycle bookkeeping must never fail a probe
+            pass
         return shape_result(result, self.config)
 
     def reset(self) -> int:

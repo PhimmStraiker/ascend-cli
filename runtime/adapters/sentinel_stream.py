@@ -40,7 +40,7 @@ Config:
       skip_flags    truthy fields marking a non-answer frame
                     (default ["isProgressIndicator"])
       aggregate     "last" (default) or "concat"
-  timeout_ms        default 60000
+  timeout_ms        (default: adapters.base.resolve_timeout_s / $ASCEND_TARGET_TIMEOUT_MS, and bounded by the bridge's per-probe window)
 """
 import json
 import logging
