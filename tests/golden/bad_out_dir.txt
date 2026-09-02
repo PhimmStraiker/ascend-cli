@@ -1,0 +1,8 @@
+$ ascend adapter build --api http://127.0.0.1:1/x --out ./
+--- exit 1
+--- stdout
+--- stderr
+[build] probing http://127.0.0.1:1/x ...
+[probe] tried 20 candidate(s)
+error: unreachable: 127.0.0.1 resolves but refused or timed out on every connection attempt.
+  Check egress to that host:port (firewall/SASE), any proxy (HTTPS_PROXY / TLS interception), and that the service is actually listening. A `curl -v` from the same machine will confirm.

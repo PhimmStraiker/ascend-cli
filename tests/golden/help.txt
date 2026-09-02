@@ -1,0 +1,50 @@
+$ ascend --help
+--- exit 0
+--- stdout
+usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags]
+
+ascend — the Ascend CLI: red-team any AI agent from one binary.
+
+Point it at an AI application and get a red-team assessment back. `ascend onboard` does the whole
+flow — derive an adapter from the target, prove it against the live endpoint, register it, run the
+assessment — and the commands underneath it are there when you need to do a step by hand.
+
+Auth: a Straiker PAT via --token or $STRAIKER_PAT (exchanged for a short-lived JWT automatically).
+Every command takes --json for machine/agent consumption. The CLI is locked to ONE tenant at a
+time, deliberately — see `ascend tenant`.
+
+options:
+  -h, --help            show this help message and exit
+  --json                machine-readable JSON output
+  --token TOKEN         Straiker PAT (s6r_pat_...) or JWT; else $STRAIKER_PAT
+  --base BASE           v3 API base URL
+  --bridge-base BRIDGE_BASE
+                        Ascend lease-service base URL (where bridges fetch probes and post
+                        results)
+  --version             print version and exit
+
+START HERE
+  target add <thing>     onboard a target from whatever you already have — it works out which
+                         it is. Add --run to go straight into an assessment.
+                           a URL              https://your-bot/chat
+                           a request          ./request.curl   (copy as cURL from devtools)
+                           a browser session  ./session.har
+                           a saved config     mybot
+  doctor                 preflight: your key, API + bridge reachability, dependencies
+
+EVERYDAY
+  target list            your targets: adapter, whether registered, whether serving
+  target check <t>       re-prove a target against its live endpoint, and time it
+  assess run --app <t>   run the assessment (the bridge is started and stopped for you)
+  assess watch --all     follow live runs; the BRIDGE column flags a run nobody is answering
+  results                read the findings
+
+MORE
+  app · adapter · assess · bridge · chat · ci · controls · export · keys
+  onboard · policy · reports · status · target · tenant · version
+  Run `ascend <command> --help` for any of these — each has its own flags and examples.
+  `app`, `adapter` and `keys` are the machinery underneath `target`, still fully supported.
+
+Every command takes --json. `ascend target add --help` is the fastest way in.
+Full reference: docs/COMMAND_MAP.md  ·  building adapters: docs/BUILD_ADAPTER.md
+--- stderr

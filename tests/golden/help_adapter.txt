@@ -1,0 +1,25 @@
+$ ascend adapter --help
+--- exit 0
+--- stdout
+usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] adapter
+       [-h] [--json] [--token TOKEN] [--base BASE] [--bridge-base BRIDGE_BASE]
+       {list,show,configs,layers,validate,build} ...
+
+positional arguments:
+  {list,show,configs,layers,validate,build}
+    list                list registered adapter types
+    show                print a saved adapter config (secrets masked)
+    configs             list adapter configs on disk (incl. shipped examples)
+    layers              ==SUPPRESS==
+    validate            HARD GATE: run one prompt through a config against the live target
+    build               build a validated adapter from a URL / HAR / curl / API / spec
+
+options:
+  -h, --help            show this help message and exit
+  --json                machine-readable JSON output (default: False)
+  --token TOKEN         Straiker PAT (s6r_pat_...) or JWT; else $STRAIKER_PAT (default: None)
+  --base BASE           v3 API base URL (default: https://api.prod.straiker.ai/api/v3)
+  --bridge-base BRIDGE_BASE
+                        Ascend lease-service base URL (where bridges fetch probes and post
+                        results) (default: https://ascendai-bridge.prod.straiker.ai)
+--- stderr

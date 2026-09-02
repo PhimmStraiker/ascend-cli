@@ -1,0 +1,24 @@
+$ ascend target --help
+--- exit 0
+--- stdout
+usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] target
+       [-h] [--json] [--token TOKEN] [--base BASE] [--bridge-base BRIDGE_BASE]
+       {add,list,show,check,rm} ...
+
+positional arguments:
+  {add,list,show,check,rm}
+    add                 onboard a target from a URL, a cURL/HAR file, or a saved config
+    list                every target: its adapter, whether it is registered, whether it is serving
+    show                everything bound to one target, in one place
+    check               re-prove a target against its live endpoint (the hard gate)
+    rm                  delete the application and drop its stored key
+
+options:
+  -h, --help            show this help message and exit
+  --json                machine-readable JSON output (default: False)
+  --token TOKEN         Straiker PAT (s6r_pat_...) or JWT; else $STRAIKER_PAT (default: None)
+  --base BASE           v3 API base URL (default: https://api.prod.straiker.ai/api/v3)
+  --bridge-base BRIDGE_BASE
+                        Ascend lease-service base URL (where bridges fetch probes and post
+                        results) (default: https://ascendai-bridge.prod.straiker.ai)
+--- stderr

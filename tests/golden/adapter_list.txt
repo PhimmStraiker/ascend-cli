@@ -1,0 +1,19 @@
+$ ascend adapter list
+--- exit 0
+--- stdout
+agentforce
+amazon_connect
+bedrock
+browser
+copilot_studio
+custom
+direct_api
+scrt2_direct
+sentinel_stream
+session_api
+session_poll
+slack_direct
+sse_stream
+vertex_ai
+websocket_direct
+--- stderr
