@@ -47,6 +47,44 @@ import requests  # noqa: E402  (after path wiring, but requests is stdlib-adjace
 
 
 # --------------------------------------------------------------------------- #
+# Deterministic terminal
+# --------------------------------------------------------------------------- #
+# Several suites shell out with `env=dict(os.environ)` and no NO_COLOR, so the
+# CLI's colour and spinner behaviour is inherited from whoever happens to be
+# running the tests. That is a real trap rather than a theoretical one: the
+# first thing anyone does while working on terminal output is export
+# ASCEND_FORCE_COLOR so they can see it through a pipe — and from then on ANSI
+# leaks into the assertions that read stdout structurally (for example
+# test_results_analysis.py counts occurrences of "ctl_"), on that machine only,
+# which reads as a flaky test rather than an environment problem.
+#
+# Pinning it here fixes every helper at once, including ones added later:
+# subprocesses inherit the mutated os.environ, so no per-suite edits are needed.
+# Session-scoped, so it cannot use the function-scoped `monkeypatch` fixture.
+_TERMINAL_ENV = {"NO_COLOR": "1", "ASCEND_NO_SPINNER": "1", "COLUMNS": "100"}
+_TERMINAL_ENV_UNSET = ("ASCEND_FORCE_COLOR", "ASCEND_PLAIN", "ASCEND_COLOR_DEPTH",
+                       "ASCEND_LOGO", "COLORTERM", "TERM_PROGRAM", "LC_TERMINAL")
+
+
+@pytest.fixture(autouse=True, scope="session")
+def deterministic_terminal():
+    """Force plain, unanimated CLI output for the whole session, then restore."""
+    saved = {k: os.environ.get(k) for k in
+             list(_TERMINAL_ENV) + list(_TERMINAL_ENV_UNSET)}
+    os.environ.update(_TERMINAL_ENV)
+    for k in _TERMINAL_ENV_UNSET:
+        os.environ.pop(k, None)
+    try:
+        yield
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+# --------------------------------------------------------------------------- #
 # Async helper
 # --------------------------------------------------------------------------- #
 def run_async(coro):
