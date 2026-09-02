@@ -4794,8 +4794,8 @@ EVERYDAY
   results                read the findings
 
 MORE
-  app · adapter · assess · bridge · chat · ci · controls · export · keys · map
-  policy · reports · runtime · status · tenant · version
+  app · adapter · assess · bridge · chat · ci · controls · export
+  keys · policy · reports · status · tenant · version
   Run `ascend <command> --help` for any of these — each has its own flags and examples.
 
 Every command takes --json. `ascend onboard --help` is the fastest way in.
@@ -5184,12 +5184,8 @@ def build_parser():
                        help="build a validated adapter from a URL / HAR / curl / API / spec",
                        description=(
                            "Build an adapter config for a target and PROVE it against the live\n"
-                           "target before writing anything. The source is a flag:\n"
-                           "  --har <file>   a browser HAR you exported  (most reliable)\n"
-                           "  --curl <file>  one request copied as cURL\n"
-                           "  --url <page>   a live page — the CLI drives a real browser\n"
-                           "  --api <url>    an HTTP API endpoint\n"
-                           "  --spec <base>  an OpenAPI/Swagger spec\n\n"
+                           "target before writing anything. Give it whichever source you have —\n"
+                           "--api, --curl, --har, --url or --spec, listed below.\n\n"
                            "Nothing is written unless it answered: an unvalidated config is a guess."),
                        epilog="examples:\n"
                               "  ascend adapter build --har ~/Downloads/target.har --out mybot.json\n"
