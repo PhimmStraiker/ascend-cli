@@ -44,14 +44,40 @@ def _is_sensitive_key(key: Any) -> bool:
     return k in SENSITIVE or k in SENSITIVE_FIELDS
 
 
+def redact_url(value: Any) -> Any:
+    """Mask sensitive query parameters inside a URL string.
+
+    Redaction used to match on key NAMES only, which missed the case this tool creates itself:
+    `--api-key NAME:VALUE:in=query` and the Gemini-style `?key=` are baked straight into the
+    config's endpoint. The credential was then in a value, not under a sensitive key, so it
+    survived masking — and got printed by the command that promises masking, logged on every
+    probe, written to capture files, and posted upstream inside a failing probe's error string.
+    """
+    if not isinstance(value, str) or "?" not in value:
+        return value
+    if not value.lower().startswith(("http://", "https://", "ws://", "wss://")):
+        return value
+    try:
+        from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+        parts = urlsplit(value)
+        if not parts.query:
+            return value
+        pairs = parse_qsl(parts.query, keep_blank_values=True)
+        cleaned = [(k, "[REDACTED]" if _is_sensitive_key(k) or k.lower() in ("key", "apikey")
+                    else v) for k, v in pairs]
+        return urlunsplit(parts._replace(query=urlencode(cleaned)))
+    except Exception:                       # never let masking raise on the display path
+        return value
+
+
 def redact(obj: Any) -> Any:
-    """Mask known-sensitive values — headers AND body fields — before display or disk."""
+    """Mask known-sensitive values — headers, body fields, AND credentials carried in a URL."""
     if isinstance(obj, dict):
         return {k: ("[REDACTED]" if _is_sensitive_key(k) else redact(v))
                 for k, v in obj.items()}
     if isinstance(obj, list):
         return [redact(x) for x in obj]
-    return obj
+    return redact_url(obj)
 
 
 def load_prompts(path: str) -> List[Dict[str, Any]]:

@@ -165,7 +165,14 @@ class LeaseClient:
             return out
         if isinstance(obj, list):
             return [self._redact(x) for x in obj]
-        return obj
+        # A credential can also ride in a URL query string — which this tool writes itself for
+        # `--api-key ...:in=query` targets — so masking header NAMES alone left it in the clear in
+        # capture files and in the error text of a failed probe.
+        try:
+            from manual import redact_url
+            return redact_url(obj)
+        except Exception:
+            return obj
 
     def _capture(self, kind: str, obj: Dict[str, Any]) -> None:
         if not self.capture_path:
