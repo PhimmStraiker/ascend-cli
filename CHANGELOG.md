@@ -21,6 +21,33 @@ All notable changes to the Ascend CLI. Newest first. Format follows
   adapter scrubs the URL before logging or reporting it.
 
 ### Fixed
+- **A create-then-stream target is now built correctly from captured evidence.** compose() picks
+  one branch by transport and the streaming branch never consulted the session layer — only
+  `direct_api` got a "session upgrade". So an agent that makes you create a conversation before
+  streaming (create a thread, then stream the turn) was composed as a plain POST to the captured
+  path, which still contained the conversation id from the capture: every probe posted into one
+  dead conversation, and the create step vanished even though it had been detected. The `create`
+  block is now emitted and the path is templated with `{{CONV}}`.
+- **The prompt is substituted into the create call.** These APIs routinely name the conversation
+  after the question (`{"description": "{{PROMPT}}"}`); only `{{CONV}}` was substituted, so the
+  literal placeholder was posted as the title.
+- **Progress chatter no longer arrives as the agent's answer.** A stream can type its frames on
+  the SSE `event:` line rather than a field in the payload. Those payloads have no `type`, so the
+  frame filter fell through and collected EVERY frame — prepending "Analyzing query…",
+  "Searching resources…" to every reply, which the scorer then reads as the agent's words. The
+  event name is now used as the frame type, and only when `token_types` is explicitly configured,
+  so a stream relying on the collect-everything default is unaffected.
+- **The streaming field mapping is derived from captured evidence** instead of emitting a bare
+  `{"format": "sse"}` that collects no frames. Derivation is event-aware on purpose: picking the
+  field that appears most often selects the progress chatter, because status frames outnumber
+  answer frames.
+- **`--login-url` records a repeatable login, not just the token it produced.** Its own docstring
+  claimed it returned "an `auth` block so the bridge re-authenticates on its own during a long
+  run"; the code returned only a header, so the config carried a static token that died with it.
+  It now writes a `derived_multihop` auth block plus `reauth_on_401`, and credentials written as
+  `env:NAME` stay out of the config file.
+- Tests that pin a config directory now clear `ASCEND_CONFIG_DIR` as well as the legacy name, so
+  an ambient value in the developer's shell no longer causes spurious failures.
 - **A streaming target with a query string no longer loses it, or forks a config on every run.**
   Promoting a config to `sse_stream` split the endpoint into `base_url` + `chat_path` and dropped
   the query, while the probe path deliberately keeps it. Where the query is *required* — Azure
@@ -74,6 +101,17 @@ All notable changes to the Ascend CLI. Newest first. Format follows
   home, so nothing that resolves today resolves differently.
 
 ### Added
+- **`--app <name|aapp_id>` on `target add` / `onboard`: bind to an application that already
+  exists** instead of creating a second one, fetching its bridge key for you. This is the shape of
+  a stalled engagement — the app was configured in the Console (system prompt, controls, size,
+  QPM), someone starts an assessment, it fails, and nobody can say where the bridge is. There is
+  nothing to find: a bridge is a process this CLI runs. Creating a fresh app instead stranded all
+  of that configuration on an application nobody assesses.
+- **`configs/example-create-then-stream.json`: a complete target definition** for the hardest
+  common shape — bearer auth, a conversation that must be created first, and an answer streamed
+  back as named SSE events interleaved with progress chatter. Every section is annotated with what
+  it controls and how it fails. Copy it, change the ALL-CAPS values, `adapter validate` it: a
+  deterministic path that needs no capture and no inference.
 - **`--save-as <name>` on `target add` / `onboard`.** The config name was derived from the URL and
   never choosable, so it came out as `myhost-com` or `127-0-0-1-8791` and the only way to learn it
   was to read a line of stderr — then you had to pass exactly that to `--config` later. Name it

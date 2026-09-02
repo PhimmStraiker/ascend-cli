@@ -19,6 +19,7 @@ _spec.loader.exec_module(cli)
 def cfgdir(tmp_path, monkeypatch):
     d = tmp_path / "configs"
     d.mkdir()
+    monkeypatch.delenv("ASCEND_CONFIG_DIR", raising=False)
     monkeypatch.setenv("ASCENDBRIDGE_CONFIG_DIR", str(d))
     return d
 
@@ -103,6 +104,7 @@ def test_dispatch_load_config_no_double_json(tmp_path, monkeypatch):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "runtime"))
     import dispatch
     d = tmp_path / "configs"; d.mkdir()
+    monkeypatch.delenv("ASCEND_CONFIG_DIR", raising=False)
     monkeypatch.setenv("ASCENDBRIDGE_CONFIG_DIR", str(d))
     (d / "bot.json").write_text(json.dumps({"adapter": "direct_api"}))
     assert dispatch.load_config("bot.json")["adapter"] == "direct_api"   # was bot.json.json
@@ -112,6 +114,7 @@ def test_dispatch_missing_config_raises_configerror(tmp_path, monkeypatch):
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "runtime"))
     import dispatch
+    monkeypatch.delenv("ASCEND_CONFIG_DIR", raising=False)
     monkeypatch.setenv("ASCENDBRIDGE_CONFIG_DIR", str(tmp_path))
     with pytest.raises(dispatch.ConfigError):
         dispatch.load_config("nope")

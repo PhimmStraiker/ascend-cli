@@ -249,7 +249,8 @@ class SSEStreamAdapter(BotAdapter):
         # --- optional conversation step: POST /conversations -> id, then stream into
         # /conversations/{id}/responses. `{{CONV}}` is substituted in chat_path and the body,
         # mirroring session_poll's handling. This is the "REST create -> SSE named events" shape.
-        conv = self._ensure_conversation(config, min(10.0, max(1.0, deadline - time.time())))
+        conv = self._ensure_conversation(config, min(10.0, max(1.0, deadline - time.time())),
+                                         prompt=prompt)
         if conv:
             url = _join(base_url, chat_path.replace("{{CONV}}", conv))
 
@@ -497,13 +498,25 @@ class SSEStreamAdapter(BotAdapter):
 
         type_path = cfg.get("type_path", "type")
         ftype = _dot(frame, type_path) if type_path else None
+        # A stream can type its frames on the SSE `event:` line instead of a field in the payload
+        # (event: status / event: response / event: end). Those payloads have no `type`, so ftype
+        # was None and the filter below fell through and collected EVERY frame — including the
+        # progress chatter ("Analyzing query...", "Searching resources...") which then arrived
+        # prepended to the agent's real answer on every single probe. The event name is already
+        # passed in; use it as the frame type.
+        #
+        # Only when token_types is EXPLICITLY configured, so a stream that relies on the
+        # collect-everything default keeps behaving exactly as before.
+        explicit_types = cfg.get("token_types")
+        if ftype is None and event and explicit_types:
+            ftype = event
 
         if ftype in (cfg.get("ignore_types") or DEFAULT_IGNORE_TYPES):
             return False
 
         done = self._is_done(frame, cfg.get("done_when", DEFAULT_DONE_WHEN))
 
-        token_types = cfg.get("token_types") or DEFAULT_TOKEN_TYPES
+        token_types = explicit_types or DEFAULT_TOKEN_TYPES
         # Unknown/absent type => fall through to extraction; the heuristic below
         # handles targets that stream deltas without a discriminator.
         if ftype is None or ftype in token_types:
@@ -513,7 +526,8 @@ class SSEStreamAdapter(BotAdapter):
 
         return done
 
-    def _ensure_conversation(self, config: Dict[str, Any], timeout_s: float) -> Optional[str]:
+    def _ensure_conversation(self, config: Dict[str, Any], timeout_s: float,
+                             prompt: str = "") -> Optional[str]:
         """Mint (once) the conversation id some platforms require before streaming.
 
         Two shapes are supported, matching what these APIs actually do:
@@ -549,6 +563,12 @@ class SSEStreamAdapter(BotAdapter):
                 payload = json.dumps(body)
                 if conv:
                     payload = payload.replace("{{CONV}}", conv)
+                # These APIs routinely put the prompt in the CREATE call as well as the turn — a
+                # thread named after the question ({"description": "{{PROMPT}}"}). Without this
+                # substitution the literal placeholder was posted as the thread description, so
+                # the conversation the probe ran in was titled "{{PROMPT}}".
+                if "{{PROMPT}}" in payload:
+                    payload = payload.replace("{{PROMPT}}", _json_escape(prompt))
             headers = {"Content-Type": "application/json", **(config.get("headers") or {})}
             if self._csrf:
                 headers[(config.get("bootstrap") or {}).get("csrf_header", "X-CSRF-Token")] = self._csrf

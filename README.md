@@ -291,6 +291,21 @@ ascend results export.csv --values --matrix     # turn-level, from a Console exp
 
 `ascend target add <thing> --run` collapses steps 4–6 into one command.
 
+**If the app already exists in the Console**, adopt it instead of creating a second one — this is
+the single most common stalled-engagement shape, where the app was configured in the UI and the
+only thing missing is something serving it:
+
+```bash
+ascend target add https://your-bot.example.com/chat --app 'My Bot' --bearer "$TOK" --run
+```
+
+`--app` binds to that application and **fetches its bridge key for you**, so nobody has to
+remember where the key went, and the system prompt, controls and QPM configured in the UI are
+kept. Without `--app` a new application is created.
+
+There is no bridge to "find": it is a process this CLI runs. `ascend bridge ls` says whether one
+is serving, and `assess run` starts and stops it for you.
+
 Step 5 is worth its own line in a script. A target that has drifted — auth expired, response
 shape moved, endpoint relocated — still produces a clean-*looking* assessment that measured
 nothing, and that false pass is the most expensive result this tool can hand you.
