@@ -128,7 +128,16 @@ adapter bug. When you hit it:
 - Do **not** keep raising `timeout_ms` — through the bridge it changes nothing.
 - Say so explicitly rather than reporting the target as failing its probes.
 - The platform window has to be raised first; then match it with
-  `$ASCEND_BRIDGE_RESPONSE_TIMEOUT_MS` (or `bridge_response_timeout_ms` in the config).
+  `$ASCEND_BRIDGE_RESPONSE_TIMEOUT_MS` (or `bridge_response_timeout_ms` in the config), and tell
+  the CLI what the new window is with `$ASCEND_PLATFORM_PROBE_WINDOW_MS`.
+
+`ascend adapter validate` checks this for you: it prints the measured reply time and warns when the
+target is at or beyond the window (unassessable) or close enough that queueing alone can blow it.
+Treat that warning as a stop sign — the config being green does not mean the target can be run.
+
+One subtlety worth knowing: the probe's clock starts when the platform **queues** it, not when the
+bridge calls the target. A target comfortably under the window can still time out while waiting to
+be leased, which is why QPM and `max_workers` matter for slow targets beyond simple politeness.
 
 `timeout_ms` still matters everywhere else — `adapter validate`, `chat`, and any target
 *under* the window — which is where a pinned 20-30s value silently fails everything.

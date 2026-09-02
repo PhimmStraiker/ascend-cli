@@ -73,3 +73,41 @@ def test_bridge_window_uses_the_same_rule(monkeypatch):
     assert _bridge_response_timeout_s({"bridge_response_timeout_ms": 300000}) == 300.0
     monkeypatch.setenv("ASCEND_BRIDGE_RESPONSE_TIMEOUT_MS", "240000")
     assert _bridge_response_timeout_s({}) == 240.0
+
+
+# ---- the platform's per-probe window (what the CLI cannot configure away) ----------------------
+def test_fast_target_is_not_warned_about():
+    from adapters.base import platform_window_warning
+    assert platform_window_warning(1_000) is None
+    assert platform_window_warning(60_000) is None
+
+
+def test_target_at_or_over_the_window_is_called_unassessable():
+    # Not "slow" — unassessable. Every probe times out platform-side and is recorded as a failure,
+    # which auto-pauses the run, so it reports no findings having measured nothing.
+    from adapters.base import platform_window_warning
+    msg = platform_window_warning(130_000)
+    assert msg and "at or beyond" in msg
+    # and it must say the obvious wrong fix does not work
+    assert "adapter timeout does NOT help" in msg
+
+
+def test_target_approaching_the_window_is_warned_about_queueing():
+    # The probe's clock starts when it is QUEUED, so a target well under the window can still
+    # time out while waiting to be leased.
+    from adapters.base import platform_window_warning
+    msg = platform_window_warning(80_000)
+    assert msg and "QUEUED" in msg
+
+
+def test_window_is_env_tunable_for_when_the_platform_raises_it(monkeypatch):
+    from adapters.base import platform_probe_window_s, platform_window_warning
+    monkeypatch.setenv("ASCEND_PLATFORM_PROBE_WINDOW_MS", "600000")
+    assert platform_probe_window_s() == 600.0
+    assert platform_window_warning(130_000) is None      # fine once the platform allows 10 min
+
+
+def test_garbage_duration_never_raises():
+    from adapters.base import platform_window_warning
+    assert platform_window_warning(None) is None
+    assert platform_window_warning("nope") is None

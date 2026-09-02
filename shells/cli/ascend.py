@@ -4615,14 +4615,27 @@ def cmd_adapter_validate(args):
     if not atype:
         _die("no adapter type: pass --adapter or set 'adapter' in the config")
     res = V.validate_config(atype, cfg, args.prompt, args.expect, timeout_s=args.timeout)
+    # A config can be perfectly correct and still be unassessable: the platform bounds how long each
+    # probe may take, and the clock starts when the probe is queued. Say that here, from the one
+    # real measurement we have, rather than letting it surface later as a run full of failures that
+    # reads as a broken bridge.
+    try:
+        sys.path.insert(0, str(REPO / "runtime"))
+        from adapters.base import platform_window_warning
+        _slow = platform_window_warning(res.get("duration_ms"))
+    except Exception:
+        _slow = None
     if args.json:
-        _out(res, args)
+        _out({**res, "platform_window_warning": _slow} if _slow else res, args)
     else:
-        print(f"  ok={res.get('ok')} matched={res.get('matched')}")
+        print(f"  ok={res.get('ok')} matched={res.get('matched')}"
+              + (f" ({res['duration_ms']}ms)" if res.get("duration_ms") else ""))
         if res.get("error"):
             print(f"  error: {res['error']}")
         if res.get("response"):
             print(f"  response: {str(res['response'])[:200]}")
+    if _slow:
+        print(f"warning: {_slow}", file=sys.stderr)
     # Distinguish a tool/target ERROR (unreachable, auth, bad adapter) from a
     # content MISMATCH (target answered, but --expect missed) so CI can branch.
     if res.get("error"):

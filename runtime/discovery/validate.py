@@ -104,6 +104,10 @@ def validate_config(
         "error": result.get("error"),
         "matched": matched,
         "adapter": adapter,
+        # How long the target actually took. This is the one measurement that says whether the
+        # target can be assessed at all, because the platform bounds each probe (see
+        # adapters.base.platform_window_warning) — so it must survive back to the caller.
+        "duration_ms": result.get("duration_ms"),
         "metadata": result.get("metadata", {}),
     }
 
