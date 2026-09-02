@@ -88,17 +88,24 @@ def score_cell(v, width: int = 5) -> str:
     return paint(txt.rjust(width), col, sys.stdout)
 
 
-def bar(passed: int, failed: int, width: int = 10) -> str:
-    """`▓▓▓▓▓▓▓░░░` — pass/fail at a glance. ASCII when the terminal can't do blocks."""
+def bar(passed: int, failed: int, width: int = 10, cell: Optional[int] = None) -> str:
+    """`▓▓▓▓▓▓▓░░░` — pass/fail at a glance. ASCII when the terminal can't do blocks.
+
+    `cell` pads the result to a visible column width. Callers must use it rather than
+    `f"{bar(...):11}"`: this returns ~28 bytes for 10 visible cells, so a format spec measures
+    the escapes and adds no padding at all, which silently under-pads the column whenever colour
+    is on. Padding here is the only way a caller cannot get it wrong.
+    """
     total = max(0, passed) + max(0, failed)
     if not total:
-        return "-".ljust(width)
+        return vpad("-", cell or width)
     filled = int(round(width * (max(0, passed) / total)))
     if _unicode_ok():
         good, bad = "▓", "░"
     else:
         good, bad = "#", "."
-    return paint(good * filled, _GRN, sys.stdout) + paint(bad * (width - filled), _RED, sys.stdout)
+    out = paint(good * filled, _GRN, sys.stdout) + paint(bad * (width - filled), _RED, sys.stdout)
+    return vpad(out, cell) if cell else out
 
 
 def sparkline(values) -> str:
