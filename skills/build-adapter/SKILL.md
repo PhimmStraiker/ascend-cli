@@ -146,6 +146,39 @@ then build an adapter against that API exactly as for any other HTTP target. Mob
 backends are also the most likely place to need Layer 3 above: their tokens are usually
 short-lived and refresh-token based.
 
+## Which adapter, and how each one bites
+
+`adapter build` picks this for you from evidence. Read this when the pick looks wrong, when
+validation fails, or when you are deciding whether a target is even reachable. The third
+column is the failure that is *specific* to that shape — the one that does not look like a
+bug when it happens.
+
+| Target shape | Adapter | The way it fails |
+|---|---|---|
+| Plain REST, one request one answer | `direct_api` | `response_path` points at the wrong key: the scorer grades an envelope, not the reply |
+| Answer arrives as a token stream | `sse_stream` | Read as REST you capture the first fragment. Choose `done_when` (a terminal event) over `idle_ms` when the stream declares an end; a mid-stream read timeout truncates silently |
+| Reply framed by BEGIN/END markers | `sentinel_stream` | If the markers go undetected it falls through to `direct_api` and captures **wire protocol as the answer** — a config that validates while grading framing |
+| WebSocket chat | `websocket_direct` | `framing: json` vs `text` is the whole game: wrong pick drops tokens or never assembles. Pick by `json.loads`-ing a frame |
+| Create a session, then send | `session_api` | A mandatory greeting on the first turn scores as a PASS. Set `warmup_message` so the throwaway turn absorbs it |
+| Create → send → poll for the answer | `session_poll` | Needs two budgets: per-HTTP-call and total-wait. One global timeout gives up mid-answer |
+| Endpoint 403s any non-browser replay | `browser` | Anti-automation. `adapter build --url` falls back here automatically; `--manual` lets you drive the widget while it records |
+| Salesforce Agentforce, authenticated | `agentforce` | Needs JWT-format bearer tokens enabled and an agent that is not type "Agentforce (Default)"; mints and re-mints its own credential |
+| Salesforce public chat widget | `scrt2_direct` | The unauthenticated path — do not reach for it when the org has a real Agent API |
+| Microsoft Copilot Studio | `copilot_studio` | Three credential sources (token endpoint, Direct Line secret, pre-minted bearer). Entra-gated bots need the delegated token, not the secret |
+| Amazon Connect chat | `amazon_connect` | Participant/connection tokens are short-lived by design; the poll budget is separate from the request timeout |
+| Slack-hosted bot | `slack_direct` | Needs a `xoxp` user token and replies arrive on a thread, so the read is a poll, not a response |
+| Vertex AI / Agent Engine | `vertex_ai` | Defaults to ADC. Some orgs block service-account keys by policy, so ADC is the only route |
+| AWS Bedrock | `bedrock` | Three modes; pick deliberately rather than letting the default decide |
+| Fits nothing above | `custom_module` | `adapter build --code` writes the module and `adapter validate` proves it. A generated module that has not validated is a guess |
+
+Two rules that apply to every shape:
+
+- **Secrets are `env:NAME` references.** A config with a literal token in it is rejected, because
+  configs get committed, pasted into tickets and shared.
+- **A greeting, a consent banner or an error envelope can all validate.** Validation proves the
+  target *answered*, not that you captured the *right* text. Read the `verified_answer` in the
+  config's `_probe` block before trusting it.
+
 ## Workflow
 
 ### 1. Gather evidence
@@ -238,19 +271,38 @@ Only a green-validated config proceeds to `onboard-target` / `assess run`. If yo
 genuinely cannot get a layer green, emit the low-confidence discover report plus
 the raw evidence and escalate that specific layer — do **not** ship a guess.
 
-## Symptom -> cause
+## Troubleshooting: symptom -> what it actually is
 
-Read this before re-building an adapter. Most "the adapter broke" reports are one of
-these, and only the last one is actually a transport problem.
+**Read this before re-building anything.** Nearly every failure in this tool presents as a
+different failure than it is: a platform pause reads as a dead bridge, an expired token reads
+as a well-behaved bot refusing, and probes split across two relays read as nothing at all.
+Diagnose in the order below, because step 1 rules out most of the table.
 
-| symptom | almost always | fix |
+**Step 1 — always: `ascend bridge ls`. Read `ANS`.** It counts probes the target actually
+answered. If it is zero, the target is not being tested and nothing else you observe means
+anything yet.
+
+| symptom | what it actually is | what to do |
 |---|---|---|
-| `answered=0` with `failed` climbing in `bridge ls` | the adapter is failing every probe — timeout too short, or the credential expired | raise/remove `timeout_ms`; add an `auth` block |
-| worked for the first N probes, then everything "refuses" | short-lived credential expired mid-run | `reauth_on_401` / `refresh_on_ttl` |
-| assessment sits at `paused` and nothing moves | the platform auto-paused after repeated probe failures | fix the adapter failure, then `assess resume` |
-| every probe fails against a slow/agentic target | `timeout_ms` shorter than the target's reply time | remove the pin or raise it; agents take 2-3 min+ |
-| a run scores perfectly clean and suspiciously fast | probes went unanswered — a **false pass**, not a good result | confirm `answered > 0` before believing any score |
-| replies are truncated or arrive as fragments | transport/assembly (L1) is wrong — streaming read as REST | re-check `sse`/`ndjson`/`websocket` framing |
+| `answered=0`, `failed` climbing | the **adapter** is failing every probe, not the bridge | fix the adapter (timeout, credential). Restarting the relay changes nothing |
+| worked for N probes, then everything "refuses" | a short-lived credential expired mid-run | `auth_lifecycle: reauth_on_401` (or `refresh_on_ttl`) |
+| run sits at `paused`, bridge is healthy | the **platform** auto-paused after repeated probe failures | fix the adapter failure, then `assess resume` |
+| every probe fails against a slow target | `timeout_ms` shorter than the reply time — 100% failure, not refusal | remove the pin; agents take 2-3 min. Then check the per-probe window below |
+| target reliably takes longer than ~110s | the platform's per-probe window, which you cannot configure away | raise it platform-side first; `timeout_ms` will not help |
+| clean score, suspiciously fast | probes went unanswered — a **false pass** | confirm `answered > 0` before believing any score |
+| replies truncated or arriving as fragments | transport/assembly is wrong — a stream read as REST | re-check `sse` / `ndjson` / `websocket` framing |
+| the "answer" looks like protocol, not prose | marker-framed stream misdetected as REST | `sentinel_stream` with the BEGIN/END markers |
+| first turn passes, later turns lose context | session/conversation not carried | set the session id lifecycle; some targets also need `warmup_message` |
+| every probe 403s but the same request works in a browser | anti-automation on the endpoint | `adapter build --url` (browser), `--manual` to drive it yourself |
+| probes seem to vanish, throughput is half | two relays serving one app, splitting its probes | `bridge ls`; stop the one you started by hand |
+| a create call errors but the thing exists | the response was dropped after the server acted | check `app list` before retrying, or you will duplicate it |
+
+**When the tool is unhelpful rather than wrong.** Several failures above once surfaced only as
+silence or a generic upstream error. If you hit an error that does not name a cause, treat it as
+a diagnosis problem and gather evidence before changing config: `bridge ls` for `ANS`,
+`adapter validate` for a single timed round-trip, and `adapter show` for what is actually
+configured. Report the error text as a defect — an error that cannot be acted on is a bug in
+its own right, and is usually what turns a five-minute fix into a blocked engagement.
 
 ## Definition of done
 - Every layer has a value; every low-confidence layer was resolved with evidence.

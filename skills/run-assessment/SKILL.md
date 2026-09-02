@@ -105,6 +105,11 @@ Never run two relays for one app — they split that app's probes between them.
 
 Keep the host awake for long runs; a sleeping Mac drops the connection.
 
+The full symptom table — including the failures that present as something else entirely (protocol
+captured as the answer, probes split across two relays, a create that errored but succeeded) — is in
+**build-adapter**, under *Troubleshooting: symptom -> what it actually is*. Start there rather than
+guessing, and start with `ANS`.
+
 ### 5. Pull results
 ```
 ascend --json assess results --app <app_or_name> --assessment <assessment_id>
