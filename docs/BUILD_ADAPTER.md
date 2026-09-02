@@ -335,6 +335,37 @@ resolving because keys live in `~/.ascend` and never depended on the working dir
 `ascend adapter configs` lists everything that is actually resolvable and says where new ones are
 written.
 
+### Naming the config, and what happens on a name clash
+
+`target add` / `onboard` derive the config name from `--name`, or from the evidence file, or from
+the URL's host — which is how you end up with `myhost-com` or `127-0-0-1-8791`. **Use `--save-as
+<name>` to choose it**, and you always know what to pass to `--config` later:
+
+```bash
+ascend target add https://your-bot.example.com/chat --save-as mybot --name 'My Bot'
+ascend target check mybot
+```
+
+Because the derived name comes from the *host*, two bots on one host derive the same name. Re-running
+against the **same endpoint** overwrites the config in place — that is an intentional refresh, and
+any `_ascend` app binding on the file is carried forward so the target stays bound to its
+application. A **different** endpoint under an already-used name is not overwritten: it is saved
+alongside as `<name>-2` and both are named in the output. `--save-as` is explicit intent and always
+wins, overwriting if you point it at an existing name.
+
+Writing the exact path you asked for:
+
+| `--out` | Writes to |
+|---|---|
+| `mybot` / `mybot.json` | the config dir (so `--config mybot` finds it) |
+| `./mybot.json` | your current directory |
+| `out/mybot` | `out/mybot.json` — the extension is always added |
+| `/abs/path/mybot.json` | exactly there |
+
+`--code` follows the same rule and writes the `.py` module beside its pointer config; when that is
+outside the config dir the pointer records an absolute path, because the `custom` adapter otherwise
+could not find the module at run time.
+
 ## Once you have a validated adapter
 
 Same for all three ways. The shortest path is to hand the config to `target add`, which registers

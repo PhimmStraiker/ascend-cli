@@ -1895,17 +1895,46 @@ def _bake_auth(cfg, headers, query):
     return cfg
 
 
+def resolve_out_path(out) -> Path:
+    """Where `--out` actually writes. One rule, used by every writer.
+
+    A BARE name (`mybot`, `mybot.json`) still lands in the shared config dir, exactly as before —
+    that is the common case and scripts depend on it. Two things are fixed:
+
+      * an explicitly written PATH is now honoured. `Path("./mybot.json").parent == Path(".")`, so
+        `./mybot.json` was indistinguishable from a bare name once it became a Path, and the file
+        appeared in the config dir instead of the directory the user pointed at. The raw string has
+        to be inspected, not the Path.
+      * `.json` is appended on every branch. It used to be added only for bare names, so
+        `--out out/mybot` wrote a file literally named `mybot`, which `adapter configs` globs for
+        `*.json` and could therefore never list again.
+    """
+    raw = str(out)
+    p = Path(os.path.expanduser(raw))
+    # A value that names no FILE ('.', './', 'out/', or an existing directory) has no sensible
+    # answer. Left alone, `p.with_name(p.name + ".json")` raised a bare ValueError from pathlib
+    # after the probe and the live validation had already run, and a trailing-slash value
+    # collapsed to writing a sibling file named after the directory.
+    # A trailing separator names a directory, but pathlib drops it — `Path("out/").name` is
+    # "out" — so without checking the raw string this silently wrote `./out.json`, a file named
+    # after the directory the operator meant to write into.
+    if raw.rstrip().endswith(("/", os.sep)) or not p.name or p.name in (".", "..") or p.is_dir():
+        _die(f"--out needs a file name, not a directory: {raw!r}\n"
+             f"  try:  --out mybot            (lands in {config_dir()})\n"
+             f"        --out {raw.rstrip('/') or '.'}/mybot.json", code=EXIT_USAGE)
+    explicit = raw.startswith(("./", "../", "/", "~")) or os.sep in raw
+    if not explicit:                                 # bare name -> shared config dir (unchanged)
+        p = config_dir() / p.name
+    if p.suffix != ".json":
+        p = p.with_name(p.name + ".json")
+    return p
+
+
 def _write_discovered(cfg, args):
-    """Resolve --out through the ONE config dir (bare names land where --config finds them),
-    normalize the extension, and return (path or None) with a resolvable next-step name."""
+    """Resolve --out, normalize the extension, and return (path or None)."""
     if not args.out:
         return None
-    out_path = Path(os.path.expanduser(args.out))
-    if out_path.parent == Path("."):                 # bare name -> shared config dir
-        name = out_path.name
-        if not name.endswith(".json"):
-            name += ".json"
-        out_path = config_dir() / name
+    out_path = resolve_out_path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     _write_private(out_path, json.dumps(cfg, indent=2))
     return out_path
@@ -2094,29 +2123,46 @@ def _finish_code_adapter(cfg, vres, args, source, V):
     from runtime.discovery import codegen
     if not args.out:
         _die("--code needs --out <name>: the adapter module is written as <name>.py beside <name>.json")
-    name = Path(os.path.expanduser(args.out)).stem
+    # `--out` used to be reduced to its STEM here, so `--code --out ./build/bot.json` silently
+    # ignored the directory and wrote into the config dir instead — while the docs promised
+    # "`--out` with a directory in it writes exactly there". One flag meant two different things
+    # depending on whether `--code` was present. It now resolves through the same one rule as
+    # every other writer, and the module is written beside its pointer config.
+    cfg_path_hint = resolve_out_path(args.out)
+    name = cfg_path_hint.stem
     module_src = codegen.generate_adapter_module(name, cfg, source=source)
-    module_path = config_dir() / f"{name}.py"
+    module_path = cfg_path_hint.with_name(f"{name}.py")
     module_path.parent.mkdir(parents=True, exist_ok=True)
     _write_private(module_path, module_src)
+    # The module reference is a BARE filename only while the module sits in the config dir, which
+    # is the only place `custom_module._resolve_module_path` looks (that, and the cwd). Written
+    # anywhere else it must be recorded as an absolute path, or the adapter that just validated
+    # would fail to load at run time with "adapter module not found".
+    in_config_dir = module_path.parent.resolve() == Path(config_dir()).resolve()
     pointer = {
         "adapter": "custom",
-        "adapter_module": f"{name}.py",
+        "adapter_module": f"{name}.py" if in_config_dir else str(module_path.resolve()),
         "target": cfg.get("url") or cfg.get("endpoint"),
         "timeout_ms": cfg.get("timeout_ms", 30000),
         "_source": source,
         "_probe": cfg.get("_probe"),
     }
-    cfg_path = config_dir() / f"{name}.json"
+    cfg_path = cfg_path_hint
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
     _write_private(cfg_path, json.dumps(pointer, indent=2))
+
+    # `--config <stem>` resolves only when the config is in a config dir. With an explicit
+    # `--out <dir>/<name>` it is not, so every next-step hint below printed a reference that
+    # exits 3 ("config not found"). Print the path in that case — `--config` accepts one.
+    cfg_ref = name if in_config_dir else str(cfg_path)
 
     is_scaffold = "raise NotImplementedError" in module_src
     if is_scaffold:
         print(f"[build] this target fits no known pattern — wrote a SCAFFOLD adapter to "
               f"{module_path}", file=sys.stderr)
-        print("        finish send_prompt() by hand, or run `adapter build --agent` to have it "
-              "written from the captured request, then `adapter validate --config "
-              f"{name}`.", file=sys.stderr)
+        print("        finish send_prompt() by hand — or open it in a coding agent, which has "
+              "the captured request right there in the file — then `adapter validate --config "
+              f"{cfg_ref}`.", file=sys.stderr)
         if args.json:
             _out({"adapter_module": str(module_path), "config": str(cfg_path),
                   "scaffold": True, "validated": False, "source": source}, args)
@@ -2131,7 +2177,7 @@ def _finish_code_adapter(cfg, vres, args, source, V):
              f"  {v2.get('error')}\n"
              f"  the code is at {module_path} — open it in your coding agent (e.g. Claude Code)\n"
              f"  with the captured request, finish send_prompt(), then:  ascend adapter validate "
-             f"--config {name}",
+             f"--config {cfg_ref}",
              code=EXIT_ERROR)
     print(f"[validate] VALIDATED (code) — {str(v2.get('response'))[:90]!r}", file=sys.stderr)
     if args.json:
@@ -2141,7 +2187,8 @@ def _finish_code_adapter(cfg, vres, args, source, V):
     else:
         print(f"\nwrote the adapter:  {module_path}")
         print(f"      its config:   {cfg_path}")
-        print(f"next:  ascend chat {name}    ·    ascend app create --name '<app>' --config {name}")
+        print(f"next:  ascend chat {cfg_ref}    ·    "
+              f"ascend app create --name '<app>' --config {cfg_ref}")
 
 
 def _finish_browser_adapter(recipe, args, source, V):
@@ -2376,13 +2423,170 @@ def _ok(msg):
     print(f"      {msg}", file=sys.stderr, flush=True)
 
 
-def _write_named_config(cfg, cfg_name):
-    """Write a discovered config to <config_dir>/<name>.json and note it. Shared by onboard's
-    discovery branches so every source lands the config the same way."""
-    path = config_dir() / f"{cfg_name}.json"
+def _warn(msg):
+    """Something the operator must notice but that is not fatal. stderr, like every other note,
+    so `--json` output on stdout stays machine-readable."""
+    print(f"    warning: {msg}", file=sys.stderr, flush=True)
+
+
+def _config_endpoint(cfg):
+    """The target a config points at, however its adapter spells it — or None if unknowable.
+
+    None is a real answer here, and the caller MUST treat it as "cannot tell", never as "differs".
+    The adapters spell this half a dozen ways and some do not carry a URL at all: `bedrock` has
+    only a region and a model, `session_poll` has neither, and websocket shapes use `ws_url`. A
+    comparison that read None as "a different target" forked a new `<name>-2` config on every
+    ordinary re-run of those targets.
+    """
+    if not isinstance(cfg, dict):
+        return None
+    for k in ("endpoint", "url", "message_endpoint", "ws_url", "wss_url",
+              "create_url", "target", "chat_url"):
+        v = cfg.get(k)
+        if isinstance(v, str) and v.strip():
+            return _norm_endpoint(v)
+    base, path = cfg.get("base_url"), cfg.get("chat_path")
+    if base:
+        return _norm_endpoint(f"{base}{path}" if path else str(base))
+    # bedrock and friends address a model, not a URL. Compose a stable identity from what they do
+    # carry so the same target still compares equal to itself.
+    ident = [str(cfg.get(k)) for k in ("region", "model", "model_id", "agent_id", "runtime_arn")
+             if cfg.get(k)]
+    return "|".join(ident) if ident else None
+
+
+def _norm_endpoint(value):
+    """Normalize a URL enough that the same target compares equal to itself.
+
+    A raw string compare called `https://H.example.com/chat` and `https://h.example.com/chat/`
+    different targets and minted a spurious sibling config. Hostnames are case-insensitive, a
+    default port is implied, and a trailing slash addresses the same resource.
+    """
+    s = str(value).strip()
+    try:
+        from urllib.parse import urlsplit, urlunsplit
+        p = urlsplit(s)
+        if not p.netloc:
+            return s.rstrip("/") or s
+        host = (p.hostname or "").lower()
+        port = p.port
+        if port and not ((p.scheme == "https" and port == 443)
+                         or (p.scheme == "http" and port == 80)):
+            host = f"{host}:{port}"
+        path = (p.path or "").rstrip("/")
+        return urlunsplit((p.scheme.lower(), host, path, p.query, ""))
+    except Exception:
+        return s.rstrip("/") or s
+
+
+def _writable_existing(name):
+    """The existing config of this name that we may WRITE to, or None.
+
+    `resolve_config_path` deliberately searches wider than writes belong: the cwd, and (in a
+    frozen build) a temp dir that is deleted on exit. Redirecting a write there would edit a
+    stray JSON in whatever directory the operator happened to be in, or vanish at process end.
+    """
+    p = resolve_config_path(name)
+    if not p:
+        return None
+    try:
+        from configs import writable_config_dirs
+        allowed = set()
+        for d in writable_config_dirs():
+            try:
+                allowed.add(d.resolve())
+            except Exception:
+                pass
+        return p if p.parent.resolve() in allowed else None
+    except Exception:
+        return None
+
+
+def _free_config_name(base, cfg=None):
+    """A name for a target that collides with `base`.
+
+    Reuses the sibling that already describes THIS target if there is one — otherwise refreshing
+    the second bot on a shared host minted a brand new `-N` file on every single run and no
+    sibling was ever updated again, so the freshly discovered auth landed in `-5` while
+    `--config <base>-2` kept serving a stale token.
+    """
+    want = _config_endpoint(cfg) if cfg is not None else None
+    for i in range(2, 100):
+        cand = f"{base}-{i}"
+        if not resolve_config_path(cand):
+            return cand
+        if want and _config_endpoint(_peek_config(cand)) == want:
+            return cand                     # this sibling IS this target — refresh it in place
+    return f"{base}-{int(time.time())}"
+
+
+def _write_named_config(cfg, cfg_name, *, exact=False):
+    """Write a discovered config and return (path, name) — the name may differ from the one asked
+    for, so callers MUST use what comes back.
+
+    Two live defects this closes:
+
+      * **Silent overwrite.** The name is derived from the URL's host, so two endpoints on one
+        host (`https://h/chat` and `https://h/v1/chat`) derived the SAME filename and the second
+        run overwrote the first — including any `_ascend` app binding it carried — and exited 0.
+        Onboarding a customer's second bot destroyed the first target's config with a success
+        message. Re-running against the SAME endpoint still overwrites silently, because that is
+        an intentional refresh and scripts rely on it; only a genuinely DIFFERENT target is moved
+        aside, and it is named in the output.
+      * **A duplicate copy per working directory.** Updating a config wrote to `config_dir()`,
+        which depends on the current directory, so editing an existing config from a different
+        directory created a second copy elsewhere instead of updating the one in use. An update
+        now goes back to the file it resolved from.
+
+    `exact=True` (the user named the config themselves) always writes that name: explicit intent
+    wins over the guard, though a differing target is still called out.
+    """
+    # Two different questions: what does the config of this name currently SAY (read it wherever
+    # it resolves), and where may we WRITE (a narrower set).
+    prior = _peek_config(cfg_name)
+    existing = _writable_existing(cfg_name)
+    same_target = True                      # fail safe: assume a refresh unless proven otherwise
+    if prior:
+        old = _config_endpoint(prior)
+        new = _config_endpoint(cfg)
+        # ONLY divert when both endpoints are known AND differ. If either is unknowable the
+        # answer is "cannot tell", and the safe reading of that is "same target, refresh in
+        # place" — today's behaviour. Reading it as "different" forked a new `<name>-2` on every
+        # ordinary re-run of any adapter whose endpoint this cannot see (bedrock carries only a
+        # region, session_poll carries no URL at all), which breaks the refresh contract that
+        # scripts and agents depend on.
+        differs = bool(old) and bool(new) and old != new
+        same_target = not differs
+        if differs and not exact:
+            taken = _free_config_name(cfg_name, cfg)
+            if taken != cfg_name:
+                _warn(f"a different config named '{cfg_name}' already exists"
+                      f"\n    it points at {old}"
+                      f"\n    this one points at {new}"
+                      f"\n    keeping both — saving this one as '{taken}'."
+                      f"\n    name it yourself with:  --save-as <name>")
+                cfg_name = taken
+                prior = _peek_config(cfg_name)
+                existing = _writable_existing(cfg_name)
+                same_target = True          # we are now writing that sibling's own file
+        elif differs and exact:
+            _warn(f"overwriting '{cfg_name}' — it pointed at {old} and now points at {new}")
+    # An update goes back to the file it came from; a new config goes to the write dir.
+    path = existing or (config_dir() / f"{cfg_name}.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if prior and same_target:
+        # Re-deriving a config must not throw away what was BOUND to it. `_ascend` is the app
+        # binding written by `app bind` / registration; a freshly discovered config never carries
+        # it, so a plain overwrite silently unbound the target from its application and the next
+        # run could not find the app. Gated on same_target: carrying a binding onto a config the
+        # operator has just deliberately re-pointed at a DIFFERENT target would attach the new
+        # target to the old target's application, which is worse than losing the binding.
+        for k in ("_ascend",):
+            if prior.get(k) and not cfg.get(k):
+                cfg = {**cfg, k: prior[k]}
     _write_private(path, json.dumps(cfg, indent=2))
     _ok(f"wrote {path}")
-    return path
+    return path, cfg_name
 
 
 def cmd_onboard(args):
@@ -2405,14 +2609,26 @@ def cmd_onboard(args):
     else:
         name = ((getattr(args, "api", None) or args.url or args.config or "target")
                 .split("//")[-1].split("/")[0])
-    cfg_name = args.config or re.sub(r"[^a-z0-9_-]+", "-", name.lower()).strip("-") or "target"
+    # --save-as is the way to NAME the config. Without it the name is derived from the URL's
+    # host, which produced things like `127-0-0-1-8791` and `myhost-com`: the one-command path
+    # gave no way to choose, and the only way to learn the name was to read a stderr line.
+    chosen = getattr(args, "save_as", None) or args.config
+    cfg_name = chosen or re.sub(r"[^a-z0-9_-]+", "-", name.lower()).strip("-") or "target"
     if cfg_name.endswith(".json"):        # accept the name exactly as given; never append .json twice
         cfg_name = cfg_name[:-5]
+    # A name the user chose is honoured exactly; a derived one may be moved aside to avoid
+    # clobbering a different target that happens to share a host.
+    named_exactly = bool(chosen)
+
+    # Always defined: the --config branch below writes nothing, so the later "fix <path>" and
+    # --json "path" fields would otherwise reference an unbound name.
+    cfg_path = resolve_config_path(cfg_name) or (config_dir() / f"{cfg_name}.json")
 
     # 1. obtain a contract -----------------------------------------------------
     if args.config and not (getattr(args, "api", None) or args.url or args.har or getattr(args, "curl", None)):
         _step(1, total, f"using existing config '{args.config}'")
         cfg = _load_named_config(args.config)
+        cfg_path = resolve_config_path(args.config) or cfg_path
     elif getattr(args, "api", None):
         # the simple-contract one-liner: one probe, no browser, no adapter to author
         _step(1, total, f"probing {args.api}")
@@ -2430,7 +2646,7 @@ def cmd_onboard(args):
         _ok(f"{res.method} {res.endpoint} · transport {res.transport} · answer at "
             f"{res.response_path or '(top-level)'}")
         cfg = build_config(res)
-        _write_named_config(cfg, cfg_name)
+        cfg_path, cfg_name = _write_named_config(cfg, cfg_name, exact=named_exactly)
     elif getattr(args, "curl", None):
         _step(1, total, f"reading the request from {args.curl}")
         from runtime.discovery.importers import from_curl, CurlParseError
@@ -2439,7 +2655,7 @@ def cmd_onboard(args):
             cfg = from_curl(text, prompt_hint=args.prompt_hint)
         except CurlParseError as e:
             _die(f"could not read that curl command: {e}")
-        _write_named_config(cfg, cfg_name)
+        cfg_path, cfg_name = _write_named_config(cfg, cfg_name, exact=named_exactly)
     else:
         _step(1, total, f"capturing the contract from {args.url or args.har}")
         if args.url:
@@ -2461,7 +2677,7 @@ def cmd_onboard(args):
         _ok(f"transport {t.get('value')} (confidence {t.get('confidence')})")
         if res.get("unresolved"):
             _ok(f"unresolved layers: {res['unresolved']}")
-        _write_named_config(cfg, cfg_name)
+        cfg_path, cfg_name = _write_named_config(cfg, cfg_name, exact=named_exactly)
 
     adapter = args.adapter or cfg.get("adapter")
     if not adapter:
@@ -2473,7 +2689,7 @@ def cmd_onboard(args):
     vres = V.validate_config(adapter, cfg, args.prompt, None, timeout_s=args.timeout)
     if not vres.get("ok"):
         _die(f"the adapter could not talk to the target: {vres.get('error')}\n"
-             f"  fix {config_dir() / (cfg_name + '.json')} and re-run, or use "
+             f"  fix {cfg_path} and re-run, or use "
              f"`ascend adapter validate --config {cfg_name}` to iterate.",
              code=EXIT_ERROR)
     # The streaming check has to run on EVERY source, not only the probing one. `adapter build`
@@ -2485,15 +2701,15 @@ def cmd_onboard(args):
     cfg, vres = _upgrade_streaming_shape(cfg, vres, args, V)
     if cfg.get("adapter") and cfg["adapter"] != adapter:
         adapter = cfg["adapter"]
-        _write_named_config(cfg, cfg_name)       # the file was written before validation
+        _write_named_config(cfg, cfg_name, exact=True)   # same file; name already settled
     _ok(f"target replied: {str(vres.get('response'))[:80]!r}")
 
     if args.dry_run:
         if getattr(args, "json", False):
-            _out({"config": cfg_name, "path": str(config_dir() / f"{cfg_name}.json"),
+            _out({"config": cfg_name, "path": str(cfg_path),
                   "adapter": adapter, "validated": True, "dry_run": True}, args)
         else:
-            print(f"\ndry run: config ready at {config_dir() / (cfg_name + '.json')}", file=sys.stderr)
+            print(f"\ndry run: config ready at {cfg_path}", file=sys.stderr)
         return
 
     # 3. register --------------------------------------------------------------
@@ -4989,7 +5205,13 @@ def _peek_config(name):
     """
     try:
         p = resolve_config_path(name)
-        return json.loads(p.read_text()) if p else {}
+        if not p:
+            return {}
+        obj = json.loads(p.read_text())
+        # A file can hold valid JSON that is not an object (a list, a bare string). Callers treat
+        # this as a mapping, so anything else is the same as "no config" — returning it would turn
+        # a stray .json in the config dir into an AttributeError.
+        return obj if isinstance(obj, dict) else {}
     except Exception:
         return {}
 
@@ -5166,6 +5388,9 @@ def _add_onboard_args(s, *, require_source):
     src.add_argument("--har", help="HAR file exported from your own browser (no browser needed here)")
     src.add_argument("--config", help="an existing config in the config dir (skip discovery)")
     s.add_argument("--name", help="application name in Ascend (default: derived from the URL)")
+    s.add_argument("--save-as", metavar="NAME",
+                   help="name the adapter config (default: derived from the URL, e.g. "
+                        "'myhost-com'). Use this and you always know what to pass to --config.")
     s.add_argument("--system-prompt", help="what the target is, for the assessment context")
     s.add_argument("--controls", help="comma-separated control ids (validated before the run)")
     s.add_argument("--adapter", help="override the adapter type (default: from the config)")
