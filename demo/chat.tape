@@ -8,7 +8,7 @@ Set Theme "Catppuccin Mocha"
 Set TypingSpeed 55ms
 
 Hide
-Type "cd '/Users/phimmasonephonpaseuth/Projects/Straiker Projects/ascend-cli'" Enter
+Type "cd \"${ASCEND_REPO:-$PWD}\"" Enter
 Type "clear" Enter
 Show
 
