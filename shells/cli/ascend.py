@@ -3074,7 +3074,8 @@ def cmd_target_list(args):
     print(f"  {'TARGET':28} {'ADAPTER':14} {'CONFIG':16} {'REGISTERED':11} BRIDGE")
     for r in rows:
         print(f"  {str(r['target'])[:28]:28} {str(r['adapter'] or '-')[:14]:14} "
-              f"{str(r['config'] or '-')[:16]:16} {r['registered']:11} {r['bridge']}")
+              f"{str(r['config'] or '-')[:16]:16} "
+              f"{_ui.state(r['registered'], width=11)} {_ui.state(r['bridge'])}")
     print(f"\n{len(rows)} target(s)")
 
 
@@ -3985,7 +3986,8 @@ def cmd_relay_ls(args):
                 secs = int(time.time() - r["started_at"])
                 up = f"{secs//3600}h{(secs%3600)//60:02d}m" if secs >= 3600 else f"{secs//60}m{secs%60:02d}s"
             mark = "*" if r["state"] == "serving" else " "
-            print(f"  {mark}{r['state']:8} {str(r.get('pid') or '-'):>6} {r['app_id']:26} "
+            print(f"  {mark}{_ui.state(r['state'], width=8)} "
+                  f"{str(r.get('pid') or '-'):>6} {r['app_id']:26} "
                   f"{str(r.get('config') or '-'):12} {str(st.get('answered', '-')):>5} "
                   f"{str(st.get('delivered', '-')):>5} {str(st.get('failed', '-')):>4} "
                   f"{str(st.get('lease_errors', '-')):>9} {str(st.get('submit_errors', '-')):>7} "
@@ -4611,7 +4613,15 @@ def cmd_status(args):
         print(f"  live     {len(out['live'])} assessment(s) running")
         for r in out["live"]:
             mark = "*" if r.get("bridge_serving") else ("!" if r.get("needs_bridge") else " ")
-            print(f"    {mark} {_pct(r['progress']):>5}  {r['app']}  ({r['assessment']})")
+            prog = r.get("progress")
+            # The bar is ADDITIVE: the numeric cell stays exactly where it was, because that is
+            # the column a human greps. On a pipe gradient_bar renders plain, so this costs
+            # scripts nothing but a few block characters.
+            gb = _ui.gradient_bar(float(prog) if isinstance(prog, (int, float)) else None,
+                                  width=14) if sys.stdout.isatty() else ""
+            print(f"    {mark} {_pct(r['progress']):>5}  "
+                  + (f"{gb}  " if gb else "")
+                  + f"{r['app']}  ({r['assessment']})")
     for w in out["warnings"]:
         print(f"\n  !! {w}")
     if out["warnings"]:
