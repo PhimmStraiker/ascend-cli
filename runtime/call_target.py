@@ -22,28 +22,14 @@ logger = logging.getLogger("ascendbridge.call_target")
 # 1h Entra/OAuth token TTL, so a long assessment never sends an expired token.
 _DEFAULT_AUTH_REFRESH_S = 2700.0
 
-# How long the bridge waits for the adapter before abandoning one probe.
-#
-# This is NOT a free choice, and raising it alone does not make a slow target work. The PLATFORM
-# gives a bridge a bounded window to return a result (probe_shadow's BRIDGE_RESPONSE_TIMEOUT, on the
-# order of 100-120s); a result delivered after that window is wasted work — the target call was
-# spent, the worker was held, and nothing is scored. So the default sits just under that window and
-# fails fast instead.
-#
-# It is configurable because the window is a server-side constant that can be changed: for agentic
-# targets that legitimately take 2-3 minutes or more, the platform side has to be raised FIRST, and
-# then this is raised to match. Until then a target slower than this window cannot be assessed
-# through the bridge, whatever the adapter's own `timeout_ms` says.
-_DEFAULT_BRIDGE_RESPONSE_TIMEOUT_S = 110.0
-
-
 def _bridge_response_timeout_s(config: Optional[Dict[str, Any]]) -> float:
-    """Per-probe ceiling for the bridge: config `bridge_response_timeout_ms`, else
-    $ASCEND_BRIDGE_RESPONSE_TIMEOUT_MS, else just under the platform's response window."""
-    from adapters.base import resolve_ms          # one precedence rule, shared with the target side
-    return resolve_ms(config, "bridge_response_timeout_ms",
-                      "ASCEND_BRIDGE_RESPONSE_TIMEOUT_MS",
-                      int(_DEFAULT_BRIDGE_RESPONSE_TIMEOUT_S * 1000)) / 1000.0
+    """How long the bridge waits for the adapter before abandoning one probe.
+
+    Derived from the platform's per-probe window rather than separately configurable — see
+    adapters.base. Raising it alone cannot make a slow target work, so it is not its own knob.
+    """
+    from adapters.base import bridge_response_timeout_s
+    return bridge_response_timeout_s()
 
 
 class TargetCaller:

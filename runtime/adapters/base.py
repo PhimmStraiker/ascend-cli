@@ -10,35 +10,31 @@ import time
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
 
-# How long to wait for ONE reply from the target.
+# ONE number governs how long a probe may take, because there is only one real fact here: the
+# platform gives a bridge a bounded window to return each probe result (iris probe_shadow's
+# BRIDGE_RESPONSE_TIMEOUT). Two things make it sharper than it looks:
+#   * the clock starts when the probe is QUEUED, not when the bridge starts calling the target, so a
+#     probe can spend much of its budget waiting to be leased;
+#   * blowing it surfaces as a synthetic 504 indistinguishable from a real target failure, which
+#     feeds the platform's target-health streak and auto-pauses the assessment.
+# So a target near this window does not merely run slowly — it produces a whole run of false
+# failures.
 #
-# Agentic targets routinely take 2-3 minutes, and some take considerably longer. A short fixed
-# default silently converts a slow-but-healthy target into 100% probe failures: measured live, a
-# 110s agent under a 20s config timeout failed every probe, the platform then auto-paused the
-# assessment, and the run looked like "the bridge broke". So the default here is generous rather
-# than tight, and both ends are tunable without editing code.
-#
-# There is still a ceiling, because a genuinely hung target must not pin a worker forever.
-# This number is NOT the binding constraint, and making it large does not make a slow target work.
-# The bridge abandons a probe at the platform's response window (call_target's
-# _DEFAULT_BRIDGE_RESPONSE_TIMEOUT_S), so a bigger value here buys nothing through the bridge and
-# actively hurts: the router gives up while the HTTP call keeps running, holding a worker and a
-# socket for the remainder. The default therefore sits just UNDER that window, which also means the
-# adapter reports the timeout itself — a clean per-probe error carrying a status — instead of the
-# router reporting a generic one.
-#
-# Raising this is only meaningful together with the bridge window (and for the paths that never go
-# through it, such as `adapter validate`). The ceiling guards an explicitly configured value.
-DEFAULT_TARGET_TIMEOUT_MS = 100_000
-MAX_TARGET_TIMEOUT_MS = 900_000            # above this a target is hung, not slow
+# Everything else is DERIVED from it rather than separately configurable, because three knobs for
+# one quantity is three ways to set them inconsistently:
+#   bridge give-up  = window - delivery margin   (leaves room to hand the result back in time)
+#   target timeout  = bridge give-up - margin    (so the ADAPTER reports the timeout, with a status,
+#                                                 instead of the router reporting a generic one)
+# One env var moves all three, which is what makes raising the platform-side window a config change
+# rather than a release.
+PLATFORM_PROBE_WINDOW_S = 120.0
+_DELIVERY_MARGIN_S = 10.0        # window -> bridge give-up: room to deliver the result
+_HANDLER_MARGIN_S = 10.0         # bridge give-up -> adapter: room for a clean per-probe error
 
 
 def resolve_ms(config: Optional[Dict[str, Any]], key: Optional[str],
                env_name: str, default_ms: int) -> int:
-    """First positive value of: config[key], $env_name, default_ms.
-
-    Shared by the target-reply and bridge-window resolvers so the precedence rule is written once.
-    """
+    """First positive value of: config[key], $env_name, default_ms."""
     sources = ((config or {}).get(key) if key else None, os.environ.get(env_name))
     for source in sources:
         try:
@@ -50,20 +46,15 @@ def resolve_ms(config: Optional[Dict[str, Any]], key: Optional[str],
     return default_ms
 
 
-# The platform gives a bridge a bounded window to return each probe result (iris probe_shadow's
-# BRIDGE_RESPONSE_TIMEOUT). Two things make this sharper than it looks:
-#   * the clock starts when the probe is QUEUED, not when the bridge starts calling the target, so a
-#     probe can spend much of its budget waiting to be leased;
-#   * blowing it surfaces as a synthetic 504 that is indistinguishable from a real target failure,
-#     which feeds the platform's target-health streak and auto-pauses the assessment.
-# So a target near this window does not merely run slowly — it produces a whole run of false
-# failures. Env-tunable so that when the platform window is raised, nothing here needs a code change.
-PLATFORM_PROBE_WINDOW_S = 120.0
-
-
 def platform_probe_window_s() -> float:
+    """The per-probe window the platform enforces. The single knob."""
     return resolve_ms(None, None, "ASCEND_PLATFORM_PROBE_WINDOW_MS",
                       int(PLATFORM_PROBE_WINDOW_S * 1000)) / 1000.0
+
+
+def bridge_response_timeout_s() -> float:
+    """How long the bridge waits for the adapter before abandoning one probe. Derived."""
+    return max(1.0, platform_probe_window_s() - _DELIVERY_MARGIN_S)
 
 
 def platform_window_warning(duration_ms: Any) -> Optional[str]:
@@ -92,15 +83,22 @@ def platform_window_warning(duration_ms: Any) -> Optional[str]:
 
 
 def resolve_timeout_s(config: Optional[Dict[str, Any]]) -> float:
-    """Seconds to wait for one target reply.
+    """Seconds the adapter waits for one target reply.
 
-    Precedence: the config's `timeout_ms`, then $ASCEND_TARGET_TIMEOUT_MS, then the default above —
-    always clamped to $ASCEND_TARGET_MAX_TIMEOUT_MS so one hung target cannot hold a worker open
-    indefinitely.
+    A config's `timeout_ms` still wins — that is the long-standing per-target knob — but it is
+    clamped to the bridge's give-up point, because waiting past it cannot help: the router has
+    already abandoned the probe and the extra time only holds a worker and a socket open. With no
+    `timeout_ms`, this derives from the platform window, so there is nothing extra to set.
     """
-    ms = resolve_ms(config, "timeout_ms", "ASCEND_TARGET_TIMEOUT_MS", DEFAULT_TARGET_TIMEOUT_MS)
-    ceiling = resolve_ms(None, None, "ASCEND_TARGET_MAX_TIMEOUT_MS", MAX_TARGET_TIMEOUT_MS)
-    return max(1.0, min(ms, ceiling) / 1000.0)
+    ceiling = bridge_response_timeout_s()
+    raw = (config or {}).get("timeout_ms")
+    try:
+        ms = int(raw or 0)
+    except (TypeError, ValueError):
+        ms = 0
+    if ms > 0:
+        return max(1.0, min(ms / 1000.0, ceiling))
+    return max(1.0, ceiling - _HANDLER_MARGIN_S)
 
 
 def utf8_text(r) -> str:

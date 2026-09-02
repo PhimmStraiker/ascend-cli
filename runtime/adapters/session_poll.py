@@ -31,14 +31,14 @@ Config:
                    (default ["assistant","bot","agent"])
     text_path      dot-path to the text inside a turn (default "text")
     interval_ms    poll interval (default 1000)
-    timeout_ms     overall wait for a reply (default: adapters.base.resolve_timeout_s / $ASCEND_TARGET_TIMEOUT_MS, and bounded by the bridge's per-probe window)
+    timeout_ms     overall wait for a reply (optional; otherwise derived from the platform's per-probe window)
     stability_ms   once a reply is seen, wait this long for it to stop
                    growing before returning (default 0 = return first hit)
   bootstrap        optional ORDERED list of {url, method, headers, body, required}
                    calls made before `create` (vendors that gate on a fixed sequence)
   headers          shared headers merged into every call
                    (a step whose Content-Type is x-www-form-urlencoded is form-encoded)
-  timeout_ms       per-HTTP-call timeout (default: adapters.base.resolve_timeout_s / $ASCEND_TARGET_TIMEOUT_MS, and bounded by the bridge's per-probe window)
+  timeout_ms       per-HTTP-call timeout (optional; otherwise derived from the platform's per-probe window)
 """
 import asyncio
 import json
