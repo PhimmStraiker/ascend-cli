@@ -565,15 +565,17 @@ def panel(lines, *, title: str = "", tone: str = "info", hint: str = "",
         for ln in ([lines] if isinstance(lines, str) else list(lines)):
             for chunk in _wrap_visible(str(ln), avail):
                 body.append(chunk)
-        inner = max([vwidth(b) for b in body] + [vwidth(title) + 2, vwidth(hint)] + [1])
+        hint_lines = _wrap_visible(str(hint), avail) if hint else []
+        inner = max([vwidth(b) for b in body] + [vwidth(h) for h in hint_lines]
+                    + [vwidth(title) + 2, 1])
         inner = min(inner, avail)
         head = f"{g['h'] * 1} {acc}{title}{_OFF} " if (title and d) else (f"{g['h']} {title} " if title else "")
         top = f"{indent}{g['tl']}{head}{g['h'] * max(0, inner + 2 - vwidth(head))}{g['tr']}"
         out = [top]
         for b in body:
             out.append(f"{indent}{g['v']} {vpad(b, inner)} {g['v']}")
-        if hint:
-            h = f"{_DIM}{hint}{_OFF}" if d else hint
+        for hl in hint_lines:
+            h = f"{_DIM}{hl}{_OFF}" if d else hl
             out.append(f"{indent}{g['v']} {vpad(h, inner)} {g['v']}")
         out.append(f"{indent}{g['bl']}{g['h'] * (inner + 2)}{g['br']}")
         return "\n".join(out)

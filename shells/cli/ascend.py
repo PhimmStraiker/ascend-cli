@@ -1118,7 +1118,7 @@ def cmd_assess_run(args):
     import api
     # --no-wait returns {app_id, assessment_id, status}; summarizing that prints a phantom
     # "risk ? score ? probes ?/?" header. Only summarize a real assessment payload.
-    human = (api.summarize_result(res)
+    human = (_verdict(res)
              if isinstance(res, dict) and res.get("category_summary") is not None else None)
     if isinstance(res, dict) and res.get("recovered"):
         print(f"note: {res.get('recovery_note')} — not re-created.", file=sys.stderr)
@@ -1305,7 +1305,7 @@ def cmd_assess_watch(args):
                 if tty:
                     print()
                 print("", file=sys.stderr)
-                _out(a, args, human=api.summarize_result(a, detail=args.detail))
+                _out(a, args, human=_verdict(a, detail=args.detail))
                 return
             if getattr(args, "once", False):
                 # One snapshot, then out — what `assess status` used to be. Reported through the
@@ -1347,7 +1347,7 @@ def cmd_assess_results(args):
     c = _client(args)
     a = c.get_assessment(_resolve_app(c, args.app), args.assessment)
     import api
-    human = api.summarize_result(a, detail=getattr(args, "detail", False))
+    human = _verdict(a, detail=getattr(args, "detail", False))
     warn = _false_pass_warning(a)
     if warn and not args.json:
         human = f"{human}\n\n{warn}"
@@ -2916,7 +2916,7 @@ def cmd_onboard(args):
         final = c.poll_assessment(app_id, aid, interval=args.interval, timeout=args.timeout_assess,
                                   on_tick=lambda st, pr, a: _ok(f"status={st} progress={pr}"))
         print("", file=sys.stderr)
-        _out(final, args, human=api.summarize_result(final, detail=args.detail))
+        _out(final, args, human=_verdict(final, detail=args.detail))
     else:
         _out({"app_id": app_id, "assessment_id": aid, "config": cfg_name,
               "adapter": adapter}, args,
@@ -4010,18 +4010,23 @@ def cmd_relay_ls(args):
         print("  no bridges on this machine")
         print("  `ascend assess run` auto-starts one; or reconcile all:  ascend bridge sync")
     if orphans:
-        print("\n  !! NO BRIDGE — these bridge-based apps have a live assessment and nothing is")
-        print("     answering it. Unanswered probes are not findings, so the run will finish")
-        print("     looking CLEAN while measuring nothing (a FALSE PASS).")
+        # This is described above as the single most important thing this command does, and it
+        # used to render exactly like routine output. The tokens `NO BRIDGE`, `FALSE PASS` and
+        # `!!` stay inside the panel: the runbook and the docs tell people to look for them.
+        body = ["!! NO BRIDGE — these bridge-based apps have a live assessment and nothing is "
+                "answering it. Unanswered probes are not findings, so the run will finish "
+                "looking CLEAN while measuring nothing (a FALSE PASS).", ""]
         for o in orphans:
-            cfg = o.get("config")
-            print(f"     {o['app_name'] or o['app_id']}  assessment {o['assessment']} ({o['status']})")
-            if cfg:
-                print(f"       start it:  ascend bridge start --app {o['app_name']!r}")
+            body.append(f"{o['app_name'] or o['app_id']}  "
+                        f"assessment {o['assessment']} ({o['status']})")
+            if o.get("config"):
+                body.append(f"  start it:  ascend bridge start --app {o['app_name']!r}")
             else:
-                print(f"       no config/key bound yet — see:  ascend bridge start --help")
-        print("     (api / gcp / bedrock apps are NOT listed here: Ascend calls those targets")
-        print("      directly and they never need a local bridge.)")
+                body.append("  no config/key bound yet — see:  ascend bridge start --help")
+        print()
+        print(_ui.panel(body, title="NO BRIDGE", tone="alarm",
+                        hint="api / gcp / bedrock apps are not listed: Ascend calls those "
+                             "targets directly and they never need a local bridge."))
     # A silent alarm is worse than no alarm: the table looks reassuring either way, so the ONE
     # thing that must never happen quietly is the check failing to run.
     if check_error:
@@ -4600,13 +4605,17 @@ def cmd_status(args):
         return
 
     t = out["tenant"]
-    print(f"  tenant   {t['label'] if t else '(not pinned)'}")
-    print(f"  apps     {out['apps']['total']}  " +
-          " ".join(f"{k}={v}" for k, v in out["apps"]["by_type"].items()))
-    print(f"  keys     {out['keys']} stored")
     serving_n = sum(1 for r in out["bridges"] if r["state"] == "serving")
-    print(f"  bridges  {serving_n} serving"
-          + (f", {len(out['bridges']) - serving_n} not" if len(out["bridges"]) > serving_n else ""))
+    for _line in _ui.kv([
+        ("tenant", t["label"] if t else "(not pinned)"),
+        ("apps", f"{out['apps']['total']}  " +
+                 " ".join(f"{k}={v}" for k, v in out["apps"]["by_type"].items())),
+        ("keys", f"{out['keys']} stored"),
+        ("bridges", f"{serving_n} serving"
+                    + (f", {len(out['bridges']) - serving_n} not"
+                       if len(out["bridges"]) > serving_n else "")),
+    ]):
+        print(_line)
     if args.quick:
         print("  (--quick: skipped the per-app assessment scan)")
     else:
@@ -4648,14 +4657,15 @@ def cmd_tenant_show(args):
     info = {"pinned": True, "label": rec.get("label"), "fingerprint": rec.get("fingerprint", "")[:16],
             "pinned_at": rec.get("pinned_at"), "stored_keys": keys, "relays_running": live,
             "state_dir": str(T.state_root())}
-    _out(info, args, human="\n".join([
-        f"  tenant     {rec.get('label')}",
-        f"  fingerprint {rec.get('fingerprint','')[:16]}…  (sha256 of iss|straikerId; not a secret)",
-        f"  pinned at  {rec.get('pinned_at')}",
-        f"  stored keys {keys}",
-        f"  bridges running {live}",
-        f"  state dir  {T.state_root()}",
-    ]))
+    _out(info, args, human="\n".join(_ui.kv([
+        ("tenant", rec.get("label")),
+        ("fingerprint", f"{rec.get('fingerprint','')[:16]}…  "
+                        f"(sha256 of iss|straikerId; not a secret)"),
+        ("pinned at", rec.get("pinned_at")),
+        ("stored keys", keys),
+        ("bridges running", live),
+        ("state dir", T.state_root()),
+    ])))
 
 
 def cmd_tenant_switch(args):
@@ -6623,7 +6633,9 @@ class _TwinkleBanner:
         return out
 
     def _render(self, f, first=False):
-        DIM, OFF, PINK = "\033[2m", "\033[0m", "\033[38;5;205m"
+        DIM, OFF = "\033[2m", "\033[0m"
+        # Same brand pink as the launch screen and the logo, from the one palette.
+        PINK = _ui.sgr(_ui.brand("ascend"), stream=sys.stdout) or "\033[38;5;205m"
         with self._lock:
             sub = self._subtitle
         out = [] if first else [f"\033[{self._n}A"]
@@ -6720,11 +6732,44 @@ class _TwinkleBanner:
         return False
 
 
+def _verdict(a, *, detail=False):
+    """The assessment summary with a one-line verdict panel above it.
+
+    `api.summarize_result` is left byte-identical and control/api.py keeps no UI import: the
+    panel is composed here, in the shell, and only when a terminal is going to read it. The
+    tone comes from the severity, so a critical result cannot look like a clean one at a glance.
+
+    The summary itself is NOT boxed. It contains a 32-character control column that routinely
+    exceeds 80 cells, and a box around that is ragged enough to look worse than no box.
+    """
+    import api          # imported locally, as every other consumer in this file does
+    body = api.summarize_result(a, detail=detail)
+    try:
+        sev = str(a.get("severity") or "").lower()
+        status = str(a.get("status") or "?")
+        failed, total = a.get("failed"), a.get("total")
+        tone = {"critical": "alarm", "high": "alarm", "medium": "warn",
+                "low": "ok", "none": "ok", "informational": "info", "info": "info"}.get(sev)
+        if tone is None:
+            return body                       # unknown severity: say nothing rather than guess
+        probes = (f"{failed} failed / {total} probes"
+                  if isinstance(failed, int) and isinstance(total, int) else "")
+        line = f"{status}  ·  risk {sev.upper()}" + (f"  ·  {probes}" if probes else "")
+        return _ui.panel([line], title="RESULT", tone=tone) + "\n" + body
+    except Exception:
+        return body
+
+
 def _launch_screen():
     """A branded home screen for a bare `ascend` on a TTY: wordmark, the flow, next steps.
     No network, so it is instant. Scripts, agents, pipes, and --json never see this."""
     color = _ui.color_ok(sys.stdout)
-    PINK, DIM, B, OFF = "\033[38;5;205m", "\033[2m", "\033[1m", "\033[0m"
+    # The wordmark used a hardcoded 256-colour pink (38;5;205) that was one of three different
+    # pinks in this repo. It comes from the brand palette now, so the terminal, the logo
+    # animation and docs/architecture.html all render the same colour -- and it gets truecolour
+    # where the terminal supports it.
+    PINK = _ui.sgr(_ui.brand("ascend"), stream=sys.stdout) or "\033[38;5;205m"
+    DIM, B, OFF = "\033[2m", "\033[1m", "\033[0m"
     def c(s, code):
         return f"{code}{s}{OFF}" if color else s
     print()
