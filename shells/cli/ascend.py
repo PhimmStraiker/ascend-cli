@@ -2,13 +2,13 @@
 """
 ascend — the Ascend CLI: red-team any AI agent from one binary.
 
-Map a target, talk to it, register it with Ascend, run its bridge, then run, watch and read the
-assessments. Every command takes --json for machine/agent consumption. Auth: a Straiker PAT via
---token or $STRAIKER_PAT (exchanged for a short-lived JWT automatically). The CLI is locked to
-ONE tenant at a time, deliberately — see `ascend tenant`.
+Point it at an AI application and get a red-team assessment back. `ascend onboard` does the whole
+flow — derive an adapter from the target, prove it against the live endpoint, register it, run the
+assessment — and the commands underneath it are there when you need to do a step by hand.
 
-The commands are listed below in the order you use them. `ascend <command> --help` has the flags
-and worked examples for each; docs/COMMAND_MAP.md is the full reference.
+Auth: a Straiker PAT via --token or $STRAIKER_PAT (exchanged for a short-lived JWT automatically).
+Every command takes --json for machine/agent consumption. The CLI is locked to ONE tenant at a
+time, deliberately — see `ascend tenant`.
 """
 import argparse
 import collections
@@ -4778,54 +4778,27 @@ class _Fmt(argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescriptionHelpFo
 # a flat brace dump of 20 groups, which tells a newcomer nothing about where to start; this is the
 # same set of commands arranged in the order they are actually used.
 LIFECYCLE_HELP = """\
-the flow, in order (every command takes --json):
+START HERE
+  onboard                point at a target and get a running assessment — this is the whole
+                         flow in one command. Give it whatever you have:
+                           --api <url>    an HTTP endpoint          --har <file>  an exported browser session
+                           --curl <file>  a request copied as cURL  --url <page>  a live page (drives a browser)
+  doctor                 preflight: your key, API + bridge reachability, dependencies
 
-  1 - IDENTIFY THE TARGET
-    doctor                     preflight: your key, API + bridge reachability, deps
-    controls list              the checks Ascend can run; --categories for risk tags
-    controls validate          check control ids before a run (non-zero exit on a bad id)
+EVERYDAY
+  adapter build          connect to a target -> a VALIDATED config (same sources as onboard)
+  adapter validate       re-prove a saved config against the live target, and time it
+  app create             register a target with Ascend (--config <adapter> binds it)
+  assess run             run the assessment (the bridge is started and stopped for you)
+  assess watch           follow live runs; the BRIDGE column flags a run nobody is answering
+  results                read the findings
 
-  2 - BUILD THE ADAPTER  (from the target)
-    adapter build              point at the target -> a VALIDATED adapter config. pick a source:
-                                 --har <file>   a browser HAR you exported   (most reliable)
-                                 --curl <file>  one request copied as cURL
-                                 --url  <page>  a live page (drives a real browser)
-                                 --api  <url>   an HTTP API endpoint
-    adapter validate           re-prove a saved config against the live target (the hard gate)
-    adapter show | list        inspect a config (secrets masked) | the adapter types
-    chat                       talk to the target through the adapter; every turn recorded
+MORE
+  app · adapter · assess · bridge · chat · ci · controls · export · keys · map
+  policy · reports · runtime · status · tenant · version
+  Run `ascend <command> --help` for any of these — each has its own flags and examples.
 
-  3 - CREATE THE APP + KEY  (in Ascend)
-    app create --config <adapter>   register the target and BIND the adapter to it;
-                                    mints the app's bridge key (tc-, shown once)
-    app list | get | delete    what exists | delete drops the app and its key
-    keys list                  the bridge keys — exactly one per app
-
-  4 - RUN THE BRIDGE  (with the app's key + the app's adapter)
-    bridge start --app <app>   starts a bridge for THAT app, using ITS key and ITS bound
-                               adapter config. --config overrides the adapter; --foreground to watch
-    bridge ls                  which bridge serves which app, with which adapter config
-    bridge logs | stop
-
-  5 - RUN THE ASSESSMENT
-    assess run --app <app>     start the red-team assessment
-    assess watch --all         follow live runs (the BRIDGE column flags an unanswered run)
-    assess pause | resume | list
-
-  6 - READ RESULTS
-    results                    your assessments as a table, or an export / transcript in depth
-                               (--by category,evasion,control  --values --turns --matrix)
-    export                     SARIF / markdown / CSV / JSON out of a finished run
-    ci                         gate a pipeline on findings (0 clean · 2 findings · 1 unreadable)
-
-  ONE-SHOT & OPS
-    onboard                    steps 2-5 in a single command
-    policy show | set | push   severity overrides + CI gate; push sends categories upstream
-    tenant show | switch       which tenant this CLI is pinned to — one at a time, by design
-    status                     tenant + apps + live runs + bridges, in one call
-    version
-
-`ascend <command> --help` has the flags and examples for each step.
+Every command takes --json. `ascend onboard --help` is the fastest way in.
 Full reference: docs/COMMAND_MAP.md  ·  building adapters: docs/BUILD_ADAPTER.md
 """
 
