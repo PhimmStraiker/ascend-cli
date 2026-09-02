@@ -1271,6 +1271,7 @@ def cmd_assess_watch(args):
         print(f"watching {aid}", file=sys.stderr)
     tty = sys.stdout.isatty() and not args.json
     last = None
+    _t0 = time.time()
     try:
         while True:
             a = c.get_assessment(appid, aid)
@@ -1280,14 +1281,26 @@ def cmd_assess_watch(args):
             else:
                 prog = a.get("progress")
                 pct = float(prog) * 100 if isinstance(prog, (int, float)) else 0.0
-                bar = "#" * int(pct / 5) + "." * (20 - int(pct / 5))
-                line = (f"[{bar}] {pct:5.1f}%  status={st}  "
-                        f"failed={a.get('failed', '-')}/{a.get('total', '-')}")
+                detail = (f"status={st}  "
+                          f"failed={a.get('failed', '-')}/{a.get('total', '-')}")
                 if tty:
-                    print("\r" + line + " " * 8, end="", flush=True)
-                elif line != last:
-                    print(line, flush=True)
-                last = line
+                    # A terminal gets the real bar. Elapsed time is only shown once there is
+                    # enough of it to mean something, the same >=3s rule Progress uses, so the
+                    # two never disagree about when a timer is worth reading.
+                    el = time.time() - _t0
+                    print("\r\033[K" + _ui.gradient_bar(
+                        float(prog) if isinstance(prog, (int, float)) else None,
+                        width=20, label=detail,
+                        eta=(f"{int(el)}s" if el >= 3 else "")),
+                        end="", flush=True)
+                else:
+                    # Piped output is byte-identical to before: this is what scripts and agents
+                    # read, and the visual work is for a human at a terminal.
+                    bar = "#" * int(pct / 5) + "." * (20 - int(pct / 5))
+                    line = f"[{bar}] {pct:5.1f}%  {detail}"
+                    if line != last:
+                        print(line, flush=True)
+                    last = line
             if st in api.TERMINAL_STATUSES:   # shared set: never hang on done/canceled
                 if tty:
                     print()

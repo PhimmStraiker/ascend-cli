@@ -42,7 +42,15 @@ _SEV_COLOR = {
 
 
 def color_ok(stream=None) -> bool:
-    """True when it is safe to emit ANSI: a real TTY, and the user has not opted out."""
+    """True when it is safe to emit ANSI: a real TTY, and the user has not opted out.
+
+    ASCEND_PLAIN is checked here as well as in color_depth(): the older helpers
+    (severity_chip, risk_dot, bar, Progress) gate on this function, so without it the
+    "make my terminal stop" hatch would silence the new renderers and leave the old ones
+    still painting.
+    """
+    if os.environ.get("ASCEND_PLAIN"):
+        return False
     if os.environ.get("NO_COLOR"):
         return False
     if os.environ.get("ASCEND_FORCE_COLOR"):
