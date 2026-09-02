@@ -2,7 +2,7 @@
 
 *Generated from the CLI's argparse tree by `scripts/gen_command_map.py`. A test fails if this file is stale, so every flag here is a flag that exists.*
 
-19 command groups · 48 commands. Sections follow `ascend --help`.
+20 command groups · 53 commands. Sections follow `ascend --help`.
 
 ## Flags every command accepts
 
@@ -846,6 +846,94 @@ ascend status            # the whole picture
 ascend status --quick    # skip the per-app assessment scan
 ascend status --json     # for agents/scripts
 ```
+
+## `ascend target`
+
+add, list, inspect and re-check the targets you assess
+
+### `ascend target add`
+
+onboard a target from a URL, a cURL/HAR file, or a saved config
+
+- **`source`** (optional) — a URL, a cURL/HAR file, or a saved config name — detected for you
+
+
+| Flag | Value | Default | What it does |
+|---|---|---|---|
+| `--api` | `URL` | — | an HTTP API endpoint (or base URL) — one probe, no browser. The simple-contract one-liner. |
+| `--url` | `URL` | — | live page with a chat widget: capture the contract in a real browser |
+| `--curl` | `FILE` | — | a curl command in a file (or '-' for stdin) |
+| `--har` | `HAR` | — | HAR file exported from your own browser (no browser needed here) |
+| `--config` | `CONFIG` | — | an existing config in the config dir (skip discovery) |
+| `--name` | `NAME` | — | application name in Ascend (default: derived from the URL) |
+| `--system-prompt` | `SYSTEM_PROMPT` | — | what the target is, for the assessment context |
+| `--controls` | `CONTROLS` | — | comma-separated control ids (validated before the run) |
+| `--adapter` | `ADAPTER` | — | override the adapter type (default: from the config) |
+| `--bearer` | `TOKEN` | — | Authorization: Bearer <token> (with --api/--curl) |
+| `--api-key` | `NAME:VALUE[:in=header|query]` | — | API key (with --api) |
+| `--header` *(repeatable)* | `'Name: value'` | — | raw header (repeatable) |
+| `--body-field` *(repeatable)* | `key=value` | — | extra JSON body field (repeatable) — for a key/tenant that lives in the body |
+| `--prompt-hint` | `PROMPT_HINT` | — | with --curl: the literal prompt text used in that command |
+| `--insecure` | — | — | skip TLS verification (self-signed internal) |
+| `--size` | `small|medium|large` | `small` | assessment size |
+| `--qpm` | `QPM` | `20` | queries per minute against the target |
+| `--prompt` | `PROMPT` | `Hello, what can you help me with?` | benign prompt used for capture and validation |
+| `--settle` | `SETTLE` | `8` | seconds to wait for the widget/reply during capture |
+| `--headless` | — | — | headless capture (bot protection often blocks it) |
+| `--manual` | — | — | you drive the widget; we record |
+| `--timeout` | `TIMEOUT` | `60.0` | per-request timeout for validation |
+| `--dry-run` | — | — | stop after validating the config — do not register or run anything |
+| `--wait` | — | — | block until the assessment completes, then print findings |
+| `--detail` | — | — | with --wait, show key findings per control |
+| `--interval` | `INTERVAL` | `20` | poll interval while waiting |
+| `--timeout-assess` | `TIMEOUT_ASSESS` | `7200` | max seconds to wait for completion |
+| `--assessment-name` | `ASSESSMENT_NAME` | — | assessment name (default: '<app> run 1') |
+| `-v`, `--verbose` | — | — | debug logging for the bridge |
+| `--run` | — | — | continue into an assessment once the target is registered |
+
+```bash
+ascend target add https://your-bot.example.com/chat
+ascend target add ./request.curl --name 'Support Bot'
+ascend target add ~/Downloads/session.har
+ascend target add mybot --run          # existing config, then assess
+```
+
+### `ascend target check`
+
+re-prove a target against its live endpoint (the hard gate)
+
+- **`target`** (required) — target name, config name, or aapp_ id
+
+
+| Flag | Value | Default | What it does |
+|---|---|---|---|
+| `--prompt` | `PROMPT` | `Hello, what can you help me with?` | prompt to send |
+| `--expect` | `EXPECT` | — | require this substring in the reply |
+| `--timeout` | `TIMEOUT` | `60.0` | per-request timeout in seconds |
+| `--adapter` | `ADAPTER` | — | override the adapter type (default: from the config) |
+
+### `ascend target list`
+
+every target: its adapter, whether it is registered, whether it is serving
+
+
+### `ascend target rm`
+
+delete the application and drop its stored key
+
+- **`target`** (required) — target name or aapp_ id
+
+
+| Flag | Value | Default | What it does |
+|---|---|---|---|
+| `--keep-key` | — | — | leave the stored bridge key in place |
+
+### `ascend target show`
+
+everything bound to one target, in one place
+
+- **`target`** (required) — target name or aapp_ id
+
 
 ## `ascend tenant`
 
