@@ -71,16 +71,17 @@ side is now configurable to match, via `bridge_response_timeout_ms` in the confi
   it back off the app instead of leaving an app no bridge can serve.
 
 ### Added
-- **Auth lifecycle for HTTP adapters (`auth` config block).** A short-lived credential — a mobile
-  app's bearer, an OAuth access token — expires part-way through a long run; every later probe then
-  returns 401 and scores as a target "refusal", so the assessment finishes looking clean while
-  measuring nothing. `direct_api` and `session_api` now support `lifecycle: refresh_on_ttl |
-  reauth_on_401 | cookie_rotation` with a token endpoint, dot-path extraction, TTL/skew, and a
-  single automatic re-mint-and-retry on a 401/403. Tokens are minted under a lock and shared across
-  worker threads so concurrent probes cannot stampede the token endpoint. With no `auth` block
-  behavior is unchanged. Verified live against a token-gated target: 4/4 probes succeeded across two
-  token expiries (credential re-minted twice), while the same config without an `auth` block failed
-  401 as before.
+- **The `auth_lifecycle` block is now actually wired in, for every adapter.** A short-lived
+  credential — a mobile app's bearer, an OAuth access token — expires part-way through a long run;
+  every later probe then returns 401 and scores as a target "refusal", so the assessment finishes
+  looking clean while measuring nothing. The decision layer for this already existed
+  (`layers/auth.py` `AuthLifecycle`, with `static | refresh_on_ttl | reauth_on_401 |
+  cookie_rotation`, JWT `exp` awareness and a configurable challenge status) and discovery already
+  wrote the block onto every composed config — but nothing read it at runtime. It is now applied at
+  the shared call seam (`call_target`), so a challenge response re-acquires credentials and retries
+  the probe once, for **every** adapter rather than a chosen few. An `oauth2` config with no
+  explicit block keeps its previous fixed-TTL refresh. Verified live against a token-gated target:
+  4/4 probes across two token expiries.
 - **`demo/localhost_agent.py` QA fixtures.** `--slow-secs` simulates a slow/agentic target (agents
   commonly take 2-3 minutes) and `--token-ttl` requires a short-lived bearer from `POST /token`, so
   both the bridge's behavior against long-running targets and the adapter auth lifecycle can be

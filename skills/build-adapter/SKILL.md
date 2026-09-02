@@ -60,46 +60,45 @@ the run finishes **looking clean while measuring nothing**. Worse: when probes k
 failing the platform **auto-pauses the assessment**, so the visible symptom is a stalled
 run and an idle bridge — which reads as "the bridge died".
 
-Declare the lifecycle instead of pasting a token:
+Declare it instead of pasting a token. Two separate blocks, because they answer two
+different questions — **`auth`** is *who mints the credential* (Layer 2), and
+**`auth_lifecycle`** is *when to re-acquire it* (Layer 3):
 
 ```json
 "auth": {
-  "lifecycle": "reauth_on_401",
-  "token_endpoint": "https://api.example.com/oauth/token",
-  "token_method": "POST",
-  "token_headers": {"Content-Type": "application/json"},
-  "token_body": {"grant_type": "refresh_token", "refresh_token": "..."},
-  "token_path": "access_token",
-  "expires_in_path": "expires_in",
-  "refresh_skew_s": 60,
-  "variable": "TOKEN"
+  "type": "oauth2",
+  "grant": "client_credentials",
+  "token_url": "https://api.example.com/oauth/token",
+  "client_id_ref": "env:MYBOT_CLIENT_ID",
+  "client_secret_ref": "env:MYBOT_CLIENT_SECRET"
+},
+"auth_lifecycle": {
+  "type": "reauth_on_401"
 }
 ```
 
-Then reference it wherever the credential goes — `"headers": {"Authorization": "Bearer
-{{TOKEN}}"}`, or in the URL or body. `{{TOKEN}}` is substituted per request from a live
-credential.
+`grant` is `client_credentials` | `password` | `refresh` — use `refresh` with
+`refresh_token_ref` for a mobile-style refresh-token flow. Other `auth.type` values are
+`static` (bearer / api_key / basic / cookie), `mtls` and `csrf`.
 
-| lifecycle | use when | behaviour |
+> Secrets are `env:NAME` references, never inline literals — a config carrying a real token
+> is refused. That is deliberate: configs get committed, pasted into tickets and shared.
+
+| `auth_lifecycle.type` | use when | behaviour |
 |---|---|---|
-| `static` (default) | the credential outlives any run | headers used as-is; nothing is minted |
-| `refresh_on_ttl` | the token has a known TTL / `expires_in` | re-mints before expiry (minus `refresh_skew_s`) |
-| `reauth_on_401` | expiry is unpredictable, or revocation happens | mints lazily; on a 401/403 re-mints **once** and retries the probe |
-| `cookie_rotation` | session cookie targets | re-runs the login and carries `Set-Cookie` forward |
+| `static` (default) | the credential outlives any run | never re-acquired |
+| `refresh_on_ttl` | the token has a known TTL, or is a JWT | re-mints once `ttl_s` elapses, or when the JWT `exp` is within `skew_s` |
+| `reauth_on_401` | expiry is unpredictable, or revocation happens | on a challenge status (default 401) re-acquires and retries the probe **once** |
+| `cookie_rotation` | session-cookie targets | re-acquires on `interval_s` and whenever a response sets a new cookie |
 
-`refresh_on_ttl` and `reauth_on_401` compose — a TTL-refreshed token is still re-minted on
-a 401, because revocation does not wait for your clock.
+This works for **every** adapter, because it is applied at the shared call seam rather than
+inside individual adapters. `agentforce`, `copilot_studio` and `amazon_connect` additionally
+mint and re-mint their own vendor credentials, so they need no `auth` block at all.
 
-**Supported today by `direct_api` and `session_api`.** `agentforce`, `copilot_studio` and
-`amazon_connect` already mint and re-mint their own credentials, so they need no `auth`
-block. The remaining transports (`sse_stream`, `websocket_direct`, `session_poll`,
-`vertex_ai`, `sentinel_stream`) do **not** consume it yet — for those, a short-lived
-credential is still a known gap; say so rather than shipping a config that will silently
-expire.
-
-Tokens are minted under a lock and shared across worker threads, so concurrent probes
-cannot stampede the token endpoint (some IdPs rate-limit, and some invalidate the previous
-token on every mint).
+An `oauth2` config with no `auth_lifecycle` still refreshes on a fixed TTL, which is the
+long-standing behaviour — but if the target's token is shorter-lived than that, say so
+explicitly with `reauth_on_401`, or every probe between expiry and the next refresh is
+scored as a refusal.
 
 ## Timeouts: never pin a value sized for a fast bot
 

@@ -32,7 +32,7 @@ CONFIG KEYS
   done_when         - {"path": "...", "equals": "..."} or {"contains": "..."} — a frame
                       that signals the answer is complete. Optional.
   idle_ms           - if no done_when, stop after this many ms of silence (default 1500).
-  timeout_ms        - overall hard timeout in ms (default 60000). Raise for slow agentic targets; leave headroom for result delivery inside the platform's ~90s probe-reclaim window.
+  timeout_ms        - overall hard timeout in ms (default: adapters.base.resolve_timeout_s / $ASCEND_TARGET_TIMEOUT_MS, and bounded by the bridge's per-probe window).
   aggregate         - "concat" (default) join collected chunks, or "last" take the last.
 """
 

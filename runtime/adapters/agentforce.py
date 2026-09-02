@@ -36,7 +36,7 @@ Optional config keys:
   bypass_user    - true → agent runs as its configured user; false → as token holder (default true)
   region         - optional x-salesforce-region header value (e.g. "us-west-2")
   end_session    - DELETE the session after each prompt (default true)
-  timeout_ms     - per-request timeout in ms (default 60000). Raise for slow agentic targets; leave headroom for result delivery inside the platform's ~90s reclaim window.
+  timeout_ms     - per-request timeout in ms (default: adapters.base.resolve_timeout_s / $ASCEND_TARGET_TIMEOUT_MS, and bounded by the bridge's per-probe window).
   token_ttl_s    - safety window before re-minting the cached token (default 5400 = 90 min)
 
 Setup requirements on the Salesforce side (see configs/example-agentforce.json):
@@ -60,6 +60,9 @@ import requests
 from .base import BotAdapter, resolve_timeout_s
 
 logger = logging.getLogger(__name__)
+
+# An OAuth token mint is a plain POST; it must not inherit the target-reply timeout.
+_TOKEN_MINT_TIMEOUT_S = 30.0
 
 DEFAULT_API_BASE = "https://api.salesforce.com/einstein/ai-agent/v1"
 
@@ -101,7 +104,9 @@ class AgentforceAdapter(BotAdapter):
                 raise ValueError("Missing client_id/client_secret (or their *_env references)")
 
             token_url = f"{instance_url}/services/oauth2/token"
-            timeout = resolve_timeout_s(config)
+            # A token mint is an ordinary OAuth POST, not a model call: it must NOT inherit the
+            # target-reply timeout, which is sized for an agent that thinks for minutes.
+            timeout = _TOKEN_MINT_TIMEOUT_S
             logger.info("Agentforce: minting client_credentials token")
             resp = requests.post(
                 token_url,

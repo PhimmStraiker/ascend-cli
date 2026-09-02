@@ -79,7 +79,7 @@ OPTIONAL CONFIG KEYS
                         (default {"path": "type", "equals": "done"})
       aggregate         "concat" (default) join the token frames, or "last"
       idle_ms           give up after this much silence between frames (default 20000)
-  timeout_ms        - overall budget in ms (default 60000; raise for slow agentic targets, leaving headroom for delivery inside the ~90s reclaim window)
+  timeout_ms        - overall budget in ms ((default: adapters.base.resolve_timeout_s / $ASCEND_TARGET_TIMEOUT_MS, and bounded by the bridge's per-probe window); raise for slow agentic targets, leaving headroom for delivery inside the ~90s reclaim window)
   verify_tls        - set false for self-signed targets (default true)
 
 TIMEOUT BEHAVIOUR — read this before tuning
