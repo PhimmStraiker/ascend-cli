@@ -33,7 +33,7 @@ from configs import config_dir, resolve_config_path, candidate_paths  # shared w
 from reporting import analyze as _analyze, turns as _turns
 import ui as _ui  # noqa: E402  (runtime/ is on sys.path above)
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 
 def _bundled_dir() -> Path:

@@ -7,6 +7,8 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-09-01
+
 ### Known limitation — slow targets are bounded by the platform, not the CLI
 The platform gives a bridge a bounded window to return a probe result (`probe_shadow`'s
 `BRIDGE_RESPONSE_TIMEOUT`, on the order of 100-120s), and the bridge gives up just under it rather
