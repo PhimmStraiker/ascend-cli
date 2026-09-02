@@ -7,6 +7,7 @@ auto-starts a bridge per app (see
 
 ```
 ascend tenant show                 # which tenant am I locked to?
+ascend target list                 # every target: adapter, config, registered, serving
 ascend keys list                   # one bridge key per app, masked
 ascend assess run --app A --app B --app C --name 'wave 1'   # auto-starts a bridge per app
 ascend assess watch --all          # one table, every live run
@@ -58,15 +59,18 @@ lives under the tenant's fingerprint directory.
 
 ## The key store
 
-`onboard` and `app create` both store the `tc-` key they mint. The API shows it once, so if it
-isn't captured the app can never be served.
+`target add`, `onboard` and `app create` all store the `tc-` key they mint. The API shows it once,
+so if it isn't captured the app can never be served.
 
 | command | does |
 |---|---|
 | `ascend keys list` | every key, **masked**, with the app + config it belongs to and whether the app still exists |
 | `ascend keys prune` | drop keys whose app is gone |
 | `ascend keys add --app X --key tc-…` | store a key minted elsewhere (e.g. the Console) |
-| `ascend keys rm X` | forget one |
+| `ascend keys rm X` | forget one (`--delete-app` retires the pair) |
+
+`ascend target rm X` does both halves at once: it deletes the application and drops its stored key,
+which is the state you want when an engagement ends.
 
 Keys live in a 0600 file under the tenant's state dir. They are **never** put on a relay's command
 line, because argv is world-readable via `ps`; they go into the child's environment.
@@ -130,6 +134,15 @@ verify state), but a bare `bridge start` puts the risk back on you. `bridge ls` 
 condition, and `assess results` warns when a completed run has an implausibly small probe total on a
 clean score. See [ASSESSMENT_LIFECYCLE.md](ASSESSMENT_LIFECYCLE.md).
 
+A bridge that never **started** presents identically to one that died, and across a fleet the usual
+cause was config lookup. It stopped at the first configs *directory* that existed, and every
+checkout ships a `configs/` of examples — so running the CLI from a checkout hid `~/.ascend/configs`
+and a config written elsewhere was "config not found", while the same app's key resolved fine
+(keys live in `~/.ascend` and never depended on the working directory). Configs are searched per
+*file* across every config directory now, and `ascend adapter configs` lists all of them. When a
+row in `bridge ls` looks wrong, `ascend target check <t>` proves the config against the live
+endpoint before you go looking at the relay.
+
 ## Many assessments
 
 `--app` is repeatable across these commands:
@@ -151,15 +164,18 @@ happening.
 export STRAIKER_PAT=s6r_pat_…
 ascend tenant show                                    # confirm the tenant
 
-for t in bot-a bot-b bot-c; do                        # 1. map each target
-  ascend adapter build --api "https://$t.internal/chat" --bearer "$TOK" --out "$t.json"
+for t in bot-a bot-b bot-c; do                        # 1. onboard each target
+  ascend target add "https://$t.internal/chat" --name "$t" \
+    --bearer "$TOK" --controls sys_prompt_leak
 done
-for t in bot-a bot-b bot-c; do                        # 2. register (stores the key + binding)
-  ascend app create --type bridge --name "$t" --controls sys_prompt_leak --config "$t"
-done
+ascend target list                                     # 2. all three registered, none serving yet
 ascend assess run --app bot-a --app bot-b --app bot-c --name 'wave 1'   # 3. run (bridge per app, auto)
 ascend assess watch --all                                               # 4. watch
 ascend bridge ls                                       # 5. confirm nothing is unserved
 # bridges self-stop as each run goes terminal
 ascend keys prune                                      # 6. tidy keys for deleted apps
 ```
+
+Step 1 is the pair it replaces — `ascend adapter build --api … --out "$t.json"` then
+`ascend app create --type bridge --name "$t" --config "$t" --controls sys_prompt_leak` — which
+still work unchanged when you need the steps apart, e.g. to edit the config between them.

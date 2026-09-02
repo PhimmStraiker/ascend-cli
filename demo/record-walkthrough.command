@@ -52,7 +52,7 @@ clear
 printf '\033[1mAscend Bridge v2 — capabilities walkthrough\033[0m\n'
 sleep 1.5
 
-note "1) Everything wired up? 14 adapters, provider presets, all offline-checkable."
+note "1) Everything wired up? 15 adapters, provider presets, all offline-checkable."
 type_run "./ascend doctor" 4
 type_run "./ascend adapter list" 3
 

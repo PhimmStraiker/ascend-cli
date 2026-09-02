@@ -2,6 +2,10 @@
 
 > Internals of how `ascend adapter build` derives an adapter. For the user-facing guide (sources,
 > auth flags, the browser fallback) see [BUILD_ADAPTER.md](BUILD_ADAPTER.md).
+>
+> Nobody has to start here. `ascend target add <url | file | config>` runs this whole pipeline and
+> then registers the result. This document is for when a layer comes back unresolved, or when you
+> are classifying evidence yourself.
 
 
 Building an adapter for a new target detects one value per orthogonal layer from
@@ -74,12 +78,18 @@ six independent classifiers. Each returns
 
 | Layer | Detects | Example values |
 |---|---|---|
-| **transport** (L1) | response content-type & shape | `rest_json` (application/json), `sse` (text/event-stream), `ndjson`, `websocket` (HTTP 101 / captured frames), `poll` (submit→id then a separate GET) |
+| **transport** (L1) | response content-type & shape | `rest_json` (application/json), `sse` (text/event-stream), `ndjson`, `websocket` (HTTP 101 / captured frames), `sentinel_stream` (marker-framed frames in a text/plain body), `poll` (submit→id then a separate GET) |
 | **auth** (L2) | which header/cookie/query carries a secret; whether a login/token call *precedes* the chat request and its value **reappears** downstream | `none`, `static` (bearer / api_key header·query / basic / cookie), `oauth2` (token endpoint + reused `access_token`), `csrf` (token fetched then echoed), `derived_multihop` (login value chained in) |
 | **auth_lifecycle** (L3) | `401/403 → retry` patterns, JWT `exp`, `Set-Cookie` churn | `static`, `refresh_on_ttl`, `reauth_on_401`, `cookie_rotation` |
 | **session** (L4) | **id-flow**: a response id reappearing in a later request URL/body; a mandatory greeting | `stateless`, `create_session`, `create_conversation`, `warmup`, `multi_turn` |
 | **identity** (L5) | mostly an ROE choice; per-user rate-limit / 429 hints | `fixed` (+ a rotation hint when rate-limit signals appear) |
 | **rate** (L6) | observed request spacing (HAR timestamps) → `qpm`; concurrency from the session verdict | `qpm`, `max_workers` (1 stateful / 10 stateless) |
+
+`compose` only pins `max_workers` when the classifier said **1**. Writing a
+default of 10 overrode the relay's own stateful=1 rule — `recommended_workers()`
+knows the full `STATEFUL_ADAPTERS` set, which the rate classifier does not — so a
+discovered websocket / sentinel / session_poll config ran ten concurrent
+conversations and corrupted every multi-turn chain. Left unset, the relay decides.
 
 Secrets seen in evidence are **never** copied into a classifier's `params`. The
 auth params instead carry an `env:` `value_ref` placeholder (e.g.
@@ -89,8 +99,9 @@ auth params instead carry an `env:` `value_ref` placeholder (e.g.
 
 ## 3. `compose`: pick the closest adapter + its knobs
 
-`compose(classified)` maps the detected transport to the closest of the 11
-existing adapters and fills in its known config keys:
+`compose(classified)` maps the detected transport to the closest of the 15
+shipped adapters (`ascend adapter list` is the authoritative set) and fills in
+its known config keys:
 
 | Detected transport / session | Adapter emitted |
 |---|---|
@@ -99,7 +110,8 @@ existing adapters and fills in its known config keys:
 | `sse` | `sse_stream` (`stream.format=sse`) |
 | `ndjson` | `sse_stream` (`stream.format=ndjson`) |
 | `websocket` | `websocket_direct` |
-| `poll` | `session_api` (submit + fetch approximation; verify polling) |
+| `sentinel_stream` (marker-framed JSON in a plain-text body) | `sentinel_stream` |
+| `poll` (submit, then GET a transcript until the reply appears) | `session_poll` |
 
 **Platform host hints override the transport pick** (these are integration
 *types*): a `salesforce-scrt` host → `scrt2_direct`,
@@ -116,7 +128,7 @@ The composed config also carries the layer blocks used by `runtime/layers/`:
   "auth":            { "type": "static", "mode": "bearer", "value_ref": "env:DISCOVERED_TOKEN" },
   "auth_lifecycle":  { "type": "refresh_on_ttl", "ttl_s": 3600 },
   "identity":        { "mode": "fixed" },
-  "qpm": 30, "max_workers": 10,
+  "qpm": 30,
   "_discovery": { "transport": {"value":"rest_json","confidence":0.85}, ... }
 }
 ```
@@ -147,12 +159,27 @@ adapter, and reports:
 from discovery import validate_config
 v = validate_config("direct_api", cfg, "sample prompt",
                     expected_substr="echo:")     # optional content assertion
-# -> {"ok": bool, "response": str, "error": str|None, "matched": bool, "adapter": str}
+# -> {"ok": bool, "response": str, "error": str|None, "matched": bool,
+#     "adapter": str, "duration_ms": int|None, "metadata": dict}
 ```
 
 `ok` is True **only** when the adapter reported success *and* non-empty text came
 back (and, when `expected_substr` is given, it matched). Ship a config only when
 `ok=True`.
+
+### `duration_ms`: the second thing the gate proves
+
+`ok=True` says the contract is right. It does not say the target can be assessed.
+The platform bounds each probe (~110–120s), and the clock starts when the probe is
+**queued**, not when the bridge calls the target, so a slow target produces a
+synthetic timeout indistinguishable from the target failing — which feeds the
+target-health streak and auto-pauses the run. That is why `duration_ms` survives
+back to the caller. `adapters.base.platform_window_warning(duration_ms)` turns it
+into the operator-facing warning printed by `ascend adapter validate` and
+`ascend target check`, at the window and again at 60% of it. Raising the adapter's
+`timeout_ms` cannot fix it; the platform-side window has to move first
+(`$ASCEND_PLATFORM_PROBE_WINDOW_MS` is what the CLI assumes it is, and the bridge
+give-up point and adapter timeout are both derived from that one number).
 
 ---
 
@@ -253,10 +280,11 @@ assessment, which touches the customer's target in production, is pure HTTP:
 Playwright dependency in its path. If you already know the contract, you never need a
 browser at all.
 
-Four ways to obtain a contract, in order of least customer friction:
+Five ways to obtain a contract, in order of least customer friction:
 
 | Path | Browser needed? | When to use |
 |---|---|---|
+| **`--api <url>` / `--curl <file>`** | No | An endpoint you can already call, or one request copied out of DevTools. `--api` probes the URL (or discovers the path under a base URL) directly. This is what a bare `ascend target add <url>` uses. |
 | **`--har <file>`** | No (customer uses their own browser) | Customer exports a HAR from their normal DevTools session and sends it. Nothing runs on their machine. Note a HAR loses WebSocket frames. |
 | **Hand-written config** | No | The contract is already documented (vendor API docs, an internal spec). Write the config and go straight to `ascend adapter validate`. |
 | **`--manual`** | Yes, but a human drives | The tool opens the page and records; *you* click and type. No automation touches the widget. Useful when automation can't reach it, or when policy forbids automated interaction. |

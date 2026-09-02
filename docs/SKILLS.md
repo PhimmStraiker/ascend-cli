@@ -19,7 +19,10 @@ Three layers sit over one core, with no duplicated logic:
   Claude Code, Cursor, Codex, or a plain terminal. For shell-less hosts (claude.ai
   web, Cowork, locked-down runtimes) the **thin MCP shim** (`shells/mcp/`) execs
   the same `ascend <verb> --json` 1:1; shell-having hosts call the CLI directly
-  and skip the MCP token overhead.
+  and skip the MCP token overhead. Eleven tools are exposed, and
+  `ascend_target_add` / `ascend_target_check` lead the list: an agent reads it
+  top-down, and without them it could run and read an assessment but not create
+  the thing being assessed, so it hit a wall at the first step.
 
 `agent/` is the **judgment layer**: prompt material only. Nothing in it is
 imported, run, or affects a CLI number. It records the calls the CLI refuses to
@@ -38,15 +41,40 @@ skills compose with the existing ones without changing anything below them.
 
 | Skill | Drives | Judgment it adds |
 |---|---|---|
-| **onboard-target** | `app create` / `app onboard`, then composes the skills below | end-to-end sequencing; a live-probe gate before launch |
-| **build-adapter** | `discover har\|url\|capture` → `adapter validate` (also `adapter list\|show\|layers`) | resolves only the low-confidence layers the classifier flags |
-| **run-assessment** | `assess run` / `assess watch` / `assess results` | control choice, monitoring, lifecycle-correct execution |
-| **triage-findings** | `assess results --values` (`--json`) | FP triage + auth-gating severity recalc via `agent/TRIAGE.md` |
+| **onboard-target** | `target add <thing>`, then composes the skills below | end-to-end sequencing; a live-probe gate before launch |
+| **build-adapter** | `adapter build --har\|--url\|--api\|--curl\|--spec` → `adapter validate` (also `adapter list\|show\|configs\|layers`) | resolves only the low-confidence layers the classifier flags |
+| **run-assessment** | `target check` → `assess run` / `assess watch` / `assess results` | control choice, monitoring, lifecycle-correct execution |
+| **triage-findings** | `results <export.csv> --values` (`--json`) | FP triage + auth-gating severity recalc via `agent/TRIAGE.md` |
+
+## The everyday noun is `target`
+
+A target used to be four things held in your head at once — an adapter config, an application
+record, a stored bridge key, and a purpose string — and keeping them in sync was a manual step
+between every other step. `target` is one noun over all four:
+
+```
+ascend target add <thing>      # build + validate the adapter, register the app, store the key
+ascend target list             # adapter, registered, serving
+ascend target show <t>         # everything bound to one target, in one place
+ascend target check <t>        # re-prove it against the live endpoint, and time it
+ascend target rm <t>           # delete the application and drop its key
+```
+
+`target add` detects what `<thing>` is — a URL, a request copied out of devtools, an exported
+browser session, or a saved config — so a skill does not have to pick between five
+mutually-exclusive source flags before it knows the answer. It stops once the target is registered
+and proven; `--run` continues into an assessment.
+
+Nothing was removed or renamed underneath. `app`, `adapter` and `keys` are the same commands they
+were and remain the right surface for a step done by hand: `adapter build` when a layer needs
+resolving, `app create` for a specific platform type, `keys` when a key has to move.
 
 The inputs to **build-adapter** are a HAR export, a curl/proxied send, a spec, or
-a live URL. All enter through `ascend discover`; nothing ships until `ascend adapter validate`
-is green (replay of the captured turn and a fresh probe, compared to the
-observed answer).
+a live URL — the same set `target add` detects. All enter through `ascend adapter build` (or
+`ascend discover` for the classification alone); nothing ships until `ascend adapter validate` is
+green (replay of the captured turn and a fresh probe, compared to the observed answer).
+`ascend target check` is that same gate, re-runnable later against a registered target, and it is
+what separates a pass from a false pass on the next run.
 
 ## run-assessment and the bridge lifecycle
 

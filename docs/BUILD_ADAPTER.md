@@ -5,6 +5,39 @@ specific app, and **every app gets its own**. The CLI ships built-in adapters fo
 patterns. An adapter can also *be code*: a small Python module, generated for exactly one app, that
 the bridge runs. A code adapter handles bespoke complexity that no fixed set of built-ins covers.
 
+## Start here: `ascend target add`
+
+Onboarding a target is one command. It works out what you handed it, builds the adapter, proves it
+against the live target, registers the application, and stores the bridge key:
+
+```bash
+ascend target add https://your-bot.example.com/chat   # an HTTP endpoint
+ascend target add ./request.curl                      # copy-as-cURL out of DevTools
+ascend target add ~/Downloads/session.har             # an exported browser session
+ascend target add mybot                               # a config already on disk
+```
+
+You do not choose a source flag. The artifact itself says which it is, and "is this a HAR or a
+cURL?" is a question operators routinely can't answer. `target add` stops once the target is
+registered and proven, because spending an assessment is a separate decision — add `--run` to
+continue straight into one.
+
+A bare URL is treated as an **HTTP endpoint** and probed without a browser. A page with a chat
+*widget* needs the browser path: `ascend target add --url https://your-bot.example.com/support`.
+An OpenAPI/Swagger URL is refused with the two commands to run instead, because a spec describes
+many endpoints and the chat one has to be picked first.
+
+The rest of the noun: `target list` (adapter, registered, serving), `target show <t>` (everything
+bound to one target in one place), `target check <t>` (re-prove it against its live endpoint, and
+time it), `target rm <t>`.
+
+Everything below is the machinery underneath. Reach for it directly when a step needs tuning, when
+discovery fails, or when you want a validated config *without* registering anything
+(`adapter build … --out target.json`). `app`, `adapter` and `keys` are unchanged and still fully
+supported.
+
+---
+
 `ascend adapter build` produces the adapter from evidence about the target. There are three sources,
 listed here in order of reliability.
 
@@ -45,11 +78,13 @@ reliable input.
 ### Build the adapter
 
 ```bash
-cd "$HOME/Projects/Straiker Projects/ascend-cli"
+cd <your ascend-cli checkout>
 export STRAIKER_PAT='<your s6r_pat_… key>'
 
 ./ascend adapter build --har ~/Downloads/target.har --out target.json
 ```
+
+(Or `ascend target add ~/Downloads/target.har`, which does this and registers the result.)
 
 If you typed a different message in step 5, tell it:
 
@@ -129,6 +164,35 @@ browser per probe.
 
 ---
 
+## When the target is too slow for the platform's per-probe window
+
+A config can be perfectly correct and the target still unassessable. The assessment platform gives
+each probe a bounded window (~110–120s), and the clock starts when the probe is **queued**, not when
+your bridge calls the target. Blow it and the platform records a synthetic timeout that is
+indistinguishable from the target failing — which feeds the target-health streak and auto-pauses the
+run. The result is an assessment that reports nothing, having measured nothing, and reads like a
+broken bridge.
+
+So `adapter validate` times the call and names it from the one measurement it has:
+
+```
+  ok=True matched=True (94210ms)
+warning: this target replied in 94s, against a ~120s platform per-probe window. The probe's clock
+starts when it is QUEUED, not when the bridge calls the target, so a probe that waits to be leased
+can still time out. Keep QPM and max_workers low ...
+```
+
+At or beyond the window the warning is stronger, and raising the adapter's `timeout_ms` does **not**
+help: the router has already abandoned the probe, and the extra time only holds a worker and a
+socket open. The window has to be raised platform-side first;
+`$ASCEND_PLATFORM_PROBE_WINDOW_MS` tells the CLI what it is, and the bridge's give-up point and the
+adapter's own timeout are derived from that one number.
+
+`ascend target check <target>` runs the same gate and the same timing against a registered target.
+That is how you re-prove one that has started failing, before assuming the bridge dropped.
+
+---
+
 ## When the built-ins don't fit: `--code`
 
 The built-in adapters cover the common shapes. For a target that fits none of them (an odd
@@ -148,8 +212,8 @@ def send_prompt(prompt: str) -> str:
 …then **proves the generated code** against the live target before saving. Read it with
 `ascend adapter show mybot`, edit `send_prompt` for anything bespoke, and re-prove with
 `ascend adapter validate --config mybot`. If the shape is one no generator covers, `--code` writes a
-scaffold carrying the real captured request with a clear TODO (and `--agent` will finish it from the
-evidence). The bridge runs a code adapter exactly like a built-in one.
+scaffold carrying the real captured request with a clear TODO; open it in a coding agent, finish
+`send_prompt`, and validate. The bridge runs a code adapter exactly like a built-in one.
 
 ## Multi-turn, session, and documented APIs
 
@@ -186,14 +250,40 @@ headers, auth, and (for streaming) the frames. A HAR must *contain* two things t
   session is visible.
 
 If a request has **computed or signed fields** (a per-call signature, a nonce), even a perfect HAR
-replays only that one frozen request. Those need a code adapter (`--agent`) that recomputes them.
-The CLI tells you when it hits this.
+replays only that one frozen request. Those need a code adapter (`--code`) whose `send_prompt`
+recomputes them. The CLI tells you when it hits this.
+
+## Where the config lands, and where it is found
+
+A bare `--out <name>` lands in one directory — `$ASCEND_CONFIG_DIR` if set, else `./configs`, else
+`~/.ascend/configs` — so `--config <name>` finds it. (`--out` with a directory in it writes exactly
+there.) Reads are wider: a config is searched for **per file** across every one of
+those directories plus the bundled examples, in that same precedence order, so a config written from
+one directory resolves from any other. It used to be found only in the first directory that
+*existed*; because every checkout ships a `configs/` of examples, running the CLI from a checkout
+hid `~/.ascend/configs` entirely, and a target created elsewhere came back as "config not found".
+That surfaced as a bridge failure rather than a lookup one — the relay exits before it ever leases,
+and a relay that never starts looks exactly like one that dropped, while the app's *key* kept
+resolving because keys live in `~/.ascend` and never depended on the working directory.
+
+`ascend adapter configs` lists everything that is actually resolvable and says where new ones are
+written.
 
 ## Once you have a validated adapter
 
-Same for all three ways. The app is a `bridge` type (the default), so `assess run` auto-starts the
-bridge before probes are scheduled and it self-stops when the run ends. There is no manual relay
-step:
+Same for all three ways. The shortest path is to hand the config to `target add`, which registers
+the application and stores the bridge key for you:
+
+```bash
+./ascend target add target --name 'My Target' --controls sys_prompt_leak,indirect_prompt_injection
+```
+
+Add `--run` to that same command to continue straight into an assessment instead of stopping once
+the target is registered.
+
+The commands underneath are unchanged and still the way to do a step by hand. The app is a `bridge`
+type (the default), so `assess run` auto-starts the bridge before probes are scheduled and it
+self-stops when the run ends. There is no manual relay step:
 
 ```bash
 ./ascend app create --name 'My Target' --config target \
@@ -203,9 +293,10 @@ step:
 ./ascend results --app 'My Target' --include-running
 ```
 
-Cleanup:
+Cleanup. Both delete the application and drop its stored key (`--keep-key` on either keeps the key):
 
 ```bash
+./ascend target rm 'My Target'
 ./ascend app delete 'My Target'
 ```
 
