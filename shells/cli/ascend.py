@@ -2476,6 +2476,16 @@ def cmd_onboard(args):
              f"  fix {config_dir() / (cfg_name + '.json')} and re-run, or use "
              f"`ascend adapter validate --config {cfg_name}` to iterate.",
              code=EXIT_ERROR)
+    # The streaming check has to run on EVERY source, not only the probing one. `adapter build`
+    # called it; onboarding validates separately and did not, so `target add <curl>` / `--har` on
+    # a streaming target wrote a direct_api config whose "answer" was the raw frames — it passed
+    # this very gate, because a 200 with a non-empty body looks like success. The same target
+    # added by `--api` came out correct, so which evidence you happened to use silently decided
+    # whether the assessment measured anything.
+    cfg, vres = _upgrade_streaming_shape(cfg, vres, args, V)
+    if cfg.get("adapter") and cfg["adapter"] != adapter:
+        adapter = cfg["adapter"]
+        _write_named_config(cfg, cfg_name)       # the file was written before validation
     _ok(f"target replied: {str(vres.get('response'))[:80]!r}")
 
     if args.dry_run:
@@ -2700,10 +2710,27 @@ def cmd_target_list(args):
         serving = {r["app_id"] for r in S.ls() if r.get("state") == "serving"}
     except Exception:
         serving = set()
+    # The stored record only carries an adapter when whatever registered the target happened to
+    # pass one, so ADAPTER printed as "-" for targets whose config names the adapter perfectly
+    # well — while `target show` on the SAME target resolved it. A list whose columns disagree
+    # with the detail view is exactly what makes this model feel unknowable, so fall back to the
+    # config the way `show` does. Cached: several targets commonly share one config.
+    _adapters: Dict[str, Any] = {}
+
+    def _adapter_for(rec):
+        if rec.get("adapter"):
+            return rec["adapter"]
+        name = rec.get("config")
+        if not name:
+            return None
+        if name not in _adapters:
+            _adapters[name] = (_peek_config(name) or {}).get("adapter")
+        return _adapters[name]
+
     rows = []
     for aid, r in sorted(recs.items(), key=lambda kv: (kv[1].get("app_name") or "")):
         rows.append({"target": r.get("app_name"), "app_id": aid, "config": r.get("config"),
-                     "adapter": r.get("adapter"),
+                     "adapter": _adapter_for(r),
                      "registered": ("-" if live is None else ("yes" if aid in live else "GONE")),
                      "bridge": "serving" if aid in serving else "-"})
     if args.json:
@@ -2725,12 +2752,11 @@ def cmd_target_show(args):
     app_id = args.target if str(args.target).startswith("aapp_") else _resolve_app(_client(args), args.target)
     rec = C.get(app_id) or {}
     cfg_name = rec.get("config")
-    cfg = {}
-    if cfg_name:
-        try:
-            cfg = _load_named_config(cfg_name)
-        except Exception:
-            cfg = {}
+    cfg = _peek_config(cfg_name) if cfg_name else {}
+    # A named config that no longer resolves is a fact the user needs SHOWN, not a reason to
+    # refuse to show the target at all — it is the single most useful thing `show` can tell you
+    # when a run has stopped working.
+    cfg_missing = bool(cfg_name) and not cfg
     probe = cfg.get("_probe") or {}
     out = {"target": rec.get("app_name"), "app_id": app_id, "config": cfg_name,
            "adapter": rec.get("adapter") or cfg.get("adapter"),
@@ -2739,12 +2765,20 @@ def cmd_target_show(args):
            "auth": (cfg.get("auth") or {}).get("type"),
            "auth_lifecycle": (cfg.get("auth_lifecycle") or {}).get("type"),
            "verified_answer": (probe.get("verified_answer") or "")[:160] or None}
+    if cfg_missing:
+        out["config_status"] = f"NOT FOUND — '{cfg_name}' does not resolve on this machine"
     if args.json:
         _out(out, args)
         return
     for k, v in out.items():
         if v is not None:
             print(f"  {k:16} {v}")
+    if cfg_missing:
+        # This is the state that reads as "the bridge is broken": the app and key are fine, so
+        # nothing looks wrong, but no relay can start without a config to run.
+        print(f"\n  the config named here does not resolve, so no bridge can start for this target."
+              f"\n  see what exists:  ascend adapter configs"
+              f"\n  re-create it:     ascend target add <url|curl|har> --name '{out['target'] or app_id}'")
     print(f"\n  re-check it:  ascend target check '{out['target'] or app_id}'")
 
 
@@ -4548,6 +4582,19 @@ def _upgrade_streaming_shape(cfg, vres, args, V):
     # config was written as direct_api holding raw frames. Fail-quiet, in the code written to stop
     # things failing quietly.
     from runtime.discovery import classify as _classify
+
+    # SSE is checked FIRST, and used to have no upgrade at all — only marker-framed (sentinel)
+    # streams did. That left the most common streaming shape silently broken on any path that
+    # does not probe: `target add <curl-file>` / `--har` build the request from the evidence and
+    # go straight to validate, so an SSE target produced a `direct_api` config whose "answer" was
+    # the raw `data: {...}` frames. It passed the gate (200, non-empty body) and then scored wire
+    # noise for a whole assessment. The same target added by `--api` came out as `sse_stream`,
+    # because probing detects the transport — so the evidence you happened to use decided whether
+    # your results meant anything.
+    up = _upgrade_sse_shape(cfg, body, args, V)
+    if up is not None:
+        return up
+
     sent = _classify._detect_sentinel(body)
     if not sent:
         return cfg, vres
@@ -4593,6 +4640,73 @@ def _upgrade_streaming_shape(cfg, vres, args, V):
               "config (the reply will contain raw frames; pin `extract` by hand).",
               file=sys.stderr)
         return cfg, vres
+    print(f"[validate] VALIDATED — {str(v2.get('response'))[:90]!r}", file=sys.stderr)
+    return upgraded, v2
+
+
+def _looks_like_sse(body: str) -> bool:
+    """A reply that is really a stream of `data:` frames rather than one answer."""
+    head = (body or "").lstrip()[:4000]
+    return head.startswith("data:") or "\ndata:" in head or "\ndata: " in head
+
+
+def _upgrade_sse_shape(cfg, body, args, V):
+    """Promote a direct_api config to `sse_stream` when the reply proves it is an SSE stream.
+
+    Returns (cfg, vres) on a proven upgrade, or None to let the caller carry on. The bar is the
+    same as everywhere else here: the new shape must ANSWER against the live target, otherwise
+    the original validated config is kept. An unproven "better" config is worse than a working one.
+    """
+    if not _looks_like_sse(body):
+        return None
+    try:
+        from runtime.discovery import probe as _probe
+        payloads = _probe._split_sse_payloads(body)
+        text, hints = _probe._assemble_stream(payloads, "sse")
+    except Exception:
+        return None
+    # Only an upgrade if assembling the frames actually yields the agent's words. If the
+    # reassembled text is empty, we would be trading a config that returns frames for one that
+    # returns nothing — strictly worse, and it would read as a refusing target.
+    if not (text or "").strip():
+        return None
+
+    from urllib.parse import urlsplit
+    endpoint = cfg.get("endpoint") or ""
+    parts = urlsplit(endpoint)
+    upgraded = {k: v for k, v in cfg.items()
+                if k not in ("body", "endpoint", "response_path")}
+    stream = {"format": "sse"}
+    stream.update({k: v for k, v in (hints or {}).items() if v})
+    upgraded.update({
+        "adapter": "sse_stream",
+        "base_url": f"{parts.scheme}://{parts.netloc}" if parts.netloc else endpoint,
+        "chat_path": parts.path or "/",
+        "request_template": cfg.get("body") or {"message": "{{PROMPT}}"},
+        "stream": stream,
+    })
+    notes = [n for n in (cfg.get("_notes") or [])
+             if "direct_api" not in n and "response_path" not in n]
+    notes.append(
+        f"discovered as an SSE stream: the reply arrives as `data:` frames and the agent's text "
+        f"was located at {stream.get('text_path', '?')} across event type(s) "
+        f"{', '.join(stream.get('token_types') or []) or '?'}. Re-validated against the live "
+        f"target after the switch — a direct_api config here would have handed the scorer raw "
+        f"frames instead of the reply.")
+    upgraded["_notes"] = notes
+
+    print(f"[probe] transport sse   answer at {stream.get('text_path', '?')}", file=sys.stderr)
+    print("[validate] re-checking with the streaming adapter ...", file=sys.stderr)
+    try:
+        v2 = V.validate_config("sse_stream", upgraded, args.prompt, None,
+                               timeout_s=args.timeout, verify_tls=not args.insecure)
+    except Exception:
+        v2 = {"ok": False}
+    if not v2.get("ok"):
+        print("[validate] the streaming shape did not answer — keeping the validated direct_api "
+              "config (the reply will contain raw frames; set `stream` by hand).",
+              file=sys.stderr)
+        return None
     print(f"[validate] VALIDATED — {str(v2.get('response'))[:90]!r}", file=sys.stderr)
     return upgraded, v2
 
@@ -4862,6 +4976,22 @@ def cmd_adapter_validate(args):
     if args.expect and not res.get("matched"):
         sys.exit(EXIT_FINDINGS)
     sys.exit(EXIT_OK)
+
+
+def _peek_config(name):
+    """Read a config for DISPLAY, returning {} instead of exiting when it will not resolve.
+
+    `_load_named_config` ends in `_die`, which raises SystemExit — and SystemExit is a
+    BaseException, so the `except Exception` guards around these display paths never caught it.
+    The result was that `target show mybot` exited with "config not found" instead of showing the
+    target's app id, key and registration: precisely when a user most needs to see what IS bound,
+    the command told them nothing. Reading a config to fill in a column must never be fatal.
+    """
+    try:
+        p = resolve_config_path(name)
+        return json.loads(p.read_text()) if p else {}
+    except Exception:
+        return {}
 
 
 def _load_named_config(name):
