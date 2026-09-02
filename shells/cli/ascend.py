@@ -291,7 +291,7 @@ def cmd_app_list(args):
                     1 for r in rows
                     if str(r.get("status", "")).lower() in ("complete", "completed", "done"))
                 a["needs_bridge"] = needs_bridge(a)
-        _out(apps, args)
+        _out([_mask_app(a) for a in apps], args)
         return
 
     if not want_runs:
@@ -346,9 +346,28 @@ def cmd_app_list(args):
         print("  watch one:  ascend assess watch --app <app> --assessment <asmt>")
 
 
+def _mask_app(app):
+    """Mask the bridge key on an application record before anything prints it.
+
+    The platform returns `thin_api_key` on GET and in the app LIST, not only at creation. So a
+    read-only `app list` was emitting every bridge-type app's key in full — into CI logs, agent
+    transcripts and screen shares — from the command least likely to be suspected of holding a
+    secret. `app create` still prints it once on purpose; everywhere else it is masked, which is
+    the posture creds.py already states.
+    """
+    if not isinstance(app, dict) or not app.get("thin_api_key"):
+        return app
+    try:
+        import creds as C
+        masked = C.mask(app["thin_api_key"])
+    except Exception:
+        masked = "tc-…"
+    return {**app, "thin_api_key": masked}
+
+
 def cmd_app_get(args):
     c = _client(args)
-    _out(c.get_app(_resolve_app(c, args.app)), args)
+    _out(_mask_app(c.get_app(_resolve_app(c, args.app))), args)
 
 
 def cmd_app_resolve(args):
@@ -509,9 +528,11 @@ def cmd_app_create(args):
         existing = [a for a in _unwrap_list(c.list_apps()) if (a.get("name") or "") == args.name]
         if existing:
             app = existing[0]
-            _out({**app, "created": False, "reason": "an app with this name already exists"}, args,
+            # Masked: this is an EXISTING app being reported, not the one-time create response.
+            _out({**_mask_app(app), "created": False,
+                  "reason": "an app with this name already exists"}, args,
                  human=(f"app_id:  {app.get('id')}   (already existed — not re-created)\n"
-                        f"         its bridge key was only shown at creation; "
+                        f"         its bridge key is not reprinted here; "
                         f"check:  ascend keys list"))
             return
 
