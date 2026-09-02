@@ -8,6 +8,10 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 ## [Unreleased]
 
 ### Changed
+- The skills carry a troubleshooting playbook and a per-target-pattern catalog: which adapter
+  suits which target shape, and the way each one specifically fails. Most failures here present
+  as a different failure than they are, so the playbook is ordered by symptom and starts with the
+  one number that settles it — `ANS` in `bridge ls`.
 - `ascend --help` leads with the one command that does the whole flow (`onboard`) and shows the
   seven you use day to day, with the rest listed by name. 71 lines to 44. No command changed or
   moved — every one still runs exactly as before.
