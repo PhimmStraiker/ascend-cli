@@ -29,7 +29,8 @@ sys.path.insert(0, str(REPO / "control"))
 sys.path.insert(0, str(REPO / "runtime"))
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "runtime"))
-from configs import config_dir, resolve_config_path, candidate_paths  # shared with the bridge
+from configs import (config_dir, config_dirs, resolve_config_path,  # shared with the bridge
+                     candidate_paths, list_configs)
 from reporting import analyze as _analyze, turns as _turns
 import ui as _ui  # noqa: E402  (runtime/ is on sys.path above)
 
@@ -1679,9 +1680,8 @@ def cmd_adapter_list(args):
 
 def cmd_adapter_configs(args):
     """List adapter configs on disk (there was previously no way to discover them)."""
-    d = config_dir()
     rows = []
-    for f in sorted(d.glob("*.json")):
+    for f in list_configs():
         try:
             cfg = json.loads(f.read_text())
         except Exception:
@@ -1692,14 +1692,17 @@ def cmd_adapter_configs(args):
     if args.json:
         _out(rows, args)
     else:
+        # Configs resolve across several directories, so naming only one would repeat the
+        # mistake this listing exists to expose: a config you can load but cannot see.
+        searched = [str(p) for p in config_dirs() if p.is_dir()]
         if not rows:
-            print(f"no configs in {d}")
+            print("no configs found. looked in:\n  " + "\n  ".join(searched or [str(config_dir())]))
             return
         print(f"{'NAME':28}  {'ADAPTER':18}  NOTE")
         for r in rows:
             print(f"{r['name']:28}  {r['adapter']:18}  {r['note']}")
-        print(f"\n{len(rows)} config(s) in {d}")
-        print("copy an example:  cp configs/example-direct_api.json configs/mybot.json")
+        print(f"\n{len(rows)} config(s) across:\n  " + "\n  ".join(searched))
+        print(f"new configs are written to:  {config_dir()}")
 
 
 def cmd_adapter_show(args):
@@ -2649,7 +2652,7 @@ def _detect_source(thing):
         return None, f"{p.name}: not a HAR, a cURL request, or a saved config"
     # not a URL and not a file — maybe it is the name of a config already on disk
     try:
-        if (config_dir() / f"{s}.json").is_file():
+        if resolve_config_path(s):
             return "config", s
     except Exception:
         pass
@@ -4469,7 +4472,7 @@ def cmd_doctor(args):
         checks.append(("requests MISSING — pip install requests", False))
     # A config that will not parse is invisible until `runtime start` fails.
     bad_cfgs = []
-    for f in sorted(config_dir().glob("*.json")) if config_dir().is_dir() else []:
+    for f in list_configs():
         try:
             json.loads(f.read_text())
         except Exception:
@@ -4873,7 +4876,7 @@ def _load_named_config(name):
         import difflib
         have = []
         try:
-            have = [f.stem for f in sorted(config_dir().glob("*.json"))]
+            have = [f.stem for f in list_configs()]
         except Exception:
             pass
         close = difflib.get_close_matches(str(name).replace(".json", ""), have, n=3, cutoff=0.5)
