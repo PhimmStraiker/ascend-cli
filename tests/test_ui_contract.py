@@ -436,3 +436,39 @@ class TestPaddingBugsFixedBeforeColour:
         block = src[src.index("repaint in place"):]
         block = block[:block.index("printed = len(lines)")]
         assert "\\033[K" in block
+
+
+# ---- 9. ASCEND_PLAIN is a whole-tool hatch, not a hatch for the new code only -----------------
+class TestPlainHatchCoversEverything:
+    """The older helpers gate on color_ok(), the new ones on color_depth(). If only the latter
+    honoured ASCEND_PLAIN, "make my terminal stop" would silence the bar and leave the severity
+    chips and the spinner still painting — which is not a hatch, it is a puzzle."""
+
+    @pytest.fixture(autouse=True)
+    def _plain(self, monkeypatch):
+        monkeypatch.delenv("NO_COLOR", raising=False)
+        monkeypatch.setenv("ASCEND_FORCE_COLOR", "1")
+        monkeypatch.setenv("ASCEND_PLAIN", "1")
+
+    def test_color_ok_is_false(self):
+        assert ui.color_ok(_Tty()) is False
+
+    def test_color_depth_is_zero(self):
+        assert ui.color_depth(_Tty()) == 0
+
+    @pytest.mark.parametrize("render", [
+        lambda: ui.severity_chip("high"),
+        lambda: ui.risk_dot("high"),
+        lambda: ui.bar(7, 3),
+        lambda: ui.score_cell(80),
+        lambda: ui.gradient_bar(0.5, width=10),
+        lambda: ui.state("serving", stream=_Tty()),
+        lambda: ui.header("ascend", stream=_Tty()),
+        lambda: "".join(ui.kv([("k", "v")], stream=_Tty())),
+        lambda: ui.panel(["x"], stream=_Tty()),
+    ])
+    def test_no_renderer_emits_escapes(self, render):
+        assert ESC not in render()
+
+    def test_the_spinner_refuses_to_animate(self):
+        assert ui.Progress("x", stream=_Tty()).enabled is False
