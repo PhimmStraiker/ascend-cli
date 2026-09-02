@@ -1,7 +1,7 @@
 """
 test_adapters_config.py — every adapter honours the BotAdapter result contract.
 
-For all 11 registered adapters we exercise send_prompt offline and assert the
+For all 15 registered adapters we exercise send_prompt offline and assert the
 return shape is always {response, success, error, duration_ms, metadata} with the
 right types — on the happy path, on a missing-config fast-fail, and on a transport
 error. An adapter must NEVER raise out of send_prompt (a raised probe would be

@@ -2061,7 +2061,7 @@ def _finish_discovery(cfg, args, *, source, browser_recipe=None, response_sample
     # looks right, passes the gate, and quietly scores wire noise for the whole assessment.
     cfg, vres = _upgrade_streaming_shape(cfg, vres, args, V)
 
-    # Per-app ADAPTER as code (Iris -> Bridge -> Adapter -> App). The 16 built-ins are the common
+    # Per-app ADAPTER as code (Iris -> Bridge -> Adapter -> App). The 15 built-ins are the common
     # patterns; --code emits a self-contained module for THIS app and proves the CODE (not just the
     # contract) against the live target.
     if getattr(args, "agent", False):

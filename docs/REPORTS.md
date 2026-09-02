@@ -32,13 +32,35 @@ is the age of the run (`4d`, `2h`). Every number here is derived from the probe 
 
 ## Why some rows are flagged
 
-- `!!` — **suspiciously few probes on a clean result.** The likely cause is that no bridge served
-  the run: unanswered probes are not findings, so the result reads clean when it measured nothing.
-  `assess run` auto-starts and self-manages the bridge, so this normally can't happen. Suspect it
-  when auto-management was disabled, the run started from the Console, or a remote/pre-started bridge
-  died. Verify with `ascend bridge ls` (or reconcile with `ascend bridge sync`), and see
-  [ASSESSMENT_LIFECYCLE.md](ASSESSMENT_LIFECYCLE.md).
+Both flags are `--detail` columns. Without `--detail` there are no probe counts to judge a result
+against, so neither can be computed and neither is printed.
+
+- `!!` — **suspiciously few probes on a clean result**: a completed run with 4 or fewer probes and
+  either no failures or `low` severity. Unanswered probes are not findings, so a run that measured
+  nothing reads clean. Two causes:
+  - **Nothing served the probes.** `assess run` auto-starts and self-manages the bridge, so this
+    normally can't happen. Suspect it when auto-management was disabled, the run started from the
+    Console, or a remote/pre-started bridge died. Verify with `ascend bridge ls` (`ANS` must be > 0)
+    or reconcile with `ascend bridge sync`. See [ASSESSMENT_LIFECYCLE.md](ASSESSMENT_LIFECYCLE.md).
+  - **The bridge served them and the target had drifted.** An expired credential, a moved response
+    shape, a changed endpoint, or a target now answering past the platform's per-probe window all
+    produce a clean-looking run. This one leaves the bridge looking healthy.
 - `~` — the severity was **re-ranked by your local policy** (below), overriding the platform value.
+
+## A pass and a false pass look identical
+
+The flag above is a heuristic on the *result*. The thing that actually separates a pass from a
+false pass is proving the target still answers, and it is one command against the live endpoint:
+
+```
+ascend target check mybot          # re-proves the adapter, prints the measured reply time
+```
+
+Run it before a run, not after. It replays one prompt through the registered config, so it catches
+the drift the run itself cannot report — expired auth, a response path that no longer resolves, an
+endpoint that moved — and warns when the target's reply time will not survive the platform's
+per-probe window ([PERFORMANCE.md](PERFORMANCE.md)). A green `target check` makes a clean report
+mean something; without one, a 0% fail rate and a dead target are the same row.
 
 ## Cost and the extra `--detail` call
 

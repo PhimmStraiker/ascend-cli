@@ -11,9 +11,9 @@ ascend results run.csv --json | jq .data.by_evasion
 ```
 
 One command reads two sources. **No file** reads the platform: assessment-level rows, the same view
-`ascend reports` gave (still a hidden alias). **A file** reads a Console CSV export: one row per
-probe, with the prompt, the target's actual answer, the evasion technique used, and the platform's
-reason for flagging it.
+`ascend reports` gives (still its own command, unchanged). **A file** reads a Console CSV export:
+one row per probe, with the prompt, the target's actual answer, the evasion technique used, and the
+platform's reason for flagging it.
 
 ## Why this command reads a file
 
@@ -52,8 +52,23 @@ exports this is routinely 30–43% of a run. The failure rate is therefore compu
 ```
 
 This is the row-level equivalent of the false pass a dead bridge produces. It is rarer now that
-`assess run` auto-manages the bridge, but still occurs when auto-management is off or a remote
-bridge dies.
+`assess run` auto-manages the bridge, but a live bridge is not the only way to get it. A target
+that has **drifted** — an expired credential, a response shape that moved, an endpoint that changed
+— is served normally and answers nothing usable. So does a target that answers past the platform's
+per-probe window, which records a synthetic timeout indistinguishable from the target failing
+([PERFORMANCE.md](PERFORMANCE.md)).
+
+All three arrive here as the same thing: a high unanswered count on a run that reported a clean
+score. Which one it was is decided before the run, not after it:
+
+```
+ascend target check mybot     # one prompt through the registered config, against the live endpoint
+```
+
+That is the difference between a pass and a false pass. It re-proves the adapter and prints the
+measured reply time, so drift and a window problem both surface as a failed or slow check rather
+than as a report that measured nothing. `--errors` lists the probes the target never answered when
+you need to see which they were.
 
 ## The rollups
 

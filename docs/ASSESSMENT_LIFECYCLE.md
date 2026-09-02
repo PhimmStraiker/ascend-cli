@@ -1,6 +1,25 @@
 # Assessment lifecycle
 
-Three platform behaviours affect how you run an assessment and how you interpret a result.
+Several platform behaviours affect how you run an assessment and how you interpret a result.
+
+## The shape of a run
+
+```bash
+ascend target add <url|curl|har|config>   # adapt · prove · register (once per target)
+ascend target check <target>              # re-prove it against the LIVE endpoint
+ascend assess run --app <target> --name 'run 1'
+ascend assess watch --all                 # the BRIDGE column flags a run nobody is answering
+ascend reports --app <target> --detail
+```
+
+`target check` is not ceremony. A target that has drifted — auth expired, response shape moved,
+endpoint relocated — still produces a clean-*looking* assessment that measured nothing, and a
+false pass is the most expensive result this tool can produce (§2).
+
+A note on the word "bridge": two different things get called that. The **lease service** is
+Straiker-side and always up; **the bridge** is the process on your machine that leases probes and
+calls your agent (these docs also call it the relay). "The bridge dropped" nearly always means
+your own bridge process is not running — `ascend bridge ls` says which.
 
 ## 0. The bridge is auto-managed
 
@@ -53,6 +72,14 @@ The bridge polls its app's assessment state **every ~30s** and manages its own l
   terminal state; optional idle cleanup (`--idle-timeout`, off by default) can reap a paused,
   already-probed relay left running.
 
+A relay stops **only for the assessment it is bound to**. `assess run` binds the relay it starts
+to that run, so it reaps itself when *that* run ends — not when some other assessment on the same
+app happens to be terminal. A relay started by hand (`ascend bridge start` / `runtime start`) is
+unbound and therefore **never self-stops**, which is what makes it usable as a long-lived,
+always-on relay; stop it with `ascend bridge stop`. Release follows the ~30s reconcile beat, so
+expect a stopping relay to linger for up to one beat after a run goes terminal rather than
+vanishing the instant the status flips.
+
 **False-pass safety is preserved.** A dead relay does not fail the assessment. Probes keep being
 issued, go unanswered, and the run still completes. Unanswered probes are not findings, so the run
 produces a **score 0 / low risk** result. That is a false negative: a clean report from a run whose
@@ -102,3 +129,28 @@ ascend app list --running       # ONLY apps actively consuming probes right now
 ascend app list --all-runs      # every assessment per app
 ascend assess list --app <app>  # one app's assessments (live ones marked *)
 ```
+
+## 5. Two limits that masquerade as a broken bridge
+
+Both of these present as "the bridge keeps dropping". Neither is a dropped connection.
+
+**The per-probe window (~110–120s).** Each probe gets a bounded window, and the clock starts when
+the probe is **queued** — not when your relay picks it up and calls your agent. A probe that
+exceeds the window comes back as a synthetic timeout that is indistinguishable from your target
+having failed, and enough of those trip the platform's target-health check and **auto-pause the
+assessment**. The run then looks exactly like a dead bridge: probes stop flowing, nothing is being
+answered.
+
+Agents that think for two or three minutes are common, so this is a real ceiling, not an edge
+case. `adapter validate` and `target check` time the target and say plainly when it is at or
+beyond the window. If your target is genuinely that slow, reduce concurrency and QPM so probes
+are not queuing behind each other and burning their window before delivery — the queue, not the
+target, is usually what pushes a borderline agent over.
+
+**A relay that never started.** If the adapter config cannot be resolved, `runtime start` exits
+*before it ever leases*, and a relay that never started looks identical to one that dropped. The
+tell is that `ascend keys` and the Console both look fine, because keys are stored in `~/.ascend`
+and never depended on your working directory. Configs are searched per file across
+`$ASCEND_CONFIG_DIR`, `./configs`, `~/.ascend/configs` and the bundled examples; run `ascend
+adapter configs` to see every one that resolves and where new ones are written, and `ascend
+bridge logs <app>` to see why a relay exited.

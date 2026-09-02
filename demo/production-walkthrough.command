@@ -161,7 +161,7 @@ else
   note "Historically this is where an engineer wrote a bespoke adapter."
 fi
 
-say "The CLI ships 14 adapters — compositions of transport / auth / session, not per-vendor code."
+say "The CLI ships 15 adapters — compositions of transport / auth / session, not per-vendor code."
 run "./ascend adapter list | tr '\n' ' '" 3.5
 
 act "ACT 2 — discovery: it works out the contract by trying it"

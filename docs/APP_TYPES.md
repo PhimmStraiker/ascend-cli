@@ -20,6 +20,10 @@ target **or** the adapter has to run locally (code, browser, signed requests, st
 `ascend assess run` starts and stops the bridge for you (see below); you don't run one by hand for a
 normal assessment.
 
+`ascend target add` registers a `bridge` app, because that is the type that works for any target the
+CLI can reach at all. The other three are a deliberate choice you make with `app create --type`,
+for a target the platform can call itself.
+
 ## Required fields per type
 
 These are validated **locally, before the request**. A missing field is caught and named locally, so
@@ -43,9 +47,17 @@ error: a 'gcp' application needs: url, service_account_info
 ### `bridge` (default)
 
 ```bash
+ascend target add https://internal.corp/chat --name 'My Bot' --bearer "$TOK" \
+  --controls sys_prompt_leak,jailbreak
+ascend assess run --app 'My Bot' --name 'run 1'
+```
+
+That first call is `adapter build` + `app create` + the key store, in one. The step-by-step form is
+unchanged and still the one to use when you want to edit the config in between:
+
+```bash
 ascend adapter build --api https://internal.corp/chat --bearer "$TOK" --out mybot.json
 ascend app create --name 'My Bot' --config mybot --controls sys_prompt_leak,jailbreak
-ascend assess run --app 'My Bot' --name 'run 1'
 ```
 
 No manual `ascend bridge start`. `ascend assess run` on a bridge app **auto-starts** the bridge
@@ -117,6 +129,7 @@ Credential fields you do not pass are omitted from the request rather than sent 
 
 ```bash
 ascend app list --with-runs     # STATE column
+ascend target list              # per target: adapter, registered, and whether it is serving
 ascend bridge ls                # bridge-based apps only; flags live runs with no bridge
 ```
 
@@ -157,8 +170,10 @@ You cannot. `api_type` is fixed at creation, because the create body is a discri
 Delete and recreate:
 
 ```bash
-ascend app delete 'My Bot'        # also drops its stored bridge key
+ascend app delete 'My Bot'        # also drops its stored bridge key (or: ascend target rm 'My Bot')
 ascend app create --type api --name 'My Bot' --config mybot --target-api-key "$TOK"
 ```
 
-Deleting removes the stored key too: a `tc-` key without its app cannot be used.
+Deleting removes the stored key too: a `tc-` key without its app cannot be used. Everything *else*
+about a live app — name, system prompt, qpm, controls, severities, guardrail signal — changes in
+place with `ascend app update`; only the type needs the round trip.
