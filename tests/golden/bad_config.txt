@@ -1,0 +1,16 @@
+$ ascend adapter validate --config definitely-not-here
+--- exit 3
+--- stdout
+--- stderr
+Validating definitely-not-here against the live target...
+error: config not found: definitely-not-here
+  looked in:
+  definitely-not-here
+  definitely-not-here.json
+  /private/tmp/claude-501/-Users-phimmasonephonpaseuth-Projects/f7f167fe-1659-41b8-a3b8-1f9ee9638d6f/scratchpad/acli/definitely-not-here.json
+  /private/tmp/claude-501/-Users-phimmasonephonpaseuth-Projects/f7f167fe-1659-41b8-a3b8-1f9ee9638d6f/scratchpad/acli/configs/definitely-not-here.json
+  /private/tmp/claude-501/-Users-phimmasonephonpaseuth-Projects/f7f167fe-1659-41b8-a3b8-1f9ee9638d6f/scratchpad/acli/configs/definitely-not-here
+  /Users/phimmasonephonpaseuth/.ascend/configs/definitely-not-here.json
+  /Users/phimmasonephonpaseuth/.ascend/configs/definitely-not-here
+  configs on disk: acme, example-anthropic, example-azure-openai-entra, example-azure-openai, example-bedrock, example-browser, example-create-then-stream, example-direct_api
+  list what exists with:  ascend adapter configs

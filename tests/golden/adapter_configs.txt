@@ -1,0 +1,30 @@
+$ ascend adapter configs
+--- exit 0
+--- stdout
+NAME                          ADAPTER             NOTE
+acme                          direct_api          
+example-anthropic             direct_api          Anthropic Messages API. Set $ANTHROPIC_API_KEY. Streaming? adapter sse
+example-azure-openai-entra    direct_api          Azure OpenAI via Entra (Azure AD) service principal. Replace <resource
+example-azure-openai          direct_api          Azure OpenAI (api-key). Replace <resource>/<deployment>; set $AZURE_OP
+example-bedrock               bedrock             AWS Bedrock. Set AWS creds the standard way (env AWS_* / profile / rol
+example-browser               browser             
+example-create-then-stream    sse_stream          COMPLETE TARGET DEFINITION for the hardest common shape: a bearer-auth
+example-direct_api            direct_api          Simplest case: one POST, answer in the JSON body. Copy, edit, then run
+example-gemini                direct_api          Google Gemini API (generativelanguage). Set $GEMINI_API_KEY. Uses the 
+example-ollama                direct_api          Ollama local (ollama serve). No auth. Change model as needed.
+example-openai                direct_api          OpenAI Chat Completions. Set $OPENAI_API_KEY. Streaming? use example-o
+example-sentinel_stream       sentinel_stream     Sentinel-framed text/plain body: repeated MARKER_BEGIN{json}MARKER_END
+example-session_api           session_api         Two-step: create a session, then send with that id. {{SESSION_ID}} wor
+example-session_poll          session_poll        ACK-only send: the POST returns only an acknowledgement and the reply 
+example-sse_stream            sse_stream          Server-sent events: the answer arrives as token frames that must be re
+example-vllm                  direct_api          OpenAI-compatible local server (vLLM / LM Studio). Remove the auth blo
+example-websocket_direct      websocket_direct    Raw WebSocket. Frames may be JSON or plain text; if there is no termin
+qabot                         direct_api          
+zz-oneshot                    direct_api          
+zz-target-084251              direct_api          
+
+20 config(s) across:
+  /private/tmp/claude-501/-Users-phimmasonephonpaseuth-Projects/f7f167fe-1659-41b8-a3b8-1f9ee9638d6f/scratchpad/acli/configs
+  /Users/phimmasonephonpaseuth/.ascend/configs
+new configs are written to:  /private/tmp/claude-501/-Users-phimmasonephonpaseuth-Projects/f7f167fe-1659-41b8-a3b8-1f9ee9638d6f/scratchpad/acli/configs
+--- stderr

@@ -1,0 +1,31 @@
+$ ascend assess watch --help
+--- exit 0
+--- stdout
+usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] assess watch
+       [-h] [--json] [--token TOKEN] [--base BASE] [--bridge-base BRIDGE_BASE] [--app APP] [--all]
+       [--include-done] [--assessment ASSESSMENT] [--interval INTERVAL] [--detail] [--once]
+
+options:
+  -h, --help            show this help message and exit
+  --json                machine-readable JSON output (default: False)
+  --token TOKEN         Straiker PAT (s6r_pat_...) or JWT; else $STRAIKER_PAT (default: None)
+  --base BASE           v3 API base URL (default: https://api.prod.straiker.ai/api/v3)
+  --bridge-base BRIDGE_BASE
+                        Ascend lease-service base URL (where bridges fetch probes and post
+                        results) (default: https://ascendai-bridge.prod.straiker.ai)
+  --app APP             app name or aapp_ id (repeatable) (default: None)
+  --all                 watch every live assessment in the tenant, with bridge status per run
+                        (default: False)
+  --include-done        with --all: also show finished runs (default: False)
+  --assessment ASSESSMENT
+                        assessment id (default: the one currently running) (default: None)
+  --interval INTERVAL   seconds between polls (default: 10)
+  --detail              show key findings when it completes (default: False)
+  --once                print one snapshot and exit instead of following (replaces `assess
+                        status`) (default: False)
+
+examples:
+  ascend assess watch --app 'My Bot'            # auto-picks the running one
+  ascend assess watch --all                     # every live run, one table
+  ascend assess watch --app 'My Bot' --assessment asmt_x --detail
+--- stderr
