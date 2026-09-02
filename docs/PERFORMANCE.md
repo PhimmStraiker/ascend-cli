@@ -57,3 +57,66 @@ Pooled keep-alive sockets go stale when the server closes an idle connection, wh
 because replaying one could create a second app or assessment. When a create hits a transport
 error the CLI **verifies against the server** before reporting, so a create that actually succeeded
 is not reported as failed.
+
+## The platform's per-probe window
+
+The CLI's own latency is small next to the one limit that decides whether a target can be assessed
+at all. The platform gives each probe a bounded window — **~120s** — and the clock starts when the
+probe is **queued**, not when the bridge calls the target. A probe can spend much of its budget
+waiting to be leased.
+
+Blowing the window is not a slow probe. It surfaces as a synthetic timeout indistinguishable from
+the target failing, which feeds the platform's target-health streak and **auto-pauses the
+assessment**. A target that reliably answers past the window therefore produces a whole run of
+false failures that reads as a broken bridge. Agentic targets taking 2–3 minutes per turn are
+common and are past it. Raising the adapter timeout does not help — the window has to be raised on
+the platform side first, and then `$ASCEND_PLATFORM_PROBE_WINDOW_MS` tells the CLI about it.
+
+### One number, two derived values
+
+`PLATFORM_PROBE_WINDOW_S` in `runtime/adapters/base.py` is the only knob. Three settings for one
+quantity is three ways to set them inconsistently, so the rest are derived from it:
+
+| Value | Derivation | Default |
+|---|---|---|
+| platform per-probe window | `$ASCEND_PLATFORM_PROBE_WINDOW_MS`, else the built-in | **120s** |
+| bridge give-up — the router abandons the probe | window − 10s delivery margin | 110s |
+| adapter timeout when the config sets no `timeout_ms` | give-up − 10s handler margin | 100s |
+
+A config's `timeout_ms` still wins, but it is **clamped to the bridge give-up point**. Waiting past
+it cannot help: the router has already abandoned the probe, and the extra time only holds a worker
+and a socket open.
+
+### Learn it from one probe, not from a failed run
+
+`adapter validate` times the target and warns on that measurement. `target check` is the same gate,
+resolved from a target name instead of a config name:
+
+```
+ascend target check mybot
+ascend adapter validate --config mybot
+```
+
+Both print the measured reply time alongside the result, and warn on two thresholds:
+
+- **at or beyond the window** — every probe times out platform-side, the assessment auto-pauses,
+  and the run reports no findings having measured nothing;
+- **at 60% of the window or more** — the target is inside it, but queue wait can still push a probe
+  past it. Keep QPM and `max_workers` low, and read sporadic failures as this rather than as target
+  refusals.
+
+### Adapters that do not derive their timeout
+
+Most adapters call `resolve_timeout_s(config)` and inherit the derivation above. Five carry their
+own ceiling instead:
+
+| Adapter | Its own limit |
+|---|---|
+| `slack_direct` | `timeout_ms`, default 90000 |
+| `scrt2_direct` | `sse_timeout`, default 45s |
+| `browser` | per-step Playwright timeouts (`response.timeout_ms`, default 30000) |
+| `bedrock` | none applied — boto3 client defaults (`timeout_ms` is documented but not read) |
+| `custom` | whatever the module does |
+
+The router abandons any probe at the bridge give-up point regardless, so none of these can exceed
+the window — they can only give up earlier than it.

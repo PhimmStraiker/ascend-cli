@@ -36,7 +36,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
 def _load_dotenv():
     """Load KEY=VALUE lines from the nearest .env (this dir upward), without overwriting existing
-    env vars. So a model key in `Straiker Projects/.env` works with no `export` needed."""
+    env vars. So a model key in a parent directory's `.env` works with no `export` needed."""
     from pathlib import Path
     here = Path(__file__).resolve()
     for d in [here.parent, *here.parents]:

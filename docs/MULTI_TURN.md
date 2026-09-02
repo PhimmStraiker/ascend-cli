@@ -42,17 +42,34 @@ constraint is inherent to "no correlation id on the wire".
 
 ### Which adapters are stateful
 
-`STATEFUL_ADAPTERS` in `dispatch.py`:
+`STATEFUL_ADAPTERS` in `dispatch.py` — 12 of the 15 registered adapters:
 
 ```
-session_api, browser, amazon_connect, scrt2_direct,
-agentforce*, slack_direct, copilot_studio, websocket_direct
+session_api, browser, amazon_connect, scrt2_direct, agentforce,
+slack_direct, copilot_studio, websocket_direct, session_poll,
+sentinel_stream, custom, bedrock
 ```
 
-> Note: `agentforce` appears in `STATEFUL_ADAPTERS`, but it creates a fresh session per prompt and
-> is parallelizable in practice; treat the set as the routing default and override with
-> `max_workers`/`conversation_key` where a target is genuinely stateless. `direct_api`, `sse_stream`,
-> and `vertex_ai` are stateless.
+The remaining three — `direct_api`, `sse_stream`, `vertex_ai` — are routed concurrently.
+
+The set is a **routing default, not a claim about each adapter's internals**. Two places where the
+default and the source diverge, both worth overriding:
+
+- **Sequential but not actually stateful.** `agentforce`, `scrt2_direct`, `copilot_studio`,
+  `session_api`, `session_poll` and `websocket_direct` hold no cross-prompt conversation state —
+  each `send_prompt` mints its own session or conversation and tears it down. They run at 1 worker
+  because that is the safe direction, not because they need it. Raise `max_workers` (or set
+  `conversation_key`) where the target tolerates it. `bedrock` is sequential for the same reason in
+  `converse` mode; only its `agent` and `agentcore` modes thread a session id.
+- **Concurrent but carrying state.** `sse_stream` is *not* in the set, so it defaults to 10 workers,
+  yet it keeps a persistent `requests.Session` (cookie jar), a bootstrap CSRF token, and — when the
+  config has a `create` block — **a conversation id reused across prompts** unless
+  `create.per_prompt` is set. The default is right for the bootstrap-only shape. For a config with
+  a `create` block, set `"create": {"per_prompt": true}` or `max_workers: 1`, or ten concurrent
+  probes will interleave into one conversation.
+
+`ascend target show <target>` prints the adapter and config a target actually resolves to, which is
+what these rules are read from.
 
 ### How the concurrency is chosen
 
@@ -74,6 +91,17 @@ ascend bridge start --adapter session_api --config mybot          # auto → 1 w
 ascend bridge start --adapter direct_api  --config mybot          # auto → 10 workers (concurrent)
 ascend bridge start --adapter session_api --config mybot --max-workers 4   # explicit override
 ```
+
+### Sequential and the per-probe window
+
+Sequential is safe for correctness and expensive for the clock. The platform's per-probe window
+starts when a probe is **queued**, not when the bridge calls the target, so at 1 worker every probe
+behind the one in flight is spending its budget waiting. A target that answers in 40s is
+comfortably inside a ~120s window on its own and still times out once the queue is deep enough.
+
+Set QPM to what a single sequential conversation can actually sustain rather than to the platform
+cap, and measure the target with `ascend target check` before the run. See
+[PERFORMANCE.md](PERFORMANCE.md) for the window and the values derived from it.
 
 ---
 
@@ -143,3 +171,4 @@ is for rotating the whole *identity/session*.
 | No correlation id → interleave risk | sequential policy | `max_workers=1` for stateful |
 | Opt-in concurrency | `conversation_key` (`header:` / `body:`) | off (sequential) |
 | Fresh identity/session | `router.reset()` / distinct config / new process | fresh per run |
+| Queue wait counts against the probe's budget | platform per-probe window, from queue time | ~120s ([PERFORMANCE.md](PERFORMANCE.md)) |

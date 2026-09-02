@@ -13,13 +13,28 @@ the runtime *leases* probes over plain HTTP, calls your target through an adapte
 the result back. There is no socket to drop.
 
 
-## Build an adapter: `ascend adapter build`
+## Add a target: `ascend target add`
 
-`ascend adapter build` derives and validates an adapter config from a live URL / API / curl / spec /
-HAR. Auth-first flags (`--bearer`, `--api-key`, `--basic`, `--cookie`, or a
-`--login-url` access-code flow) are honored by every source. On a 401 it
-names the auth scheme and the exact re-run command. (`ascend adapter build` still works as an
-alias.)
+```bash
+ascend target add https://your-bot.example.com/chat --bearer "$TOK"
+ascend target add ./request.curl      # copied out of devtools
+ascend target add ./session.har       # exported from your own browser
+```
+
+A target used to be four things you had to hold in your head and keep in sync: an adapter
+config, an application record, a stored bridge key, and a purpose string. `target` is the one
+noun for all of them — `add`, `list`, `show`, `check`, `rm`.
+
+`target add` **detects what you gave it** rather than making you pick among mutually-exclusive
+source flags; the artifact itself always knows whether it is a URL, a cURL command or a HAR, and
+that was a question people frequently could not answer. It then derives the adapter, proves it
+against the live target, registers the application and stores the key — and writes nothing that
+did not answer.
+
+Underneath, `ascend adapter build` derives and validates an adapter config from a live URL / API /
+curl / spec / HAR, and remains available on its own. Auth-first flags (`--bearer`, `--api-key`,
+`--basic`, `--cookie`, or a `--login-url` access-code flow) are honored by every source. On a 401
+it names the auth scheme and the exact re-run command.
 
 Native coverage includes model providers (validated presets for
 OpenAI, Anthropic, Azure OpenAI incl. Entra, Gemini, Ollama, vLLM) and **AWS Bedrock**
@@ -58,7 +73,7 @@ sequenceDiagram
     autonumber
     participant I as Straiker Ascend<br/>(Iris engine)
     participant B as ascend bridge<br/>(pull-mode)
-    participant A as Adapter<br/>(1 of 13)
+    participant A as Adapter<br/>(1 of 15)
     participant T as Your AI target
 
     B->>I: POST /v2/lease  (long-poll, 25s)
@@ -89,10 +104,10 @@ flowchart TB
         DISC["discovery/<br/>capture · classify<br/>compose · validate"]
         RT["runtime/<br/>lease_client · dispatch<br/>call_target"]
     end
-    subgraph adapters["Adapter framework (13)"]
+    subgraph adapters["Adapter framework (15)"]
         A1["direct_api · sse_stream<br/>websocket_direct"]
         A2["session_api · session_poll<br/>sentinel_stream"]
-        A3["agentforce · copilot_studio<br/>vertex_ai · slack_direct<br/>amazon_connect · scrt2_direct<br/>browser"]
+        A3["agentforce · copilot_studio<br/>vertex_ai · slack_direct<br/>amazon_connect · scrt2_direct<br/>bedrock · browser · custom"]
     end
     CLI --> core
     SK --> CLI
@@ -115,7 +130,7 @@ flowchart LR
     L2["<b>L2 Auth</b><br/>none · static · oauth2<br/>csrf · derived-multihop · mTLS"]
     L3["<b>L3 Lifecycle</b><br/>static · refresh-TTL<br/>reauth-401 · cookie-rotation"]
     L4["<b>L4 Session</b><br/>stateless · create-session<br/>create-conversation · warmup<br/>multi-turn"]
-    L1["<b>L1 Transport</b><br/>rest · sse · ndjson · websocket<br/>poll · sentinel · browser · terminal"]
+    L1["<b>L1 Transport</b><br/>rest · sse · websocket<br/>poll · sentinel · browser"]
     L6["<b>L6 Rate</b><br/>qpm · max_workers"]
     L5 --> L2 --> L3 --> L4 --> L1
     L6 -. gates .-> L1
@@ -138,7 +153,7 @@ flowchart LR
 
 ---
 
-## Architecture: one core, three shells
+## Repository layout
 
 ```
           transport/   raw pull-mode client (lease → call → result), reference impl
@@ -255,14 +270,16 @@ export STRAIKER_PAT='s6r_pat_…'
 # 3. Preflight: key scopes, API reachability, bridge reachability, deps
 ascend doctor
 
-# 4. Build a validated adapter config for the target
-ascend adapter build --api https://api.example.com/chat --bearer "$TOK" --out mybot.json
+# 4. Add the target. Give it whatever you already have — a URL, a request copied out of
+#    devtools ("copy as cURL"), a .har export, or a saved config — and it works out which.
+#    It derives the adapter, PROVES it against the live target, registers the app and stores
+#    the bridge key. Nothing unvalidated is written.
+ascend target add https://api.example.com/chat --bearer "$TOK" --name 'My Bot'
 
-# 5. Register it. --type bridge (the default) returns the bridge key ONCE and needs a bridge;
-#    --type api|gcp|bedrock are called by Ascend directly and need none.
-ascend app create --name 'My Bot' --config mybot --controls sys_prompt_leak,jailbreak
+# 5. Re-prove it whenever you are about to spend an assessment on it.
+ascend target check 'My Bot'
 
-# 6. Run the assessment, and watch it. The CLI auto-starts the bridge for a bridge-type app
+# 6. Run the assessment, and watch it. The CLI auto-starts the relay for a bridge-type app
 #    before probes are scheduled, and self-stops it when the run ends — no manual serve step.
 ascend assess run --app 'My Bot' --name 'run 1'
 ascend assess watch --all
@@ -272,7 +289,19 @@ ascend reports --app 'My Bot' --detail          # assessment-level table
 ascend results export.csv --values --matrix     # turn-level, from a Console export
 ```
 
-`ascend onboard --url https://site/support` collapses steps 4–6 into one command.
+`ascend target add <thing> --run` collapses steps 4–6 into one command.
+
+Step 5 is worth its own line in a script. A target that has drifted — auth expired, response
+shape moved, endpoint relocated — still produces a clean-*looking* assessment that measured
+nothing, and that false pass is the most expensive result this tool can hand you.
+
+`target` is the everyday noun; `app`, `adapter` and `keys` are the machinery underneath it and
+remain fully supported, so anything you scripted against them keeps working:
+
+```bash
+ascend adapter build --api https://api.example.com/chat --bearer "$TOK" --out mybot.json
+ascend app create --name 'My Bot' --config mybot --controls sys_prompt_leak,jailbreak
+```
 
 Where things come from:
 
@@ -287,8 +316,9 @@ Where things come from:
 
 ## Command reference
 
-`ascend --help` lists every command in the order you use them. The full reference, all 45
-commands and 215 flags, with values, defaults and examples, is generated from the CLI's own
+`ascend --help` is tiered — START HERE, EVERYDAY, MORE — rather than alphabetical, because the
+question a new operator has is "what do I run first". The full reference, all 53 commands across
+20 groups with values, defaults and examples, is generated from the CLI's own
 argparse tree and lives in **[docs/COMMAND_MAP.md](docs/COMMAND_MAP.md)**
 (and [command-map.html](docs/command-map.html)). A test fails if it goes stale, so it cannot
 drift from the tool.
@@ -298,6 +328,7 @@ Every command takes `--json`, `--token`, `--base`, `--bridge-base`.
 | Stage | Commands |
 |---|---|
 | Set up | `doctor` · `tenant show` · `controls list` · `controls validate` |
+| **Add a target** | **`target add\|list\|show\|check\|rm`** |
 | Build an adapter | `map` · `adapter list\|show\|configs\|validate` · `chat` |
 | Register | `app create\|list\|get\|bind\|delete` · `keys list\|add\|rm\|prune` · `policy set\|push` |
 | Run | `assess run\|watch\|pause\|resume\|list` · `onboard` · `bridge sync\|ls\|logs\|start\|stop` (auto-managed; `start` is advanced) |

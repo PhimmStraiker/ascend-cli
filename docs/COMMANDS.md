@@ -9,9 +9,15 @@ The full, always-current reference is generated from the CLI itself:
 Or ask the tool directly:
 
 ```bash
-ascend --help                 # the lifecycle menu, in the order you use it
+ascend --help                 # tiered: START HERE, EVERYDAY, MORE — in the order you use them
 ascend <command> --help       # flags + examples for one command
+ascend target add --help      # the fastest way in
 ```
 
+The everyday surface is **`target`** — `add`, `list`, `show`, `check`, `rm` — with `app`,
+`adapter` and `keys` as the machinery underneath it. Nothing was removed or renamed when
+`target` was added; every command that worked before still works.
+
 Start here: **[BUILD_ADAPTER.md](BUILD_ADAPTER.md)** (connect to a target) and
-**[APP_TYPES.md](APP_TYPES.md)** (bridge/api/gcp/bedrock).
+**[APP_TYPES.md](APP_TYPES.md)** (bridge/api/gcp/bedrock). To drive the CLI from an agent or a
+script, read **[AGENTS.md](AGENTS.md)** — the JSON contract and the stable exit codes.
