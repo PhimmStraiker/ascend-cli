@@ -7,6 +7,11 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ## [Unreleased]
 
+### Changed
+- `ascend --help` leads with the one command that does the whole flow (`onboard`) and shows the
+  seven you use day to day, with the rest listed by name. 71 lines to 44. No command changed or
+  moved — every one still runs exactly as before.
+
 ### Added
 - `adapter validate` reports the target's measured reply time and warns when it cannot survive the
   platform's per-probe window — a config can be correct and the target still unassessable. Learned
