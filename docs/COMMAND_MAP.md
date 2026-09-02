@@ -655,6 +655,7 @@ zero to a running assessment in one command (build -> validate -> register -> br
 | `--har` | `HAR` | — | HAR file exported from your own browser (no browser needed here) |
 | `--config` | `CONFIG` | — | an existing config in the config dir (skip discovery) |
 | `--name` | `NAME` | — | application name in Ascend (default: derived from the URL) |
+| `--save-as` | `NAME` | — | name the adapter config (default: derived from the URL, e.g. 'myhost-com'). Use this and you always know what to pass to --config. |
 | `--system-prompt` | `SYSTEM_PROMPT` | — | what the target is, for the assessment context |
 | `--controls` | `CONTROLS` | — | comma-separated control ids (validated before the run) |
 | `--adapter` | `ADAPTER` | — | override the adapter type (default: from the config) |
@@ -866,6 +867,7 @@ onboard a target from a URL, a cURL/HAR file, or a saved config
 | `--har` | `HAR` | — | HAR file exported from your own browser (no browser needed here) |
 | `--config` | `CONFIG` | — | an existing config in the config dir (skip discovery) |
 | `--name` | `NAME` | — | application name in Ascend (default: derived from the URL) |
+| `--save-as` | `NAME` | — | name the adapter config (default: derived from the URL, e.g. 'myhost-com'). Use this and you always know what to pass to --config. |
 | `--system-prompt` | `SYSTEM_PROMPT` | — | what the target is, for the assessment context |
 | `--controls` | `CONTROLS` | — | comma-separated control ids (validated before the run) |
 | `--adapter` | `ADAPTER` | — | override the adapter type (default: from the config) |
