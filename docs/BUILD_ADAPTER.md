@@ -50,6 +50,22 @@ listed here in order of reliability.
 All three end the same way: the CLI **validates the adapter against the live target** before writing
 anything. If it can't get a real answer, it writes nothing and tells you why.
 
+**If you want to skip the manual capture entirely**, two of the four sources need no DevTools at
+all, and they are worth trying before you open a browser:
+
+```bash
+ascend target add https://your-bot.example.com/api/chat --bearer "$TOK"   # probes the API directly
+ascend target add https://your-bot.example.com/support                    # CLI drives the browser
+```
+
+`--api` (a bare API URL) probes the endpoint and derives the contract with no browser. `--url` (a
+page with a widget) launches a **real browser and captures the traffic for you** — that is the
+automated version of Way 1, not a manual export. Reach for a hand-exported HAR or cURL when those
+cannot work: a login flow you must complete yourself, aggressive bot protection, a multi-step
+session, or a mobile app. What no source can supply is a **secret** — a passcode, an access code
+or an API key has to be given with `--bearer` / `--api-key` / `--header` / `--body-field`, or be
+present in the evidence you captured.
+
 ---
 
 ## Way 1: from a HAR (recommended)
@@ -74,6 +90,56 @@ reliable input.
    something else, pass it with `--prompt "…"` in the command below.)
 6. Right-click anywhere in the request list → **Save all as HAR with content** → save to e.g.
    `~/Downloads/target.har`.
+
+### Export the HAR (a mobile app — Android or iOS)
+
+There is no HAR export on a phone. The device has to send its traffic through an intercepting
+proxy on your laptop, and the proxy exports the HAR. **Budget real time for this** — the capture
+itself is five minutes, and the trust setup is where engagements stall.
+
+1. Run a proxy that can export HAR: **mitmproxy** (`mitmweb`, File → Export → HAR),
+   **Proxyman**, **Charles**, or **Burp**.
+2. Put the phone on the same network and point its Wi-Fi proxy at your laptop's IP and the
+   proxy's port.
+3. Install the proxy's CA certificate on the device, **and mark it trusted** — installing is not
+   the same as trusting:
+   - **iOS**: install the profile, then enable it under
+     *Settings → General → About → Certificate Trust Settings*. Skipping the second step is the
+     most common reason nothing decrypts.
+   - **Android 7+ (API 24+)**: apps do **not** trust user-installed CAs. A CA in the user store
+     will decrypt browser traffic and nothing else, which reads as "the proxy is broken". You
+     need one of: an emulator or rooted device with the CA in the **system** store, or a **debug
+     build** whose `network_security_config.xml` trusts user CAs.
+4. Drive the app by hand: open the chat and send exactly
+   `Hello, what can you help me with?` (or pass `--prompt` with what you actually typed).
+5. Export the HAR and build from it exactly as above.
+
+#### Certificate pinning — the limit worth knowing before you promise a date
+
+Many production apps, especially in health, finance and insurance, **pin** their certificates:
+the app ships the expected certificate or public key and rejects anything else, so a correctly
+installed, fully trusted proxy CA still fails. The symptom is unambiguous — the app shows a
+network/connection error and the proxy logs a TLS handshake failure — and **no proxy
+configuration fixes it**, because the app is behaving exactly as designed.
+
+Your options, in the order worth trying:
+
+| Option | What it needs | Notes |
+|---|---|---|
+| A build with pinning disabled | The app team | Cleanest and fastest. Usually a debug/QA build they already produce. |
+| The API contract directly | The app team | You often do not need the app at all — see below. |
+| Unpinned emulator build | The app team + an emulator | A debug build on an emulator with the CA in the system store. |
+| Runtime bypass (Frida / objection) | A rooted/jailbroken device or a repackaged app | Works, but is invasive, breaks on app updates, and is frequently disallowed by the customer's own policy. Get written approval first. |
+
+**Do not treat pinning as a CLI problem.** Nothing in this tool can defeat it, and no adapter
+source (`--har`, `--curl`, `--url`, `--api`) changes the outcome, because the failure happens on
+the device before any traffic is recorded.
+
+**The shortcut people miss:** a mobile app is a *client*. What you are assessing is the API behind
+it, and that API is reachable without the app. If the team can give you the endpoint, the auth
+scheme and one example request — a cURL, a Postman entry, an OpenAPI spec — you can build the
+adapter with `--api` or `--curl` and skip device capture entirely. Ask for that **first**; it is
+usually faster than arranging a rooted device, and it is the same surface the app talks to.
 
 ### Build the adapter
 

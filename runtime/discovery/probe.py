@@ -1203,9 +1203,11 @@ def _diagnose(state: _State, host: str, tried: List[str]) -> Tuple[str, str, str
                 f"{sorted(set(auth_hits))} — the endpoint is behind auth.{scheme_line}",
                 "Supply credentials and re-run with --bearer '<token>' | "
                 "--api-key 'x-api-key:<key>' | --basic '<user>:<pass>' | "
-                "--cookie '<name>=<value>'. For a login/access-code flow, use "
-                "--login-url + --login-body + --token-path. "
-                "(--header 'Authorization: Bearer <token>' also works.)")
+                "--cookie '<name>=<value>'. For an access code or passcode in a header, use "
+                "--header 'x-demo-key: <code>'; for one the target expects in the request BODY, "
+                "use --body-field 'apiKey=<key>' (repeatable, and it can be combined with the "
+                "others — a gated target commonly wants one credential in a header AND another "
+                "in the body). For a login flow, use --login-url + --login-body + --token-path.")
 
     if alive:
         worst = sorted(alive, key=lambda u: -live[u])[0]
