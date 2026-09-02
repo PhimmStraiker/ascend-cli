@@ -109,3 +109,41 @@ def test_non_direct_api_configs_are_left_alone():
     assert ascend._upgrade_streaming_shape(cfg, {"response": SSE_BODY}, _Args(), V) == (
         cfg, {"response": SSE_BODY})
     assert V.calls == []
+
+
+# ---- the query string must survive the upgrade -------------------------------------------------
+# Splitting `endpoint` into base_url + chat_path dropped the query, while probe.build_config
+# (probe.py:1511) deliberately keeps it. That was wrong twice over:
+#   * where the query is REQUIRED -- Azure OpenAI's `?api-version=`, Vertex's `?alt=sse` -- the
+#     upgraded config called a URL the target does not serve, so the re-validation failed and the
+#     streaming upgrade silently never applied, leaving a direct_api config that hands the scorer
+#     raw frames;
+#   * where it was optional, the stored endpoint no longer matched what the next run derived, so an
+#     ordinary re-run looked like a different target and forked a sibling config -- the fresh
+#     credential landing in `<name>-2` while `--config <name>` kept serving the expired one.
+def test_query_string_survives_the_sse_upgrade():
+    cfg = {"adapter": "direct_api", "method": "POST",
+           "endpoint": "https://h.example.com/chat?api-version=2024-02-01",
+           "body": {"message": "{{PROMPT}}"}}
+    out = ascend._upgrade_sse_shape(cfg, SSE_BODY, _Args(), _FakeValidator())
+    assert out is not None
+    upgraded, _ = out
+    assert upgraded["base_url"] == "https://h.example.com"
+    assert upgraded["chat_path"] == "/chat?api-version=2024-02-01"
+
+
+def test_path_without_a_query_is_unchanged():
+    cfg = {"adapter": "direct_api", "endpoint": "https://h.example.com/chat",
+           "body": {"message": "{{PROMPT}}"}}
+    upgraded, _ = ascend._upgrade_sse_shape(cfg, SSE_BODY, _Args(), _FakeValidator())
+    assert upgraded["chat_path"] == "/chat"
+
+
+def test_upgraded_config_compares_equal_to_itself():
+    """The round trip that decides whether a re-run refreshes or forks."""
+    cfg = {"adapter": "direct_api", "method": "POST",
+           "endpoint": "https://h.example.com/chat?api-version=2024-02-01",
+           "body": {"message": "{{PROMPT}}"}}
+    upgraded, _ = ascend._upgrade_sse_shape(cfg, SSE_BODY, _Args(), _FakeValidator())
+    assert ascend._config_endpoint(upgraded) == ascend._config_endpoint(cfg), \
+        "a stored upgraded config must resolve to the same target the next run derives"
