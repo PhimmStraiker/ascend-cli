@@ -13,7 +13,7 @@ Config keys:
   endpoint     - full :streamQuery URL (…/reasoningEngines/{ID}:streamQuery)
   user_id      - user_id sent to the agent (default "ascend-probe")
   sa_key_file  - optional path to a service-account JSON key (else ADC)
-  timeout_ms   - request timeout in ms (default 60000)
+  timeout_ms   - request timeout in ms (default: adapters.base.resolve_timeout_s / $ASCEND_TARGET_TIMEOUT_MS, and bounded by the bridge's per-probe window)
 """
 
 import json

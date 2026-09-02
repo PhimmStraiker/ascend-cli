@@ -19,35 +19,46 @@ from typing import Any, Dict, Optional
 # than tight, and both ends are tunable without editing code.
 #
 # There is still a ceiling, because a genuinely hung target must not pin a worker forever.
-# 12 min, deliberately ABOVE the ~10 min envelope we claim to support. A default equal to the
-# target's latency has no headroom and loses the race: a live 10-minute target failed under a
-# 600_000 default because the reply landed a couple of seconds the wrong side of it. A timeout is
-# an upper bound, so it has to sit above the slowest reply we intend to serve, not on top of it.
-DEFAULT_TARGET_TIMEOUT_MS = 720_000
-MAX_TARGET_TIMEOUT_MS = 900_000            # 15 min — beyond this the target is hung, not slow
+# This number is NOT the binding constraint, and making it large does not make a slow target work.
+# The bridge abandons a probe at the platform's response window (call_target's
+# _DEFAULT_BRIDGE_RESPONSE_TIMEOUT_S), so a bigger value here buys nothing through the bridge and
+# actively hurts: the router gives up while the HTTP call keeps running, holding a worker and a
+# socket for the remainder. The default therefore sits just UNDER that window, which also means the
+# adapter reports the timeout itself — a clean per-probe error carrying a status — instead of the
+# router reporting a generic one.
+#
+# Raising this is only meaningful together with the bridge window (and for the paths that never go
+# through it, such as `adapter validate`). The ceiling guards an explicitly configured value.
+DEFAULT_TARGET_TIMEOUT_MS = 100_000
+MAX_TARGET_TIMEOUT_MS = 900_000            # above this a target is hung, not slow
 
 
-def _env_int(name: str, fallback: int) -> int:
-    try:
-        v = int(os.environ.get(name) or 0)
-    except (TypeError, ValueError):
-        return fallback
-    return v if v > 0 else fallback
+def resolve_ms(config: Optional[Dict[str, Any]], key: Optional[str],
+               env_name: str, default_ms: int) -> int:
+    """First positive value of: config[key], $env_name, default_ms.
+
+    Shared by the target-reply and bridge-window resolvers so the precedence rule is written once.
+    """
+    sources = ((config or {}).get(key) if key else None, os.environ.get(env_name))
+    for source in sources:
+        try:
+            ms = int(source or 0)
+        except (TypeError, ValueError):
+            continue
+        if ms > 0:
+            return ms
+    return default_ms
 
 
-def resolve_timeout_s(config: Optional[Dict[str, Any]], default_ms: Optional[int] = None) -> float:
+def resolve_timeout_s(config: Optional[Dict[str, Any]]) -> float:
     """Seconds to wait for one target reply.
 
-    Precedence: the config's `timeout_ms`, then $ASCEND_TARGET_TIMEOUT_MS, then a default sized for
-    an agentic target — always clamped to $ASCEND_TARGET_MAX_TIMEOUT_MS so one hung target cannot
-    hold a worker open indefinitely.
+    Precedence: the config's `timeout_ms`, then $ASCEND_TARGET_TIMEOUT_MS, then the default above —
+    always clamped to $ASCEND_TARGET_MAX_TIMEOUT_MS so one hung target cannot hold a worker open
+    indefinitely.
     """
-    base = default_ms or _env_int("ASCEND_TARGET_TIMEOUT_MS", DEFAULT_TARGET_TIMEOUT_MS)
-    try:
-        ms = int((config or {}).get("timeout_ms") or base)
-    except (TypeError, ValueError):
-        ms = base
-    ceiling = _env_int("ASCEND_TARGET_MAX_TIMEOUT_MS", MAX_TARGET_TIMEOUT_MS)
+    ms = resolve_ms(config, "timeout_ms", "ASCEND_TARGET_TIMEOUT_MS", DEFAULT_TARGET_TIMEOUT_MS)
+    ceiling = resolve_ms(None, None, "ASCEND_TARGET_MAX_TIMEOUT_MS", MAX_TARGET_TIMEOUT_MS)
     return max(1.0, min(ms, ceiling) / 1000.0)
 
 

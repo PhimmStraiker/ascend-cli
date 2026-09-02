@@ -975,7 +975,7 @@ def _release_bridge(app_id, ensure):
         return None
 
 
-def _supervise_bridge(c, app, *, assessment_id=None, args=None):
+def _supervise_bridge(c, app, *, assessment_id=None, args=None, owned=None):
     """Watchdog tick for a followed run: if a bridge-type app's relay has died mid-assessment,
     restart it so probes keep flowing — a dead bridge scores a FALSE PASS. `_ensure_bridge` is
     idempotent, so this is safe to call on every poll: a live bridge is a cheap no-op and a native
@@ -991,6 +991,10 @@ def _supervise_bridge(c, app, *, assessment_id=None, args=None):
             return None                       # alive — nothing to do
         r = _ensure_bridge(c, app, assessment_id=assessment_id, args=args)
         if r.get("started"):
+            # We started this one, so this command is now responsible for stopping it. Without
+            # recording that, a relay the watchdog revived outlived the run that needed it.
+            if owned is not None:
+                owned["started"] = True
             return f"bridge went down mid-run — restarted (pid {r.get('pid')})"
         if r.get("skip") or r.get("error"):
             return f"! bridge down and could not be restarted: {r.get('skip') or r.get('error')}"
@@ -1040,11 +1044,16 @@ def cmd_assess_run(args):
         # Watchdog: every poll, re-ensure the relay. If it died mid-run (for ANY reason) it is
         # restarted so probes keep flowing; a live bridge is a no-op and a native app is skipped.
         _sup_app = _app_by_id(c, appid)
+        # Ownership can change mid-run: if the relay dies and the watchdog restarts it, this command
+        # started that one and must release it, even though the initial ensure only reused an
+        # existing relay.
+        owned = dict(ensure)
+
         def _supervised_tick(status, prog, a):
             # Bind the relay to THIS run as soon as the platform names it, so the bridge scopes its
             # own stop decision to the run it is actually serving.
             _bind_assessment(appid, (a or {}).get("id"))
-            note = _supervise_bridge(c, _sup_app, args=args)
+            note = _supervise_bridge(c, _sup_app, args=args, owned=owned)
             if note:
                 print(f"  {note}", file=sys.stderr)
             if tw.enabled:
@@ -1052,14 +1061,29 @@ def cmd_assess_run(args):
             elif not args.json:
                 _tick(status, prog, a)
         feed_interval = min(args.interval, 4) if tw.enabled else args.interval
+        res = None
         try:
             with tw:
                 res = c.run(appid, args.name, wait=True,
                             interval=feed_interval, timeout=args.timeout, on_tick=_supervised_tick)
         finally:
-            # This run is over (or it failed): release the relay WE started. A reused or standalone
-            # relay belongs to someone else and is left running.
-            _release_bridge(appid, ensure)
+            # Release the relay WE started — including one the watchdog restarted mid-run — but
+            # ONLY once this run is genuinely finished. `c.run` also returns early when it recovers
+            # a dropped connection while the assessment is still live on the platform; stopping the
+            # relay then would leave a running assessment with nothing answering it, which scores a
+            # FALSE PASS. Leaving it up is safe because the relay is bound to this assessment and
+            # self-stops when the run reaches a terminal state. A reused or standalone relay
+            # belongs to someone else and is never touched.
+            import api as _api
+            if isinstance(res, dict):
+                # Bind here too. When a dropped connection is recovered the poll never ticks, so
+                # the relay would otherwise be left unbound — and an unbound relay never self-stops,
+                # which turns a recovered run into an orphaned relay serving forever.
+                _bind_assessment(appid, res.get("assessment_id") or res.get("id"))
+            _done = (isinstance(res, dict)
+                     and str(res.get("status", "")).lower() in _api.TERMINAL_STATUSES)
+            if _done:
+                _release_bridge(appid, owned)
     else:
         res = c.run(appid, args.name, wait=False,
                     interval=args.interval, timeout=args.timeout, on_tick=None)
@@ -1343,8 +1367,8 @@ def cmd_assess_resume(args):
 
 # ----------------------------------------------------------------------------- runtime
 _STARTUP_GRACE_S = 120.0     # never self-stop within this of startup (ensure-before-create, new apps)
-_TERMINATION_GRACE_S = 90.0  # once a run reads all-terminal/empty, wait this long before stopping, so a
-#                              transient gap between recon rounds is not mistaken for a finished run
+_TERMINATION_GRACE_S = 90.0  # once the BOUND run reads terminal, wait this long before stopping, so
+#                              a transient gap between recon rounds is not mistaken for a finished run
 
 
 def _default_idle_timeout_s():
@@ -1377,12 +1401,12 @@ def _reconcile_decision(assessments, *, now, started_at, last_probe_ts,
     A run is "over" ONLY when it is EXPLICITLY terminal — a status in api.TERMINAL_STATUSES, the same
     set the rest of the CLI uses. A status the CLI does not enumerate (e.g. an intermediate
     recon-phase state the platform emits between rounds) is NOT terminal, and the safe direction is
-    always to keep serving: an unanswered probe scores a FALSE PASS. Even once every assessment is
+    always to keep serving: an unanswered probe scores a FALSE PASS. Even once the BOUND run is
     explicitly terminal, the bridge rides out _TERMINATION_GRACE_S before stopping, so a brief gap
     between recon rounds (indistinguishable from a finished run) does not reap it. `terminal_since`
-    is when the caller first saw the all-terminal/empty condition (None while anything is still
-    non-terminal). Idle cleanup is OPT-IN and reaps only a genuinely paused, already-probed,
-    then-quiet run."""
+    is when the caller first saw the bound run terminal (None while it is still live). With NO
+    bound run the bridge never self-stops on terminal at all. Idle cleanup is OPT-IN and reaps only
+    a genuinely paused, already-probed, then-quiet run."""
     if not control_ok:
         return "serve"                        # could not read the platform — never self-kill
     if now < (started_at or 0) + _STARTUP_GRACE_S:
@@ -1421,10 +1445,10 @@ def _reconcile_decision(assessments, *, now, started_at, last_probe_ts,
 
 def _reconcile_step(assessments, *, now, started_at, last_probe_ts, idle_timeout_s,
                     control_ok, terminal_since, bound_id=None):
-    """One reconcile iteration for the bridge beat loop. Tracks when the all-terminal/empty
-    condition began (so the termination grace can ride through a transient gap between recon
-    rounds), then decides. Returns (decision, terminal_since); the loop carries terminal_since
-    across iterations. Pure, so the whole lifecycle is unit-testable."""
+    """One reconcile iteration for the bridge beat loop. Tracks when the BOUND run first read
+    terminal (so the termination grace can ride through a transient gap between recon rounds), then
+    decides. Returns (decision, terminal_since); the loop carries terminal_since across iterations.
+    Pure, so the whole lifecycle is unit-testable."""
     from api import TERMINAL_STATUSES
     scoped = [a for a in assessments if a.get("id") == bound_id] if bound_id else assessments
     all_terminal = bool(scoped) and not any(
@@ -5121,7 +5145,10 @@ def build_parser():
     s.add_argument("--app", help="resolve the bridge key from the local key store for this app")
     s.add_argument("--consumer", help="bridge consumer id (parallel bridges MUST differ; auto per app)")
     s.add_argument("--log-file", help="write bridge logs here instead of stderr")
-    s.add_argument("--status-file", help="publish heartbeat+stats JSON here (used by `ascend bridge`)")
+    s.add_argument("--status-file",
+                   help="force heartbeat+stats publishing for a relay that cannot be resolved to "
+                        "an app id (supervised children pass this; when the app IS known the "
+                        "heartbeat is published under it automatically)")
     s.add_argument("--qpm", type=int, default=None, help="queries per minute against the target")
     s.add_argument("--max-workers", type=int, default=None, help="concurrency (auto: 1 for stateful targets)")
     s.add_argument("--capture", default=None, help="jsonl file to record probe/result envelopes")

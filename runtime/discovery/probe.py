@@ -1493,18 +1493,14 @@ def build_config(result: ProbeResult, *, timeout_ms: Optional[int] = None) -> Di
             f"{result.message} | next: {result.hint}")
 
     headers = dict(result.headers or {})
-    # Never pin a SHORT timeout into a built config. `result.timeout_s` is how long we were willing
-    # to wait while DISCOVERING the contract; it says nothing about how long the target takes under
-    # assessment. Agentic targets routinely reply in 2-3 minutes (some far longer), and a pinned
-    # 20-30s turns a healthy slow target into 100% probe failures — measured live, after which the
-    # platform auto-paused the run and it looked like the bridge had broken. Unless the operator
-    # pinned a value, fall back to the runtime's agentic-safe, env-tunable default.
-    try:
-        from adapters.base import DEFAULT_TARGET_TIMEOUT_MS as _AGENTIC_FLOOR_MS
-    except Exception:                                   # discovery imported outside the runtime path
-        _AGENTIC_FLOOR_MS = 300_000
-    tmo = int(timeout_ms if timeout_ms is not None
-              else max(_AGENTIC_FLOOR_MS, int(result.timeout_s * 1000)))
+    # Do NOT bake a timeout into a generated config. `result.timeout_s` is the DISCOVERY timeout —
+    # how long we were willing to wait while working out the contract — and says nothing about how
+    # long the target takes under assessment; pinning it is what made a slow target fail every
+    # probe. But pinning the runtime default instead is no better: any value written here
+    # permanently overrides $ASCEND_TARGET_TIMEOUT_MS for this config, disabling the very knob that
+    # exists to tune it. So emit `timeout_ms` only when the operator asked for a specific ceiling,
+    # and otherwise leave it out and let the runtime default (and its env override) apply.
+    tmo = int(timeout_ms) if timeout_ms is not None else None
 
     if result.transport in ("sse", "ndjson"):
         parts = urlsplit(result.endpoint)
@@ -1561,6 +1557,8 @@ def build_config(result: ProbeResult, *, timeout_ms: Optional[int] = None) -> Di
         if result.response_path:
             cfg["response_path"] = result.response_path
 
+    if cfg.get("timeout_ms") is None:
+        cfg.pop("timeout_ms", None)      # absent => the runtime default and its env knob apply
     if headers:
         cfg["headers"] = headers
     secretish = [k for k in headers
