@@ -4897,7 +4897,14 @@ def _upgrade_sse_shape(cfg, body, args, V):
     upgraded.update({
         "adapter": "sse_stream",
         "base_url": f"{parts.scheme}://{parts.netloc}" if parts.netloc else endpoint,
-        "chat_path": parts.path or "/",
+        # Keep the query string, exactly as probe.build_config does (probe.py:1511). Dropping it
+        # here was wrong twice over: for targets where the query is REQUIRED — Azure OpenAI's
+        # `?api-version=`, Vertex's `?alt=sse` — the upgraded config called a URL the target does
+        # not serve, so the re-validation failed and the streaming upgrade silently never applied,
+        # leaving a direct_api config that hands the scorer raw frames. And where the query was
+        # optional, the stored endpoint no longer matched what the next run derived, so an ordinary
+        # re-run looked like a different target and forked a sibling config.
+        "chat_path": (f"{parts.path}?{parts.query}" if parts.query else (parts.path or "/")),
         "request_template": cfg.get("body") or {"message": "{{PROMPT}}"},
         "stream": stream,
     })

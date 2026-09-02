@@ -21,6 +21,15 @@ All notable changes to the Ascend CLI. Newest first. Format follows
   adapter scrubs the URL before logging or reporting it.
 
 ### Fixed
+- **A streaming target with a query string no longer loses it, or forks a config on every run.**
+  Promoting a config to `sse_stream` split the endpoint into `base_url` + `chat_path` and dropped
+  the query, while the probe path deliberately keeps it. Where the query is *required* — Azure
+  OpenAI's `?api-version=`, Vertex's `?alt=sse` — the upgraded config called a URL the target does
+  not serve, so the re-validation failed and the streaming upgrade silently never applied, leaving
+  a `direct_api` config that hands the scorer raw `data:` frames. Where it was optional, the stored
+  endpoint no longer matched what the next run derived, so an ordinary re-run looked like a
+  different target: the freshly captured credential was written to `<name>-2` while `--config
+  <name>` kept serving the expired one.
 - **A second bot on the same host no longer destroys the first one's config.** The config name is
   derived from the URL's *host*, so two endpoints on one host (`https://h/chat` and
   `https://h/v1/chat`) derived the same filename and the second run overwrote the first — including
