@@ -36,7 +36,7 @@ Optional config keys:
   bypass_user    - true → agent runs as its configured user; false → as token holder (default true)
   region         - optional x-salesforce-region header value (e.g. "us-west-2")
   end_session    - DELETE the session after each prompt (default true)
-  timeout_ms     - per-request timeout in ms (default: adapters.base.resolve_timeout_s / $ASCEND_TARGET_TIMEOUT_MS, and bounded by the bridge's per-probe window).
+  timeout_ms     - per-request timeout in ms (optional; otherwise derived from the platform's per-probe window)
   token_ttl_s    - safety window before re-minting the cached token (default 5400 = 90 min)
 
 Setup requirements on the Salesforce side (see configs/example-agentforce.json):

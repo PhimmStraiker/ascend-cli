@@ -147,7 +147,7 @@ class TestFullEndpointFirstTry:
         # No timeout is pinned. The probe's own timeout is how long we waited while working out the
         # contract; it says nothing about how long the target takes under assessment. Pinning the
         # discovery value made slow targets fail every probe, and pinning the runtime default
-        # instead would permanently override $ASCEND_TARGET_TIMEOUT_MS for this config. Absent means
+        # instead would permanently override the derived per-probe timeout for this config. Absent means
         # the runtime default, and its env override, apply.
         assert "timeout_ms" not in cfg
         assert cfg["_probe"]["verified_answer"].startswith("Sure")
