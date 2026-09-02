@@ -821,7 +821,7 @@ lease probes and relay them to a target via an adapter (see `bridge start --fore
 | `--app` | `APP` | — | resolve the bridge key from the local key store for this app |
 | `--consumer` | `CONSUMER` | — | bridge consumer id (parallel bridges MUST differ; auto per app) |
 | `--log-file` | `LOG_FILE` | — | write bridge logs here instead of stderr |
-| `--status-file` | `STATUS_FILE` | — | publish heartbeat+stats JSON here (used by `ascend bridge`) |
+| `--status-file` | `STATUS_FILE` | — | force heartbeat+stats publishing for a relay that cannot be resolved to an app id (supervised children pass this; when the app IS known the heartbeat is published under it automatically) |
 | `--qpm` | `QPM` | — | queries per minute against the target |
 | `--max-workers` | `MAX_WORKERS` | — | concurrency (auto: 1 for stateful targets) |
 | `--capture` | `CAPTURE` | — | jsonl file to record probe/result envelopes |

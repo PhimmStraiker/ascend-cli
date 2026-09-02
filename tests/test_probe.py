@@ -144,8 +144,17 @@ class TestFullEndpointFirstTry:
         assert cfg["method"] == "POST"
         assert cfg["body"] == {"message": probe.PROMPT_TOKEN}
         assert cfg["response_path"] == "reply"
-        assert cfg["timeout_ms"] >= 10_000
+        # No timeout is pinned. The probe's own timeout is how long we waited while working out the
+        # contract; it says nothing about how long the target takes under assessment. Pinning the
+        # discovery value made slow targets fail every probe, and pinning the runtime default
+        # instead would permanently override $ASCEND_TARGET_TIMEOUT_MS for this config. Absent means
+        # the runtime default, and its env override, apply.
+        assert "timeout_ms" not in cfg
         assert cfg["_probe"]["verified_answer"].startswith("Sure")
+
+    def test_build_config_pins_a_timeout_only_when_asked(self, monkeypatch):
+        r, _ = run_probe(monkeypatch, self._handler(), self.URL)
+        assert build_config(r, timeout_ms=45_000)["timeout_ms"] == 45_000
 
     def test_evidence_feeds_classify_evidence_and_yields_a_config(self, monkeypatch):
         r, _ = run_probe(monkeypatch, self._handler(), self.URL)
