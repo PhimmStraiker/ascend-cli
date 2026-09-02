@@ -19,7 +19,7 @@ Config keys:
   snippet_id        - Optional x-amz-snippet-id header value
   reuse_session     - Reuse existing session across prompts (default: false)
   greeting_wait_ms  - Time to wait for bot greeting after session create (default: 3000)
-  timeout_ms        - HTTP request timeout (default: adapters.base.resolve_timeout_s / $ASCEND_TARGET_TIMEOUT_MS, and bounded by the bridge's per-probe window)
+  timeout_ms        - HTTP request timeout (optional; otherwise derived from the platform's per-probe window)
   poll_interval_ms  - Transcript polling interval (default: 1500)
   poll_timeout_ms   - Max time to wait for bot response (default: 30000)
 

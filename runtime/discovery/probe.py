@@ -1497,7 +1497,7 @@ def build_config(result: ProbeResult, *, timeout_ms: Optional[int] = None) -> Di
     # how long we were willing to wait while working out the contract — and says nothing about how
     # long the target takes under assessment; pinning it is what made a slow target fail every
     # probe. But pinning the runtime default instead is no better: any value written here
-    # permanently overrides $ASCEND_TARGET_TIMEOUT_MS for this config, disabling the very knob that
+    # permanently overrides the derived per-probe timeout for this config, disabling the knob that
     # exists to tune it. So emit `timeout_ms` only when the operator asked for a specific ceiling,
     # and otherwise leave it out and let the runtime default (and its env override) apply.
     tmo = int(timeout_ms) if timeout_ms is not None else None
