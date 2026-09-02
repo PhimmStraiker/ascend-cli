@@ -7,6 +7,20 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ## [Unreleased]
 
+### Added
+- **`ascend target` — one noun for the thing you actually assess.** A target used to be spread
+  across an adapter config, an application record, a stored key and a purpose string, and you had
+  to hold all four in your head and keep them in sync. `target add | list | show | check | rm` is
+  now the everyday surface: `show` puts everything bound to a target in one place, `check`
+  re-proves it against its live endpoint and times it, and `list` says which are registered and
+  which are serving. `app`, `adapter` and `keys` are unchanged underneath and still fully
+  supported — nothing was removed or renamed.
+- **`target add <thing>` works out what you gave it.** A URL, a request copied out of devtools, an
+  exported browser session, or a saved config — it detects which and onboards from it. Choosing
+  between five mutually-exclusive source flags was a question people often could not answer; the
+  artifact itself says which it is. It stops once the target is registered and proven, because
+  spending an assessment is a separate decision (`--run` to continue straight into one).
+
 ### Changed
 - The skills carry a troubleshooting playbook and a per-target-pattern catalog: which adapter
   suits which target shape, and the way each one specifically fails. Most failures here present
