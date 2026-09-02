@@ -50,6 +50,47 @@ def resolve_ms(config: Optional[Dict[str, Any]], key: Optional[str],
     return default_ms
 
 
+# The platform gives a bridge a bounded window to return each probe result (iris probe_shadow's
+# BRIDGE_RESPONSE_TIMEOUT). Two things make this sharper than it looks:
+#   * the clock starts when the probe is QUEUED, not when the bridge starts calling the target, so a
+#     probe can spend much of its budget waiting to be leased;
+#   * blowing it surfaces as a synthetic 504 that is indistinguishable from a real target failure,
+#     which feeds the platform's target-health streak and auto-pauses the assessment.
+# So a target near this window does not merely run slowly — it produces a whole run of false
+# failures. Env-tunable so that when the platform window is raised, nothing here needs a code change.
+PLATFORM_PROBE_WINDOW_S = 120.0
+
+
+def platform_probe_window_s() -> float:
+    return resolve_ms(None, None, "ASCEND_PLATFORM_PROBE_WINDOW_MS",
+                      int(PLATFORM_PROBE_WINDOW_S * 1000)) / 1000.0
+
+
+def platform_window_warning(duration_ms: Any) -> Optional[str]:
+    """Warn when a MEASURED target reply time will not survive the platform's per-probe window.
+
+    Returns None when the target is comfortably inside it. This exists so the operator learns it
+    from one probe, instead of from an assessment full of failures that reads as a broken bridge.
+    """
+    try:
+        secs = float(duration_ms) / 1000.0
+    except (TypeError, ValueError):
+        return None
+    window = platform_probe_window_s()
+    if secs >= window:
+        return (f"this target replied in {secs:.0f}s, at or beyond the platform's ~{window:.0f}s "
+                f"per-probe window. Every probe will time out platform-side and be recorded as a "
+                f"failure, which auto-pauses the assessment — so the run would report no findings "
+                f"having measured nothing. Raising the adapter timeout does NOT help; the window "
+                f"has to be raised on the platform side first.")
+    if secs >= window * 0.6:
+        return (f"this target replied in {secs:.0f}s, against a ~{window:.0f}s platform per-probe "
+                f"window. The probe's clock starts when it is QUEUED, not when the bridge calls the "
+                f"target, so a probe that waits to be leased can still time out. Keep QPM and "
+                f"max_workers low, and treat sporadic failures as this, not as target refusals.")
+    return None
+
+
 def resolve_timeout_s(config: Optional[Dict[str, Any]]) -> float:
     """Seconds to wait for one target reply.
 
