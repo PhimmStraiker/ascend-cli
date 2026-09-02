@@ -46,6 +46,22 @@ ascend target add <url|curl|har> --save-as mybot --name "<display name>"
 ascend target check mybot
 ```
 
+**If the application already exists in the Console, adopt it — do not create a second one.**
+
+```
+ascend target add <url|curl|har> --app '<app name or aapp_id>' --save-as mybot --run
+```
+
+`--app` binds to the existing record and fetches its bridge key (the platform returns it on GET,
+with the local key store as a fallback), preserving the system prompt, controls, size and QPM that
+were set in the UI. Creating a fresh app instead strands all of that on an application nobody
+assesses.
+
+This is the shape of a stalled engagement: the app is configured, someone starts an assessment,
+it fails, and nobody can say "where the bridge is". There is nothing to locate — a bridge is a
+process the CLI runs. Diagnose with `ascend bridge ls` (is anything serving?) and
+`ascend target show <name>` (what is this bound to?), not by hunting for a bridge.
+
 Two behaviours to rely on rather than work around:
 
 - Re-running against the **same endpoint** refreshes the config in place, and any `_ascend` app

@@ -1,0 +1,48 @@
+{
+  "_comment": "COMPLETE TARGET DEFINITION for the hardest common shape: a bearer-authenticated agent that makes you create a conversation first, then streams the answer back as named SSE events. This file is the whole contract — transport, session, auth, credential lifecycle and rate. Nothing else is needed: `ascend adapter validate --config <name>` proves it, then `ascend target add --config <name> --app '<existing app>'` registers it. Copy it, change ONLY the ALL-CAPS values, delete the keys you do not need.",
+
+  "adapter": "sse_stream",
+
+  "_1_transport": "WHERE the target lives. chat_path may contain {{CONV}}, which is replaced with the id minted by the create step below.",
+  "base_url": "https://API-HOST.example.com",
+  "chat_path": "/v1/threads/{{CONV}}/turn/stream",
+  "method": "POST",
+
+  "_2_session": "Some agents refuse to answer until a conversation exists. `create` mints one; id_path is where the id sits in the create response. per_prompt=true gives every probe its own conversation, which both keeps the prompt out of a stale thread title and stops probes reading each other's turns as their own context. Delete this whole block for a stateless target.",
+  "create": {
+    "url": "/v1/threads",
+    "method": "POST",
+    "body": {"description": "{{PROMPT}}"},
+    "id_path": "id",
+    "id_mode": "server",
+    "per_prompt": true
+  },
+
+  "_3_request": "WHAT to send. Put {{PROMPT}} wherever the prompt belongs — the field name is the target's, not ours.",
+  "request_template": {"query": "{{PROMPT}}", "context": {}},
+  "headers": {"Content-Type": "application/json"},
+
+  "_4_response": "HOW to read the answer out of the stream. token_types names the events that carry the ANSWER — list only those. A stream that interleaves progress chatter (event: status, 'Analyzing query...') will otherwise prepend that chatter to every reply and the scorer sees it as the agent's words. token_types matches either an SSE `event:` name or a `type` field in the payload.",
+  "stream": {
+    "format": "sse",
+    "text_path": "text",
+    "token_types": ["response"],
+    "done_when": {"event": "end"},
+    "aggregate": "concat",
+    "idle_ms": 20000
+  },
+
+  "_5_auth": "HOW to authenticate. A HAR export STRIPS Authorization headers, so auth always has to be declared here or passed on the command line — it can never be captured. value_ref must be an env: reference; inline secrets are refused on purpose so a credential never lives in this file. Other modes: api_key (with \"name\" and \"in\": header|query), basic (username_ref/password_ref), cookie, custom.",
+  "auth": {
+    "type": "static",
+    "mode": "bearer",
+    "value_ref": "env:TARGET_TOKEN"
+  },
+
+  "_6_auth_lifecycle": "WHAT TO DO WHEN THE CREDENTIAL DIES MID-RUN. A portal JWT is often good for hours, and an assessment can outlive it; without this every probe after expiry 401s and it reads as the target refusing rather than as a stale token. `static` = never re-auth. `reauth_on_401` = redo the auth block on a 401. `refresh_on_ttl` = refresh before expiry. To have the CLI log in for you instead of pasting a token, replace the auth block above with a derived_multihop chain (see docs/ADAPTER_AUTHORING.md) or build with --login-url / --login-body / --token-path.",
+  "auth_lifecycle": {"type": "reauth_on_401"},
+
+  "_7_rate": "Match the rules of engagement, not the tool's default. max_workers 1 keeps probes strictly sequential, which a stateful target usually needs.",
+  "qpm": 2,
+  "max_workers": 1
+}

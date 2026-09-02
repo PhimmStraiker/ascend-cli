@@ -28,6 +28,9 @@ import re
 import statistics
 from typing import Any, Dict, List, Optional, Tuple
 
+_SSE_ID_FIELDS = {"turn_id", "trace_id", "response_id", "id", "state",
+                  "conversation_id", "message_id", "session_id"}
+
 LAYER_NAMES = ("transport", "auth", "auth_lifecycle", "session", "identity", "rate")
 
 # Confidence below this marks a layer "unresolved" (needs operator/agent input).
@@ -465,7 +468,14 @@ def _http_params(req: Dict[str, Any], resp: Dict[str, Any], stream: Optional[str
         "body": _body_template(req),
     }
     if stream:
+        # Derive the field mapping from the captured body rather than emitting a bare
+        # {"format": "sse"}. Without text_path/token_types the adapter collects no frames and
+        # the operator has to reverse-engineer the stream by hand — and the obvious guess
+        # (whichever field appears most often) is the progress chatter, not the answer.
         params["stream"] = {"format": stream}
+        hints = _sse_stream_hints(resp.get("raw_body") or "") if stream in ("sse", "ndjson") else {}
+        if hints.get("text_path"):
+            params["stream"].update({k: v for k, v in hints.items() if k != "format"})
     else:
         params["response_path"] = _guess_response_path(resp["json"], _REPLY_TEXT.get("v"))
     return params
@@ -863,6 +873,8 @@ def compose(classified: Dict[str, Any]) -> Dict[str, Any]:
             config.update({"base_url": base, "chat_path": path,
                            "request_template": tparams.get("body", {"message": "{{PROMPT}}"}),
                            "stream": tparams.get("stream", {"format": "sse"})})
+            if session.get("value") in ("create_session", "create_conversation"):
+                config.update(_sse_create_from_session(session, config.get("chat_path", "")))
         elif tp == "ndjson":
             adapter = "sse_stream"
             base, path = _split_base_path(endpoint)
@@ -870,6 +882,8 @@ def compose(classified: Dict[str, Any]) -> Dict[str, Any]:
             config.update({"base_url": base, "chat_path": path,
                            "request_template": tparams.get("body", {"message": "{{PROMPT}}"}),
                            "stream": stream})
+            if session.get("value") in ("create_session", "create_conversation"):
+                config.update(_sse_create_from_session(session, config.get("chat_path", "")))
         elif tp == "websocket":
             adapter = "websocket_direct"
             config.update({"ws_url": tparams.get("ws_url", ""),
@@ -950,6 +964,107 @@ def _lifecycle_block(lifecycle: Dict[str, Any]) -> Dict[str, Any]:
     block: Dict[str, Any] = {"type": lifecycle["value"]}
     block.update(lifecycle.get("params", {}))
     return block
+
+
+def _sse_stream_hints(body: str) -> Dict[str, Any]:
+    """Derive `stream` hints (text_path / token_types / done_when) from a captured SSE body.
+
+    Event-AWARE on purpose. These streams interleave the answer with progress chatter, and the
+    two are told apart by the SSE ``event:`` name, not by a field inside the payload:
+
+        event: status     data: {"message": "Analyzing query..."}       <- progress
+        event: response   data: {"text": "the actual answer ..."}       <- the answer
+        event: end        data: {...}                                   <- terminator
+
+    Counting payload fields alone picks the field that appears MOST, which on a real stream is
+    the progress chatter (three status frames beat two answer frames). A config built that way
+    validates green and then feeds the scorer "Analyzing query... Searching resources..." for
+    every probe — answered, complete, and measuring nothing. So the answer event is chosen by the
+    volume of TEXT it carries, not by how often it fires.
+    """
+    if not body or "data:" not in body:
+        return {}
+    events: Dict[str, Dict[str, int]] = {}
+    order: List[str] = []
+    cur = None
+    for line in str(body).splitlines():
+        line = line.strip()
+        if line.startswith("event:"):
+            cur = line.split(":", 1)[1].strip()
+            if cur and cur not in order:
+                order.append(cur)
+        elif line.startswith("data:"):
+            raw = line.split(":", 1)[1].strip()
+            try:
+                obj = json.loads(raw)
+            except Exception:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            name = cur or "_"
+            bucket = events.setdefault(name, {})
+            for k, v in obj.items():
+                if isinstance(v, str) and v.strip() and k not in _SSE_ID_FIELDS:
+                    bucket[k] = bucket.get(k, 0) + len(v)
+    if not events:
+        return {}
+    # the (event, field) pair carrying the most text is the answer
+    best = None
+    for ev, fields in events.items():
+        for field, total in fields.items():
+            if best is None or total > best[2]:
+                best = (ev, field, total)
+    if not best:
+        return {}
+    ev, field, _ = best
+    hints: Dict[str, Any] = {"format": "sse", "text_path": field}
+    if ev != "_":
+        hints["token_types"] = [ev]
+        for term in ("end", "done", "complete", "turn.done", "stream.end"):
+            if term in events or term in order:
+                hints["done_when"] = {"event": term}
+                break
+    return hints
+
+
+def _sse_create_from_session(session: Dict[str, Any], chat_path: str) -> Dict[str, Any]:
+    """Turn a detected create-then-stream session into `sse_stream`'s `create` block.
+
+    compose() picks ONE branch by transport, and the `sse` branch never consulted the session
+    layer — only `direct_api` got a "session upgrade". So a create-then-stream target (create a
+    thread, then stream the turn) was composed as a plain SSE POST to the captured path, which
+    still contains the conversation id from the capture. Every probe then posted into that one
+    dead conversation from whenever the evidence was recorded, and the create step vanished even
+    though the classifier had detected it at 0.8 confidence.
+    """
+    p = session.get("params", {}) or {}
+    create_req = p.get("create_req") or {}
+    url = create_req.get("endpoint") or p.get("session_endpoint") or ""
+    if not url:
+        return {}
+    out: Dict[str, Any] = {"create": {
+        "url": url,
+        "method": create_req.get("method", "POST"),
+        "body": create_req.get("body") or {},
+        "id_path": p.get("id_field", "id"),
+        "id_mode": "server",
+        # A fresh conversation per probe: the prompt is frequently part of the CREATE call too
+        # (a thread named after the question), and reusing one conversation would both stale that
+        # and let probes read each other's turns as their own context.
+        "per_prompt": True,
+    }}
+    # Replace the captured conversation id in the chat path with {{CONV}}, which sse_stream
+    # substitutes per prompt. The send-url template tells us where the id sits.
+    tmpl, marker = p.get("send_url_template") or "", "{{SESSION_ID}}"
+    if tmpl and marker in tmpl and chat_path:
+        from urllib.parse import urlsplit
+        prefix = urlsplit(tmpl.split(marker)[0]).path
+        if prefix and chat_path.startswith(prefix):
+            rest = chat_path[len(prefix):]
+            seg, _, suffix = rest.partition("/")
+            if seg and seg != "{{CONV}}":
+                out["chat_path"] = prefix + "{{CONV}}" + (("/" + suffix) if suffix else "")
+    return out
 
 
 def _session_api_from_session(session: Dict[str, Any], tparams: Dict[str, Any]) -> Dict[str, Any]:
