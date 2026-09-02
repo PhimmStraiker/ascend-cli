@@ -395,3 +395,44 @@ class TestStdoutContract:
         assert ESC not in r.stdout
         r2 = self._run("--json", "doctor", env={"ASCEND_FORCE_COLOR": "1", "NO_COLOR": ""})
         assert ESC not in r2.stdout
+
+
+# ---- 8. the two pre-existing bugs this work had to fix first ----------------------------------
+class TestPaddingBugsFixedBeforeColour:
+    """Both of these were live before any colour was added, and both are the kind of bug colour
+    would have been blamed for."""
+
+    @pytest.mark.parametrize("depth_env", [{"NO_COLOR": "1"}, {"ASCEND_COLOR_DEPTH": "24"}])
+    def test_bar_pads_to_a_visible_cell_width(self, depth_env, monkeypatch):
+        """`f"{bar(...):11}"` measures escape BYTES, so the PASS/FAIL column was under-padded
+        by one whenever colour was on. bar() pads internally now."""
+        for k, v in depth_env.items():
+            monkeypatch.setenv(k, v)
+        if "ASCEND_COLOR_DEPTH" in depth_env:
+            monkeypatch.delenv("NO_COLOR", raising=False)
+            monkeypatch.setenv("ASCEND_FORCE_COLOR", "1")
+        assert ui.vwidth(ui.bar(7, 3, cell=11)) == 11
+        assert ui.vwidth(ui.bar(0, 0, cell=11)) == 11, "the empty case must pad too"
+
+    def test_the_reports_caller_no_longer_re_pads_the_bar(self):
+        src = (REPO / "shells" / "cli" / "ascend.py").read_text()
+        assert "{pf:11}" not in src, "re-padding a coloured bar silently does nothing"
+        assert "cell=11" in src
+
+    def test_watch_many_counts_physical_lines_not_buffer_entries(self):
+        """One buf entry starts with "\\n", so `printed = len(buf)` under-counted by one and the
+        cursor-up moved too few lines: the table walked down the screen every tick."""
+        src = (REPO / "shells" / "cli" / "ascend.py").read_text()
+        # Comment lines are stripped: the fix is explained in a comment that necessarily quotes
+        # the old expression, and a naive substring check trips on its own documentation.
+        code = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
+        assert "printed = len(lines)" in code
+        assert "printed = len(buf)" not in code
+
+    def test_watch_many_erases_with_a_terminal_escape_not_byte_padding(self):
+        """\\033[K clears to end of line regardless of what the line contains; padding to 118
+        with f"{l:<118}" measures bytes and breaks the moment a line carries colour."""
+        src = (REPO / "shells" / "cli" / "ascend.py").read_text()
+        block = src[src.index("repaint in place"):]
+        block = block[:block.index("printed = len(lines)")]
+        assert "\\033[K" in block

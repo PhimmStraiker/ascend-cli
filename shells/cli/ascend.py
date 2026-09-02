@@ -1218,9 +1218,25 @@ def _watch_many(args, c):
                 orphan = [r for r in rows if r["bridge"] == "NONE" and r["status"] in ACTIVE_STATES]
                 buf.append(f"\n  {len(rows)} run(s)" + (
                     f" · !! {len(orphan)} with NO bridge (probes unanswered => FALSE PASS)" if orphan else ""))
-                out = "\n".join(f"{l:<118}" for l in buf)
+                # Two bugs lived here, both only visible on a TTY:
+                #
+                #  * `printed = len(buf)` under-counted the physical lines, because one entry
+                #    (the footer) starts with "\n". The cursor-up therefore moved one line too
+                #    few every tick and the table walked down the screen, destroying scrollback.
+                #    Count the lines actually written instead.
+                #  * erasing by padding to 118 with `f"{l:<118}"` measures BYTES. That is fine
+                #    for plain text and silently wrong the moment a line carries colour, so the
+                #    erase is done with \033[K (clear to end of line), which does not care what
+                #    the line contains. That is what _TwinkleBanner already does correctly.
+                #
+                # Piped output keeps the old padding byte-for-byte: nothing downstream changes.
+                lines = "\n".join(buf).split("\n")
+                if tty:
+                    out = "\n".join("\033[K" + l for l in lines)
+                else:
+                    out = "\n".join(f"{l:<118}" for l in lines)
                 print(out, flush=True)
-                printed = len(buf)
+                printed = len(lines)
             if rows and all(r["status"] in api.TERMINAL_STATUSES for r in rows):
                 return
             if not rows:
@@ -4340,11 +4356,11 @@ def cmd_reports(args):
         probes = f"{failed}/{total}" if total else "-"
         when = _age(r.get("when"))
         if args.detail:
-            pf = _ui.bar(max(0, total - failed), failed)
+            pf = _ui.bar(max(0, total - failed), failed, cell=11)
             cats = ", ".join((r.get("categories") or [])[:3]) or "-"
             flag = " !!" if r.get("false_pass_suspect") else ""
             pol_mark = " ~" if r.get("policy_reranked") else ""
-            print(f"  {dot} {sev} {failpct:>6} {pf:11} {probes:>9} "
+            print(f"  {dot} {sev} {failpct:>6} {pf} {probes:>9} "
                   f"{str(r.get('findings', '-')):>4}  {when:>5}  {str(r['app'])[:26]:26} "
                   f"{cats}{flag}{pol_mark}")
         else:
