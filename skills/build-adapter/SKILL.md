@@ -146,6 +146,22 @@ then build an adapter against that API exactly as for any other HTTP target. Mob
 backends are also the most likely place to need Layer 3 above: their tokens are usually
 short-lived and refresh-token based.
 
+**Ask for the API contract before you ask for a device.** The app is only a client; the API behind
+it is reachable without it. One example request — a cURL, a Postman entry, an OpenAPI spec — plus
+the auth scheme gets you to `--api` / `--curl` and skips device capture entirely. This is almost
+always faster than arranging a proxied handset, and it is the same surface the app talks to.
+
+If you must capture from the device, know the three walls before you promise a date:
+
+| Wall | What you see | What it needs |
+|---|---|---|
+| CA not trusted | nothing decrypts | iOS: install the profile **and** enable it under Certificate Trust Settings. Both steps. |
+| Android 7+ (API 24+) | browser traffic decrypts, app traffic does not | apps ignore user-installed CAs. Needs the CA in the **system** store (emulator/rooted) or a debug build whose `network_security_config` trusts user CAs. |
+| **Certificate pinning** | app shows a network error; proxy logs a TLS handshake failure | **No proxy configuration fixes this** and no adapter source changes it — the app rejects the connection before anything is recorded. Needs a build with pinning disabled (ask the app team), or a runtime bypass (Frida/objection) which is invasive, breaks on updates, and usually requires written approval. |
+
+Do not spend days on a pinning bypass. Escalate it as an app-team dependency and pursue the API
+contract in parallel — that is the path that actually unblocks the engagement.
+
 ## Which adapter, and how each one bites
 
 `adapter build` picks this for you from evidence. Read this when the pick looks wrong, when
@@ -246,6 +262,35 @@ ascend adapter validate --config <config> --json
 ```
 Green (both replay and fresh probe match the observed answer) → the config is
 shippable. Anything else → not done.
+
+**Green is not enough on a streaming target — read the answer.** A 200 with a non-empty body is
+indistinguishable from success, so a streaming target described as `direct_api` passes this gate
+while its "answer" is the raw wire frames (`data: {"type": "text.delta", …}`). That config then
+scores protocol noise for the whole assessment: the run completes, every probe is answered, and
+nothing was measured. Check two things before you trust a green:
+
+- the reply is the agent's **words**, not JSON frames or a `data:` prefix
+- for a streaming target the config has `adapter: sse_stream` and a `stream` block naming
+  `text_path` / `token_types` — not `response_path`
+
+The CLI now detects this and re-validates as `sse_stream` automatically on every source, but the
+check is cheap and it is the difference between a pass and a false pass.
+
+**Name the config yourself.** Which flag depends on the command:
+
+| Command | Flag | Where it writes |
+|---|---|---|
+| `adapter build`, `map`, `discover` | `--out <name>` | bare name → the config dir; `./name.json` or `dir/name` → exactly there, `.json` always appended |
+| `target add`, `onboard` | `--save-as <name>` | the config dir, under the name you chose |
+
+Left to itself the name is derived from the URL's host, so you get `myhost-com` or
+`127-0-0-1-8791` and have to read it back out of stderr before you can pass `--config`.
+
+Re-running against the **same** endpoint refreshes the config in place and carries forward its
+`_ascend` app binding, so re-deriving does not unbind the target. A **different** endpoint under
+an already-used name is saved as `<name>-2` instead of overwriting, and both are named in the
+output. When the endpoint cannot be read from a config at all (`bedrock` carries only a region,
+`session_poll` carries no URL), a re-run is treated as a refresh — never as a new target.
 
 > Fallback when the `validate` verb is a scaffold in your build: validate by a live
 > single-probe relay. Create a throwaway thin app, start the runtime against your
