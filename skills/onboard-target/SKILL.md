@@ -37,6 +37,27 @@ built on an unvalidated config waste the whole run.
 Output of this step: a config name (e.g. `mybot`) and its adapter type (a
 transport or preset from `ascend adapter list`).
 
+**Always pass `--save-as <name>`.** Left to itself the config name is derived from the URL's host,
+so you get `myhost-com` or `127-0-0-1-8791` and then have to scrape it back out of stderr to know
+what to hand `--config`. Naming it makes every later step deterministic:
+
+```
+ascend target add <url|curl|har> --save-as mybot --name "<display name>"
+ascend target check mybot
+```
+
+Two behaviours to rely on rather than work around:
+
+- Re-running against the **same endpoint** refreshes the config in place, and any `_ascend` app
+  binding on it is carried forward — so re-deriving a config does not unbind the target from its
+  application.
+- A **different** endpoint under an already-used name is *not* overwritten; it is saved as
+  `<name>-2` and both are named in the output. If you meant to replace it, pass `--save-as` with
+  that exact name, which overwrites deliberately.
+- `ascend target show <name>` prints which config, adapter, endpoint and key a target is bound to.
+  Use it to confirm state instead of inferring it; if the config no longer resolves it says so
+  rather than failing, and a missing config is the usual reason no bridge can start.
+
 ### 2. Pick the starting controls
 Keep the first run tight — validate transport before spending a big control
 budget. List and validate a small, relevant set (see **recon** for mapping

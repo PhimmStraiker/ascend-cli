@@ -57,6 +57,42 @@ def config_dirs() -> List[Path]:
     return out
 
 
+def bundled_config_dir() -> Path:
+    """The examples that ship with the tool. Readable, never a write target."""
+    return Path(getattr(sys, "_MEIPASS", _repo_root())) / "configs"
+
+
+def writable_config_dirs() -> List[Path]:
+    """Directories a config may be WRITTEN to.
+
+    Reads search wider than writes on purpose — the cwd, and the bundled examples. Redirecting a
+    write into that wider set would edit a stray JSON in whatever directory the operator happened
+    to be in, or, in a PyInstaller build, a temp dir that is deleted when the process exits.
+
+    Only a FROZEN build's unpacked dir is excluded. In a source checkout the "bundled" dir is the
+    repo's own `configs/`, which is exactly where `config_dir()` writes, so excluding it would
+    make an ordinary in-place update look like a new file — and would silently disable carrying
+    an existing config's app binding forward.
+    """
+    out: List[Path] = list(config_dirs())
+    if getattr(sys, "_MEIPASS", None):
+        frozen = bundled_config_dir()
+        try:
+            fres = frozen.resolve()
+        except Exception:
+            fres = frozen
+        keep = []
+        for d in out:
+            try:
+                if d.resolve() == fres:
+                    continue
+            except Exception:
+                pass
+            keep.append(d)
+        out = keep
+    return out
+
+
 def config_dir() -> Path:
     """The directory NEW configs are written to. env > ./configs > ~/.ascend/configs > bundled.
 

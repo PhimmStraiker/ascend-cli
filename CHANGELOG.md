@@ -20,21 +20,37 @@ All notable changes to the Ascend CLI. Newest first. Format follows
   posted to the platform inside a failing probe's error text. Redaction is value-aware now, and the
   adapter scrubs the URL before logging or reporting it.
 
-### Added
-- **`ascend target` — one noun for the thing you actually assess.** A target used to be spread
-  across an adapter config, an application record, a stored key and a purpose string, and you had
-  to hold all four in your head and keep them in sync. `target add | list | show | check | rm` is
-  now the everyday surface: `show` puts everything bound to a target in one place, `check`
-  re-proves it against its live endpoint and times it, and `list` says which are registered and
-  which are serving. `app`, `adapter` and `keys` are unchanged underneath and still fully
-  supported — nothing was removed or renamed.
-- **`target add <thing>` works out what you gave it.** A URL, a request copied out of devtools, an
-  exported browser session, or a saved config — it detects which and onboards from it. Choosing
-  between five mutually-exclusive source flags was a question people often could not answer; the
-  artifact itself says which it is. It stops once the target is registered and proven, because
-  spending an assessment is a separate decision (`--run` to continue straight into one).
-
 ### Fixed
+- **A second bot on the same host no longer destroys the first one's config.** The config name is
+  derived from the URL's *host*, so two endpoints on one host (`https://h/chat` and
+  `https://h/v1/chat`) derived the same filename and the second run overwrote the first — including
+  the `_ascend` app binding it carried — and exited 0 with a success message. A genuinely different
+  endpoint under an already-used name is now saved alongside as `<name>-2`, with both targets named
+  in the output.
+- **Re-deriving a config no longer unbinds it from its application.** A refresh rewrote the file
+  wholesale, discarding the `_ascend` binding written at registration, so the target silently lost
+  its app. Binding metadata is now carried forward.
+- **An update rewrites the file it resolved from**, instead of writing to whichever config
+  directory the current working directory happened to select — which produced a second copy
+  elsewhere rather than updating the one in use. Writes stay inside a real config directory: reads
+  deliberately search wider (the working directory, and a frozen build's unpacked examples), and a
+  write must never follow them there.
+
+- `--out ./mybot.json` now writes to the current directory. `Path("./x").parent == Path(".")`, so an
+  explicitly written path was indistinguishable from a bare name and the file appeared in the config
+  directory instead.
+- `--out out/mybot` now writes `out/mybot.json`. The extension was only added for bare names, so
+  this wrote a file literally named `mybot` — which nothing that looks for `*.json` can ever pick
+  up, including `adapter configs` and name-based `--config` resolution. (A config written outside a
+  config directory is still reached by path, not by bare name: `--config out/mybot.json`.)
+- **`--out` pointing at a directory is now a usage error** instead of silently writing a file named
+  after that directory (`--out out/` wrote `./out.json`), or crashing with a raw pathlib
+  `ValueError` after the probe and the live validation had already run (`--out ./`).
+- `--code` honours the directory in `--out` instead of reducing it to a stem and writing to the
+  config dir regardless — which is what the docs already promised. When the module lands outside
+  the config dir its pointer records an absolute path, because the `custom` adapter looks only in
+  the config dir and would otherwise fail to load a module that had just validated.
+
 - **A config now resolves the same way from every directory.** Config lookup picked the first
   configs *directory* that existed and then searched only inside it. Every checkout of this repo
   ships a `configs/` of examples, so running the CLI from a checkout made `~/.ascend/configs`
@@ -49,10 +65,54 @@ All notable changes to the Ascend CLI. Newest first. Format follows
   home, so nothing that resolves today resolves differently.
 
 ### Added
+- **`--save-as <name>` on `target add` / `onboard`.** The config name was derived from the URL and
+  never choosable, so it came out as `myhost-com` or `127-0-0-1-8791` and the only way to learn it
+  was to read a line of stderr — then you had to pass exactly that to `--config` later. Name it
+  once and every later step is deterministic.
+
+- **`ascend target` — one noun for the thing you actually assess.** A target used to be spread
+  across an adapter config, an application record, a stored key and a purpose string, and you had
+  to hold all four in your head and keep them in sync. `target add | list | show | check | rm` is
+  now the everyday surface: `show` puts everything bound to a target in one place, `check`
+  re-proves it against its live endpoint and times it, and `list` says which are registered and
+  which are serving. `app`, `adapter` and `keys` are unchanged underneath and still fully
+  supported — nothing was removed or renamed.
+- **`target add <thing>` works out what you gave it.** A URL, a request copied out of devtools, an
+  exported browser session, or a saved config — it detects which and onboards from it. Choosing
+  between five mutually-exclusive source flags was a question people often could not answer; the
+  artifact itself says which it is. It stops once the target is registered and proven, because
+  spending an assessment is a separate decision (`--run` to continue straight into one).
+
 - **The MCP shim can onboard a target.** It exposed nine tools that could run and read an
   assessment but could not *create* the thing being assessed, so an agent driving Ascend over MCP
   hit a wall at the first step and had to drop to a shell. `ascend_target_add` and
   `ascend_target_check` close that gap, and lead the tool list because an agent reads it top-down.
+
+- `adapter validate` reports the target's measured reply time and warns when it cannot survive the
+  platform's per-probe window — a config can be correct and the target still unassessable. Learned
+  from one probe instead of from a whole failed run.
+- `$ASCEND_PLATFORM_PROBE_WINDOW_MS` sets the per-probe window the CLI assumes the platform
+  enforces. It is the only timeout knob: the bridge's give-up point and the adapter's own timeout
+  are derived from it, so raising the platform-side window is a config change, not a release.
+
+### Changed
+- The skills carry a troubleshooting playbook and a per-target-pattern catalog: which adapter
+  suits which target shape, and the way each one specifically fails. Most failures here present
+  as a different failure than they are, so the playbook is ordered by symptom and starts with the
+  one number that settles it — `ANS` in `bridge ls`.
+- `ascend --help` leads with the one command that does the whole flow (`onboard`) and shows the
+  seven you use day to day, with the rest listed by name. 71 lines to 44. No command changed or
+  moved — every one still runs exactly as before.
+
+### Compatibility
+Nothing that works today changes. Specifically, and covered by tests:
+- a bare `--out <name>` still lands in the config dir, so `--config <name>` still finds it;
+- an absolute `--out` path is untouched;
+- re-running against the **same** endpoint still overwrites the config in place — that is an
+  intentional refresh and scripts depend on it. Only a *different* target under a used name is
+  moved aside, and only when the name was derived rather than given;
+- `--save-as` is explicit intent and overwrites deliberately;
+- no existing file is moved, renamed or migrated.
 
 ### Documentation
 - **The shipped docs and the architecture diagrams now describe the tool as it is.** They still
@@ -72,23 +132,6 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 - Documented the per-probe window (~110–120s, timed from when a probe is **queued**) and the fact
   that exceeding it returns a synthetic timeout indistinguishable from a target failure — the
   single most misread behaviour in this system, because it presents as a dropped bridge.
-
-### Changed
-- The skills carry a troubleshooting playbook and a per-target-pattern catalog: which adapter
-  suits which target shape, and the way each one specifically fails. Most failures here present
-  as a different failure than they are, so the playbook is ordered by symptom and starts with the
-  one number that settles it — `ANS` in `bridge ls`.
-- `ascend --help` leads with the one command that does the whole flow (`onboard`) and shows the
-  seven you use day to day, with the rest listed by name. 71 lines to 44. No command changed or
-  moved — every one still runs exactly as before.
-
-### Added
-- `adapter validate` reports the target's measured reply time and warns when it cannot survive the
-  platform's per-probe window — a config can be correct and the target still unassessable. Learned
-  from one probe instead of from a whole failed run.
-- `$ASCEND_PLATFORM_PROBE_WINDOW_MS` sets the per-probe window the CLI assumes the platform
-  enforces. It is the only timeout knob: the bridge's give-up point and the adapter's own timeout
-  are derived from it, so raising the platform-side window is a config change, not a release.
 
 ## [1.1.0] — 2026-09-01
 
