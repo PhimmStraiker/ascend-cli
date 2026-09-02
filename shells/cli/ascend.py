@@ -1837,6 +1837,45 @@ def _login_for_token(args):
     else:
         _die(f"login succeeded but no token at '{args.token_path}' and no session cookie was set.\n"
              f"  response: {r.text[:200]}", code=EXIT_ERROR)
+
+    # Record the login as a REPEATABLE recipe, not just the token it produced.
+    #
+    # This function used to return only the header, so the config it fed carried a static token.
+    # Its own docstring claimed it returned "an `auth` block so the bridge re-authenticates on its
+    # own during a long run" — the code never did. The consequence lands squarely on long
+    # assessments against portal-authenticated targets: the token expires mid-run, every probe
+    # after that 401s, and it presents as the target refusing rather than as an expired
+    # credential. Enough of those trip the platform's target-health check and auto-pause the run.
+    #
+    # `derived_multihop` + `reauth_on_401` is exactly this shape: re-issue the login, extract the
+    # token again, re-attach it. Values written as `env:NAME` become `inputs` references so the
+    # credential itself stays out of the config file.
+    inputs, step_json = {}, {}
+    for k, v in (body or {}).items():
+        if isinstance(v, str) and v.startswith("env:"):
+            var = re.sub(r"[^A-Z0-9]+", "_", k.upper()).strip("_") or "SECRET"
+            inputs[var] = v
+            step_json[k] = "{{%s}}" % var
+        else:
+            step_json[k] = v
+    step = {"method": "POST", "url": url, "json": step_json}
+    if tok:
+        step["extract"] = [{"var": "TOKEN", "path": str(args.token_path)}]
+        attach = {"headers": {"Authorization": "Bearer {{TOKEN}}"}}
+        lifecycle = "reauth_on_401"
+    else:
+        # A cookie-based login has nothing to extract: re-running the step re-establishes the
+        # session, and the rotation lifecycle is what re-runs it.
+        attach = {}
+        lifecycle = "cookie_rotation"
+    auth_block = {"type": "derived_multihop", "steps": [step], "attach": attach}
+    if inputs:
+        auth_block["inputs"] = inputs
+    args._login_auth = {"auth": auth_block, "auth_lifecycle": {"type": lifecycle}}
+    if not inputs and any(isinstance(v, str) and v for v in (body or {}).values()):
+        _warn("the login credentials are stored in the adapter config (0600). To keep them out of "
+              "the file, pass them as env references, e.g. "
+              "--login-body '{\"username\":\"env:BOT_USER\",\"password\":\"env:BOT_PASS\"}'")
     return headers
 
 
@@ -1928,6 +1967,21 @@ def resolve_out_path(out) -> Path:
     if p.suffix != ".json":
         p = p.with_name(p.name + ".json")
     return p
+
+
+def _apply_login_auth(cfg, args):
+    """Attach the repeatable login recipe recorded by `_login_for_token` to a built config.
+
+    Without this the login's token rides in a static header and dies with the token. With it the
+    config carries the login as an `auth` block plus a `reauth_on_401` lifecycle, so the seam in
+    call_target re-authenticates during the run instead of 401-ing every remaining probe.
+    """
+    block = getattr(args, "_login_auth", None)
+    if not block or not isinstance(cfg, dict):
+        return cfg
+    cfg["auth"] = block["auth"]
+    cfg["auth_lifecycle"] = block["auth_lifecycle"]
+    return cfg
 
 
 def _write_discovered(cfg, args):
@@ -2679,6 +2733,7 @@ def cmd_onboard(args):
             _ok(f"unresolved layers: {res['unresolved']}")
         cfg_path, cfg_name = _write_named_config(cfg, cfg_name, exact=named_exactly)
 
+    cfg = _apply_login_auth(cfg, args)
     adapter = args.adapter or cfg.get("adapter")
     if not adapter:
         _die("could not determine the adapter type; set 'adapter' in the config or pass --adapter")
@@ -2734,19 +2789,51 @@ def cmd_onboard(args):
                  "whose assessments cannot measure anything",
                  error_code="no_scorable_controls")
         controls = v["valid"]
-    app = c.create_app(api.build_thin_spec(
-        name=args.name or name, system_prompt=args.system_prompt or name,
-        control_ids=controls, assessment_size=args.size, qpm=args.qpm))
-    app_id, tc = app.get("id"), app.get("thin_api_key")
-    _ok(f"app {app_id}")
+    existing_ref = getattr(args, "app", None)
+    if existing_ref:
+        # Adopt an application that already exists in the Console instead of creating a second
+        # one. This is the common shape of a stalled engagement: the app was configured in the
+        # UI — system prompt, controls, QPM, size — and then "we hit bridge errors" and nobody
+        # knew where the bridge was, because a bridge is a PROCESS someone has to run. Creating a
+        # fresh app here would strand all of that configuration on an app nobody assesses.
+        app_id = existing_ref if str(existing_ref).startswith("aapp_") else _resolve_app(c, existing_ref)
+        app = c.get_app(app_id) or {}
+        tc = app.get("thin_api_key")
+        _ok(f"adopting existing app {app_id} ({app.get('name') or existing_ref})")
+        if (app.get("api_type") or "").lower() not in ("thin", "bridge", ""):
+            _warn(f"this app is type '{app.get('api_type')}', which Ascend calls directly — it "
+                  f"does not use a bridge, so nothing here needs to serve it")
+        if not tc:
+            # The key is normally returned on GET. When it is not, the local store is the only
+            # other place it can come from, since the platform shows it once at creation.
+            try:
+                import creds as C
+                tc = C.key_for(app_id)
+            except Exception:
+                tc = None
+        if not tc:
+            _die(f"no bridge key available for {app_id}.\n"
+                 f"  store the one you were given:  ascend keys add --app {app_id} --key tc-…\n"
+                 f"  then re-run this command",
+                 error_code="no_bridge_key")
+        if controls or args.system_prompt:
+            _ok("note: --controls / --system-prompt are ignored when adopting an existing app; "
+                "change them with `ascend app update`")
+    else:
+        app = c.create_app(api.build_thin_spec(
+            name=args.name or name, system_prompt=args.system_prompt or name,
+            control_ids=controls, assessment_size=args.size, qpm=args.qpm))
+        app_id, tc = app.get("id"), app.get("thin_api_key")
+        _ok(f"app {app_id}")
     _require_thin_key(tc, app_id)      # shown once; without it the bridge can never serve this app
     try:
         import creds as C
         # Record the FULL binding (app + config + adapter + key) so `bridge start --app X` can
         # launch this bridge later with nothing pasted by hand.
-        C.save(app_id, tc, app_name=args.name or name, config=cfg_name, adapter=adapter)
+        C.save(app_id, tc, app_name=(app.get("name") or args.name or name),
+               config=cfg_name, adapter=adapter)
         _ok(f"bridge key stored for {app_id} (0600, {C.store_path()}) — shown only once by the API")
-        _bind_config(cfg_name, app_id, args.name or name)
+        _bind_config(cfg_name, app_id, app.get("name") or args.name or name)
     except Exception as e:
         _ok(f"could not save the bridge key ({e}); copy it now: {tc}")
 
@@ -2754,7 +2841,7 @@ def cmd_onboard(args):
     # and its key is stored — which is everything needed to run it later. Whether to spend an
     # assessment now is a separate decision (`target add --run`, or `ascend assess run`).
     if getattr(args, "stop_after_register", False):
-        label = args.name or name
+        label = app.get("name") or args.name or name
         _out({"target": label, "app_id": app_id, "config": cfg_name, "adapter": adapter,
               "validated": True, "key_stored": True}, args,
              human=(f"\ntarget '{label}' is ready\n"
@@ -5395,6 +5482,10 @@ def _add_onboard_args(s, *, require_source):
     src.add_argument("--har", help="HAR file exported from your own browser (no browser needed here)")
     src.add_argument("--config", help="an existing config in the config dir (skip discovery)")
     s.add_argument("--name", help="application name in Ascend (default: derived from the URL)")
+    s.add_argument("--app", metavar="NAME|aapp_id",
+                   help="bind to an application that ALREADY exists in the Console instead of "
+                        "creating one — its bridge key is fetched for you. Use this when the app "
+                        "was set up in the UI and all that is missing is something serving it.")
     s.add_argument("--save-as", metavar="NAME",
                    help="name the adapter config (default: derived from the URL, e.g. "
                         "'myhost-com'). Use this and you always know what to pass to --config.")
