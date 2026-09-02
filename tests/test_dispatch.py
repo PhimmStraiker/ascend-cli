@@ -246,12 +246,14 @@ def test_load_config_empty_raises():
 
 
 def test_load_config_missing_file_raises(tmp_path, monkeypatch):
+    monkeypatch.delenv("ASCEND_CONFIG_DIR", raising=False)
     monkeypatch.setenv("ASCENDBRIDGE_CONFIG_DIR", str(tmp_path))
     with pytest.raises(dispatch.ConfigError):
         dispatch.load_config("does-not-exist")
 
 
 def test_load_config_reads_file(tmp_path, monkeypatch):
+    monkeypatch.delenv("ASCEND_CONFIG_DIR", raising=False)
     monkeypatch.setenv("ASCENDBRIDGE_CONFIG_DIR", str(tmp_path))
     (tmp_path / "acme.json").write_text('{"adapter": "direct_api", "endpoint": "http://x"}')
     cfg = dispatch.load_config("acme")

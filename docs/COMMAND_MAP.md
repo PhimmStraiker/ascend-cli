@@ -655,6 +655,7 @@ zero to a running assessment in one command (build -> validate -> register -> br
 | `--har` | `HAR` | — | HAR file exported from your own browser (no browser needed here) |
 | `--config` | `CONFIG` | — | an existing config in the config dir (skip discovery) |
 | `--name` | `NAME` | — | application name in Ascend (default: derived from the URL) |
+| `--app` | `NAME|aapp_id` | — | bind to an application that ALREADY exists in the Console instead of creating one — its bridge key is fetched for you. Use this when the app was set up in the UI and all that is missing is something serving it. |
 | `--save-as` | `NAME` | — | name the adapter config (default: derived from the URL, e.g. 'myhost-com'). Use this and you always know what to pass to --config. |
 | `--system-prompt` | `SYSTEM_PROMPT` | — | what the target is, for the assessment context |
 | `--controls` | `CONTROLS` | — | comma-separated control ids (validated before the run) |
@@ -867,6 +868,7 @@ onboard a target from a URL, a cURL/HAR file, or a saved config
 | `--har` | `HAR` | — | HAR file exported from your own browser (no browser needed here) |
 | `--config` | `CONFIG` | — | an existing config in the config dir (skip discovery) |
 | `--name` | `NAME` | — | application name in Ascend (default: derived from the URL) |
+| `--app` | `NAME|aapp_id` | — | bind to an application that ALREADY exists in the Console instead of creating one — its bridge key is fetched for you. Use this when the app was set up in the UI and all that is missing is something serving it. |
 | `--save-as` | `NAME` | — | name the adapter config (default: derived from the URL, e.g. 'myhost-com'). Use this and you always know what to pass to --config. |
 | `--system-prompt` | `SYSTEM_PROMPT` | — | what the target is, for the assessment context |
 | `--controls` | `CONTROLS` | — | comma-separated control ids (validated before the run) |
