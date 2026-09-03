@@ -1,0 +1,78 @@
+$ ascend results --help
+--- exit 0
+--- stdout
+usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] results
+       [-h] [--json] [--token TOKEN] [--base BASE] [--bridge-base BRIDGE_BASE] [--by SECTIONS]
+       [--values] [--all-values] [--turns] [--errors] [--matrix] [--limit N] [--md] [--no-catalog]
+       [--follow] [--verbose] [--interval INTERVAL] [--app APP] [--detail] [--per-app N]
+       [--min-sev {critical,high,medium,low,info,none}] [--since DAYS] [--sort {sev,fail,when}]
+       [--include-running] [--policy POLICY]
+       [file]
+
+Show results. One command, two sources.
+
+With NO file it reads the platform: your assessments as a table (severity, score, pass/fail). With a FILE it reads that file — a Console CSV export is rolled up by the platform's own taxonomy (category, control, data class) plus the evasion technique that worked; a saved transcript is rendered turn by turn. The route is sniffed from the file's contents, not its extension.
+
+positional arguments:
+  file                  a Console CSV export or a saved transcript. Omit it to see your
+                        assessments from the platform instead. (default: None)
+
+options:
+  -h, --help            show this help message and exit
+  --json                machine-readable JSON output (default: False)
+  --token TOKEN         Straiker PAT (s6r_pat_...) or JWT; else $STRAIKER_PAT (default: None)
+  --base BASE           v3 API base URL (default: https://api.prod.straiker.ai/api/v3)
+  --bridge-base BRIDGE_BASE
+                        Ascend lease-service base URL (where bridges fetch probes and post
+                        results) (default: https://ascendai-bridge.prod.straiker.ai)
+  --by SECTIONS         comma-separated rollups: category,evasion,control,risk,dataclass,combo
+                        (default: category,evasion,control). An unknown name is refused. (default:
+                        None)
+  --values              rank the concrete values the target produced, with provenance (default:
+                        False)
+  --all-values          with --values, also show values that came FROM THE PROMPT (the target
+                        repeating back what the attacker supplied — not a disclosure) (default:
+                        False)
+  --turns               print the failing turns (prompt/answer/why) (default: False)
+  --errors              list probes the target never answered (default: False)
+  --matrix              guardrail confusion matrix from the platform's own FP/FN flags (default:
+                        False)
+  --limit N             cap rows per section; 0 shows everything (default: per-section caps)
+                        (default: None)
+  --md                  emit Markdown instead of a table (default: False)
+  --no-catalog          skip the /ascend/controls fetch; roll up on raw ids (fully offline)
+                        (default: False)
+  --follow, -f          tail a transcript live as probes are answered (default: False)
+  --verbose, -v         show each response body (default: False)
+  --interval INTERVAL   seconds between polls when following (default: 2.0)
+  --app APP             only this app (name or aapp_ id); repeatable (default: None)
+  --detail              add probe and finding counts (one extra call per assessment) (default:
+                        False)
+  --per-app N           how many assessments to show per app (default: 1)
+  --min-sev {critical,high,medium,low,info,none}
+                        only this severity or worse. An assessment that finished but whose
+                        severity cannot be read is always shown, never filtered out. (default:
+                        None)
+  --since DAYS          only assessments newer than this, e.g. 30 or 30d (default: None)
+  --sort {sev,fail,when}
+  --include-running     also show unfinished assessments (default: False)
+  --policy POLICY       gate policy file (default ./ascend-policy.json or $ASCEND_POLICY)
+                        (default: None)
+
+from the platform (no file):
+  ascend results                                # every app's latest assessment
+  ascend results --app 'My Bot' --detail        # + probe and finding counts
+  ascend results --min-sev high --sort score
+
+from a file:
+  ascend results run.csv                        # failures by category/evasion/control
+  ascend results run.csv --values               # the data harvest
+  ascend results run.csv --turns --limit 5      # the failing turns themselves
+  ascend results run.csv --matrix               # guardrail confusion matrix
+  ascend results run.csv --md > findings.md     # for a report or PR comment
+  ascend results run.csv --json | jq .data.by_evasion
+  ascend results transcript.jsonl --follow      # live probe view
+
+units: PROBES, PASSED and FAILED are probe counts, not finding counts.
+Unanswered probes measured nothing and are never counted as passes.
+--- stderr

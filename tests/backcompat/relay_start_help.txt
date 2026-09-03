@@ -1,0 +1,40 @@
+$ ascend relay start --help
+--- exit 0
+--- stdout
+usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] bridge start
+       [-h] [--json] [--token TOKEN] [--base BASE] [--bridge-base BRIDGE_BASE] [--app APP]
+       [--all-running] [--config CONFIG] [--qpm QPM] [--qpm-total QPM_TOTAL]
+       [--max-workers MAX_WORKERS] [--wait-ms WAIT_MS] [--idle-timeout IDLE_TIMEOUT]
+       [--foreground]
+
+options:
+  -h, --help            show this help message and exit
+  --json                machine-readable JSON output (default: False)
+  --token TOKEN         Straiker PAT (s6r_pat_...) or JWT; else $STRAIKER_PAT (default: None)
+  --base BASE           v3 API base URL (default: https://api.prod.straiker.ai/api/v3)
+  --bridge-base BRIDGE_BASE
+                        Ascend lease-service base URL (where bridges fetch probes and post
+                        results) (default: https://ascendai-bridge.prod.straiker.ai)
+  --app APP             app name or aapp_ id (repeatable) (default: None)
+  --all-running         every app whose latest assessment is actively running (default: False)
+  --config CONFIG       override the bound config name for all targets (default: None)
+  --qpm QPM             per-bridge queries per minute (default: None)
+  --qpm-total QPM_TOTAL
+                        split this total across the started bridges (protects a shared target
+                        host) (default: None)
+  --max-workers MAX_WORKERS
+  --wait-ms WAIT_MS
+  --idle-timeout IDLE_TIMEOUT
+                        seconds a paused, already-probed bridge waits before self-stopping. 0
+                        never idle-stops (the default); the bridge stops when the run reaches a
+                        terminal state. $ASCEND_BRIDGE_IDLE_TIMEOUT sets this default for auto-
+                        managed runs. (default: None)
+  --foreground          run ONE bridge in this terminal (logs here, Ctrl-C stops it) instead of
+                        detaching — for debugging an adapter. Needs --config. (default: False)
+
+examples:
+  ascend bridge start --all-running        # serve every live assessment
+  ascend bridge start --app 'My Bot'       # one app (repeatable)
+  ascend bridge start --all-running --qpm-total 60
+  ascend bridge start --app 'My Bot' --config mybot --foreground
+      one bridge, in this terminal, logs on screen (debugging)

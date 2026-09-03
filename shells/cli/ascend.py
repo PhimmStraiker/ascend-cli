@@ -34,7 +34,7 @@ from configs import (config_dir, config_dirs, resolve_config_path,  # shared wit
 from reporting import analyze as _analyze, turns as _turns
 import ui as _ui  # noqa: E402  (runtime/ is on sys.path above)
 
-VERSION = "1.1.1"
+VERSION = "1.1.2"
 
 
 def _bundled_dir() -> Path:
@@ -417,6 +417,41 @@ def _spec_from_config(args, api):
     return out
 
 
+def _resolve_all_controls(c, args, ctrl):
+    """Return an explicit control id list, resolving the whole catalog when none was given.
+
+    The platform accepts exactly ONE shape for the control selection: `control_type: "custom"`
+    plus an explicit id list. `control_type: "all"` is rejected 400 ("the request was rejected by
+    the upstream service") and so is omitting the field, so "test everything" has to be spelled
+    out client-side.
+
+    This lives in one place because it did not, and that cost the release. `cmd_app_create` had
+    the resolution; `cmd_onboard` had `if controls:` with nothing in the else, so it sent
+    control_type "all" and 400'd 100% of the time whenever `--controls` was omitted -- which is
+    the default, and which is the exact command 1.1.2 makes the primary path. Two copies of one
+    rule is how that happens; there is now one copy and two callers.
+    """
+    if ctrl:
+        return ctrl
+    try:
+        raw = c.list_controls()
+        # the catalog comes back as {"object", "controls": [...], "categories": [...]}
+        rows = (raw.get("controls") if isinstance(raw, dict) else None) or _unwrap_list(raw)
+        ctrl = [r.get("id") for r in rows
+                if isinstance(r, dict) and r.get("id") and not r.get("deprecated")]
+    except Exception as e:
+        _die(f"no --controls given, and the control catalog could not be read "
+             f"({type(e).__name__}). The platform requires an explicit control set.\n"
+             f"  list them:  ascend controls list",
+             error_code="controls_unavailable")
+    if not ctrl:
+        _die("no --controls given and the control catalog came back empty — the platform "
+             "requires an explicit control set.\n  list them:  ascend controls list",
+             error_code="controls_unavailable")
+    _say(args, f"no --controls given — registering with all {len(ctrl)} catalog controls")
+    return ctrl
+
+
 def cmd_app_create(args):
     """Create an Ascend application of any of the four types the platform supports.
 
@@ -452,29 +487,7 @@ def cmd_app_create(args):
                  error_code="no_scorable_controls")
         ctrl = v["valid"] or ctrl
 
-    if not ctrl:
-        # The platform accepts exactly ONE shape for the control selection: `custom` plus an
-        # explicit id list. Verified live against v3: `control_type: "all"` is rejected 400
-        # ("rejected by the upstream service") and so is omitting the field. So "test everything"
-        # has to be spelled out. Resolve the catalog here rather than send a payload that can
-        # never succeed — `app create --type bridge` with no --controls used to fail 100% of the
-        # time with an error that named none of this.
-        try:
-            raw = c.list_controls()
-            # the catalog comes back as {"object", "controls": [...], "categories": [...]}
-            rows = (raw.get("controls") if isinstance(raw, dict) else None) or _unwrap_list(raw)
-            ctrl = [r.get("id") for r in rows
-                    if isinstance(r, dict) and r.get("id") and not r.get("deprecated")]
-        except Exception as e:
-            _die(f"no --controls given, and the control catalog could not be read "
-                 f"({type(e).__name__}). The platform requires an explicit control set.\n"
-                 f"  list them:  ascend controls list",
-                 error_code="controls_unavailable")
-        if not ctrl:
-            _die("no --controls given and the control catalog came back empty — the platform "
-                 "requires an explicit control set.\n  list them:  ascend controls list",
-                 error_code="controls_unavailable")
-        _say(args, f"no --controls given — registering with all {len(ctrl)} catalog controls")
+    ctrl = _resolve_all_controls(c, args, ctrl)
 
     sev = _parse_kv_pairs(getattr(args, "category_severity", None), "category-severity")
     if sev:
@@ -1118,7 +1131,7 @@ def cmd_assess_run(args):
     import api
     # --no-wait returns {app_id, assessment_id, status}; summarizing that prints a phantom
     # "risk ? score ? probes ?/?" header. Only summarize a real assessment payload.
-    human = (api.summarize_result(res)
+    human = (_verdict(res)
              if isinstance(res, dict) and res.get("category_summary") is not None else None)
     if isinstance(res, dict) and res.get("recovered"):
         print(f"note: {res.get('recovery_note')} — not re-created.", file=sys.stderr)
@@ -1218,9 +1231,25 @@ def _watch_many(args, c):
                 orphan = [r for r in rows if r["bridge"] == "NONE" and r["status"] in ACTIVE_STATES]
                 buf.append(f"\n  {len(rows)} run(s)" + (
                     f" · !! {len(orphan)} with NO bridge (probes unanswered => FALSE PASS)" if orphan else ""))
-                out = "\n".join(f"{l:<118}" for l in buf)
+                # Two bugs lived here, both only visible on a TTY:
+                #
+                #  * `printed = len(buf)` under-counted the physical lines, because one entry
+                #    (the footer) starts with "\n". The cursor-up therefore moved one line too
+                #    few every tick and the table walked down the screen, destroying scrollback.
+                #    Count the lines actually written instead.
+                #  * erasing by padding to 118 with `f"{l:<118}"` measures BYTES. That is fine
+                #    for plain text and silently wrong the moment a line carries colour, so the
+                #    erase is done with \033[K (clear to end of line), which does not care what
+                #    the line contains. That is what _TwinkleBanner already does correctly.
+                #
+                # Piped output keeps the old padding byte-for-byte: nothing downstream changes.
+                lines = "\n".join(buf).split("\n")
+                if tty:
+                    out = "\n".join("\033[K" + l for l in lines)
+                else:
+                    out = "\n".join(f"{l:<118}" for l in lines)
                 print(out, flush=True)
-                printed = len(buf)
+                printed = len(lines)
             if rows and all(r["status"] in api.TERMINAL_STATUSES for r in rows):
                 return
             if not rows:
@@ -1255,6 +1284,7 @@ def cmd_assess_watch(args):
         print(f"watching {aid}", file=sys.stderr)
     tty = sys.stdout.isatty() and not args.json
     last = None
+    _t0 = time.time()
     try:
         while True:
             a = c.get_assessment(appid, aid)
@@ -1264,19 +1294,31 @@ def cmd_assess_watch(args):
             else:
                 prog = a.get("progress")
                 pct = float(prog) * 100 if isinstance(prog, (int, float)) else 0.0
-                bar = "#" * int(pct / 5) + "." * (20 - int(pct / 5))
-                line = (f"[{bar}] {pct:5.1f}%  status={st}  "
-                        f"failed={a.get('failed', '-')}/{a.get('total', '-')}")
+                detail = (f"status={st}  "
+                          f"failed={a.get('failed', '-')}/{a.get('total', '-')}")
                 if tty:
-                    print("\r" + line + " " * 8, end="", flush=True)
-                elif line != last:
-                    print(line, flush=True)
-                last = line
+                    # A terminal gets the real bar. Elapsed time is only shown once there is
+                    # enough of it to mean something, the same >=3s rule Progress uses, so the
+                    # two never disagree about when a timer is worth reading.
+                    el = time.time() - _t0
+                    print("\r\033[K" + _ui.gradient_bar(
+                        float(prog) if isinstance(prog, (int, float)) else None,
+                        width=20, label=detail,
+                        eta=(f"{int(el)}s" if el >= 3 else "")),
+                        end="", flush=True)
+                else:
+                    # Piped output is byte-identical to before: this is what scripts and agents
+                    # read, and the visual work is for a human at a terminal.
+                    bar = "#" * int(pct / 5) + "." * (20 - int(pct / 5))
+                    line = f"[{bar}] {pct:5.1f}%  {detail}"
+                    if line != last:
+                        print(line, flush=True)
+                    last = line
             if st in api.TERMINAL_STATUSES:   # shared set: never hang on done/canceled
                 if tty:
                     print()
                 print("", file=sys.stderr)
-                _out(a, args, human=api.summarize_result(a, detail=args.detail))
+                _out(a, args, human=_verdict(a, detail=args.detail))
                 return
             if getattr(args, "once", False):
                 # One snapshot, then out — what `assess status` used to be. Reported through the
@@ -1318,7 +1360,7 @@ def cmd_assess_results(args):
     c = _client(args)
     a = c.get_assessment(_resolve_app(c, args.app), args.assessment)
     import api
-    human = api.summarize_result(a, detail=getattr(args, "detail", False))
+    human = _verdict(a, detail=getattr(args, "detail", False))
     warn = _false_pass_warning(a)
     if warn and not args.json:
         human = f"{human}\n\n{warn}"
@@ -2661,7 +2703,8 @@ def cmd_onboard(args):
     elif getattr(args, "curl", None):
         name = Path(args.curl).stem if args.curl != "-" else "target"
     else:
-        name = ((getattr(args, "api", None) or args.url or args.config or "target")
+        name = ((getattr(args, "api", None) or getattr(args, "ws", None) or args.url
+                 or args.config or "target")
                 .split("//")[-1].split("/")[0])
     # --save-as is the way to NAME the config. Without it the name is derived from the URL's
     # host, which produced things like `127-0-0-1-8791` and `myhost-com`: the one-command path
@@ -2701,6 +2744,20 @@ def cmd_onboard(args):
             f"{res.response_path or '(top-level)'}")
         cfg = build_config(res)
         cfg_path, cfg_name = _write_named_config(cfg, cfg_name, exact=named_exactly)
+    elif getattr(args, "ws", None):
+        _step(1, total, f"probing {args.ws}")
+        from runtime.discovery.probe import probe_ws, build_ws_config
+        auth_headers, _auth_query = _target_auth(args)
+        res = probe_ws(args.ws, prompt=args.prompt or "hello",
+                       headers=auth_headers or None,
+                       timeout_s=args.timeout or 30)
+        if not res.get("ok"):
+            _die(f"{res.get('diagnosis')}: {res.get('message')}\n  {res.get('hint','')}",
+                 code=EXIT_ERROR)
+        _ok(f"WS {res['ws_url']} · frames {res['frames_seen']} · answer at "
+            f"{res.get('response_path') or '(whole frame)'}")
+        cfg = build_ws_config(res)
+        cfg_path, cfg_name = _write_named_config(cfg, cfg_name, exact=named_exactly)
     elif getattr(args, "curl", None):
         _step(1, total, f"reading the request from {args.curl}")
         from runtime.discovery.importers import from_curl, CurlParseError
@@ -2732,6 +2789,19 @@ def cmd_onboard(args):
         if res.get("unresolved"):
             _ok(f"unresolved layers: {res['unresolved']}")
         cfg_path, cfg_name = _write_named_config(cfg, cfg_name, exact=named_exactly)
+
+    # Credentials are deliberately NOT baked into a config on disk, so say which ones were
+    # withheld. Dropping a header the target requires and staying quiet about it just moves the
+    # confusion: the config then 401s for no visible reason, which reads like a tool bug.
+    try:
+        _held = cfg.pop("_withheld_headers", None)
+        if _held:
+            _warn(args, f"withheld from the config (credential-shaped): {', '.join(_held)}")
+            _warn(args, "  re-supply with --header 'Name: value' or --bearer / --api-key, "
+                        "or set the value in the config yourself; the names are recorded, "
+                        "never the values.")
+    except Exception:
+        pass
 
     cfg = _apply_login_auth(cfg, args)
     adapter = args.adapter or cfg.get("adapter")
@@ -2789,6 +2859,10 @@ def cmd_onboard(args):
                  "whose assessments cannot measure anything",
                  error_code="no_scorable_controls")
         controls = v["valid"]
+    # Without this, `target add` with no --controls sent control_type "all" and the platform
+    # refused with a bare "the request was rejected by the upstream service" -- 100% of the time,
+    # on the default invocation of the command 1.1.2 makes primary.
+    controls = _resolve_all_controls(c, args, controls)
     existing_ref = getattr(args, "app", None)
     if existing_ref:
         # Adopt an application that already exists in the Console instead of creating a second
@@ -2887,7 +2961,7 @@ def cmd_onboard(args):
         final = c.poll_assessment(app_id, aid, interval=args.interval, timeout=args.timeout_assess,
                                   on_tick=lambda st, pr, a: _ok(f"status={st} progress={pr}"))
         print("", file=sys.stderr)
-        _out(final, args, human=api.summarize_result(final, detail=args.detail))
+        _out(final, args, human=_verdict(final, detail=args.detail))
     else:
         _out({"app_id": app_id, "assessment_id": aid, "config": cfg_name,
               "adapter": adapter}, args,
@@ -2933,6 +3007,11 @@ def _detect_source(thing):
     if s == "-":
         return "curl", s                                  # a request piped in on stdin
     low = s.lower()
+    if low.startswith(("ws://", "wss://")):
+        # A socket is probeable -- connect, send a frame, read one back -- but it used to fall
+        # past this check to the file test and die with "is not a URL, a file, or a known
+        # config". Sending it to --url was worse: that drives a real browser at a socket.
+        return "ws", s
     if low.startswith(("http://", "https://")):
         # A spec URL is unambiguous; anything else is treated as an endpoint, which is the cheap
         # probe. A page that needs a real browser is `--url`, and the error path says so.
@@ -2987,11 +3066,11 @@ def cmd_target_add(args):
                  error_code="spec_needs_build",
                  hint=(f"ascend adapter build --spec {src} --out mybot\n"
                        f"  then:  ascend target add mybot"))
-        if any(getattr(args, f, None) for f in ("api", "url", "curl", "har", "spec", "config")):
+        if any(getattr(args, f, None) for f in ("api", "ws", "url", "curl", "har", "spec", "config")):
             _die("give either a source argument or an explicit source flag, not both")
         setattr(args, flag, value)
         _say(args, f"detected {flag} source: {value}")
-    elif not any(getattr(args, f, None) for f in ("api", "url", "curl", "har", "spec", "config")):
+    elif not any(getattr(args, f, None) for f in ("api", "ws", "url", "curl", "har", "spec", "config")):
         _die("nothing to onboard: pass a URL, a cURL/HAR file, or a saved config",
              hint="ascend target add https://host/chat")
     # `--run` continues into the assessment; otherwise stop once the target is registered.
@@ -3045,7 +3124,8 @@ def cmd_target_list(args):
     print(f"  {'TARGET':28} {'ADAPTER':14} {'CONFIG':16} {'REGISTERED':11} BRIDGE")
     for r in rows:
         print(f"  {str(r['target'])[:28]:28} {str(r['adapter'] or '-')[:14]:14} "
-              f"{str(r['config'] or '-')[:16]:16} {r['registered']:11} {r['bridge']}")
+              f"{str(r['config'] or '-')[:16]:16} "
+              f"{_ui.state(r['registered'], width=11)} {_ui.state(r['bridge'])}")
     print(f"\n{len(rows)} target(s)")
 
 
@@ -3956,7 +4036,8 @@ def cmd_relay_ls(args):
                 secs = int(time.time() - r["started_at"])
                 up = f"{secs//3600}h{(secs%3600)//60:02d}m" if secs >= 3600 else f"{secs//60}m{secs%60:02d}s"
             mark = "*" if r["state"] == "serving" else " "
-            print(f"  {mark}{r['state']:8} {str(r.get('pid') or '-'):>6} {r['app_id']:26} "
+            print(f"  {mark}{_ui.state(r['state'], width=8)} "
+                  f"{str(r.get('pid') or '-'):>6} {r['app_id']:26} "
                   f"{str(r.get('config') or '-'):12} {str(st.get('answered', '-')):>5} "
                   f"{str(st.get('delivered', '-')):>5} {str(st.get('failed', '-')):>4} "
                   f"{str(st.get('lease_errors', '-')):>9} {str(st.get('submit_errors', '-')):>7} "
@@ -3979,18 +4060,23 @@ def cmd_relay_ls(args):
         print("  no bridges on this machine")
         print("  `ascend assess run` auto-starts one; or reconcile all:  ascend bridge sync")
     if orphans:
-        print("\n  !! NO BRIDGE — these bridge-based apps have a live assessment and nothing is")
-        print("     answering it. Unanswered probes are not findings, so the run will finish")
-        print("     looking CLEAN while measuring nothing (a FALSE PASS).")
+        # This is described above as the single most important thing this command does, and it
+        # used to render exactly like routine output. The tokens `NO BRIDGE`, `FALSE PASS` and
+        # `!!` stay inside the panel: the runbook and the docs tell people to look for them.
+        body = ["!! NO BRIDGE — these bridge-based apps have a live assessment and nothing is "
+                "answering it. Unanswered probes are not findings, so the run will finish "
+                "looking CLEAN while measuring nothing (a FALSE PASS).", ""]
         for o in orphans:
-            cfg = o.get("config")
-            print(f"     {o['app_name'] or o['app_id']}  assessment {o['assessment']} ({o['status']})")
-            if cfg:
-                print(f"       start it:  ascend bridge start --app {o['app_name']!r}")
+            body.append(f"{o['app_name'] or o['app_id']}  "
+                        f"assessment {o['assessment']} ({o['status']})")
+            if o.get("config"):
+                body.append(f"  start it:  ascend bridge start --app {o['app_name']!r}")
             else:
-                print(f"       no config/key bound yet — see:  ascend bridge start --help")
-        print("     (api / gcp / bedrock apps are NOT listed here: Ascend calls those targets")
-        print("      directly and they never need a local bridge.)")
+                body.append("  no config/key bound yet — see:  ascend bridge start --help")
+        print()
+        print(_ui.panel(body, title="NO BRIDGE", tone="alarm",
+                        hint="api / gcp / bedrock apps are not listed: Ascend calls those "
+                             "targets directly and they never need a local bridge."))
     # A silent alarm is worse than no alarm: the table looks reassuring either way, so the ONE
     # thing that must never happen quietly is the check failing to run.
     if check_error:
@@ -4340,11 +4426,11 @@ def cmd_reports(args):
         probes = f"{failed}/{total}" if total else "-"
         when = _age(r.get("when"))
         if args.detail:
-            pf = _ui.bar(max(0, total - failed), failed)
+            pf = _ui.bar(max(0, total - failed), failed, cell=11)
             cats = ", ".join((r.get("categories") or [])[:3]) or "-"
             flag = " !!" if r.get("false_pass_suspect") else ""
             pol_mark = " ~" if r.get("policy_reranked") else ""
-            print(f"  {dot} {sev} {failpct:>6} {pf:11} {probes:>9} "
+            print(f"  {dot} {sev} {failpct:>6} {pf} {probes:>9} "
                   f"{str(r.get('findings', '-')):>4}  {when:>5}  {str(r['app'])[:26]:26} "
                   f"{cats}{flag}{pol_mark}")
         else:
@@ -4569,20 +4655,32 @@ def cmd_status(args):
         return
 
     t = out["tenant"]
-    print(f"  tenant   {t['label'] if t else '(not pinned)'}")
-    print(f"  apps     {out['apps']['total']}  " +
-          " ".join(f"{k}={v}" for k, v in out["apps"]["by_type"].items()))
-    print(f"  keys     {out['keys']} stored")
     serving_n = sum(1 for r in out["bridges"] if r["state"] == "serving")
-    print(f"  bridges  {serving_n} serving"
-          + (f", {len(out['bridges']) - serving_n} not" if len(out["bridges"]) > serving_n else ""))
+    for _line in _ui.kv([
+        ("tenant", t["label"] if t else "(not pinned)"),
+        ("apps", f"{out['apps']['total']}  " +
+                 " ".join(f"{k}={v}" for k, v in out["apps"]["by_type"].items())),
+        ("keys", f"{out['keys']} stored"),
+        ("bridges", f"{serving_n} serving"
+                    + (f", {len(out['bridges']) - serving_n} not"
+                       if len(out["bridges"]) > serving_n else "")),
+    ]):
+        print(_line)
     if args.quick:
         print("  (--quick: skipped the per-app assessment scan)")
     else:
         print(f"  live     {len(out['live'])} assessment(s) running")
         for r in out["live"]:
             mark = "*" if r.get("bridge_serving") else ("!" if r.get("needs_bridge") else " ")
-            print(f"    {mark} {_pct(r['progress']):>5}  {r['app']}  ({r['assessment']})")
+            prog = r.get("progress")
+            # The bar is ADDITIVE: the numeric cell stays exactly where it was, because that is
+            # the column a human greps. On a pipe gradient_bar renders plain, so this costs
+            # scripts nothing but a few block characters.
+            gb = _ui.gradient_bar(float(prog) if isinstance(prog, (int, float)) else None,
+                                  width=14) if sys.stdout.isatty() else ""
+            print(f"    {mark} {_pct(r['progress']):>5}  "
+                  + (f"{gb}  " if gb else "")
+                  + f"{r['app']}  ({r['assessment']})")
     for w in out["warnings"]:
         print(f"\n  !! {w}")
     if out["warnings"]:
@@ -4609,14 +4707,15 @@ def cmd_tenant_show(args):
     info = {"pinned": True, "label": rec.get("label"), "fingerprint": rec.get("fingerprint", "")[:16],
             "pinned_at": rec.get("pinned_at"), "stored_keys": keys, "relays_running": live,
             "state_dir": str(T.state_root())}
-    _out(info, args, human="\n".join([
-        f"  tenant     {rec.get('label')}",
-        f"  fingerprint {rec.get('fingerprint','')[:16]}…  (sha256 of iss|straikerId; not a secret)",
-        f"  pinned at  {rec.get('pinned_at')}",
-        f"  stored keys {keys}",
-        f"  bridges running {live}",
-        f"  state dir  {T.state_root()}",
-    ]))
+    _out(info, args, human="\n".join(_ui.kv([
+        ("tenant", rec.get("label")),
+        ("fingerprint", f"{rec.get('fingerprint','')[:16]}…  "
+                        f"(sha256 of iss|straikerId; not a secret)"),
+        ("pinned at", rec.get("pinned_at")),
+        ("stored keys", keys),
+        ("bridges running", live),
+        ("state dir", T.state_root()),
+    ])))
 
 
 def cmd_tenant_switch(args):
@@ -5459,11 +5558,21 @@ EVERYDAY
   assess watch --all     follow live runs; the BRIDGE column flags a run nobody is answering
   results                read the findings
 
+  target types           the kinds of target this can speak to
+
 MORE
-  app · adapter · assess · bridge · chat · ci · controls · export · keys
-  onboard · policy · reports · status · target · tenant · version
+  assess · bridge · chat · ci · controls · export · onboard · policy
+  reports · status · target · tenant · version
   Run `ascend <command> --help` for any of these — each has its own flags and examples.
-  `app`, `adapter` and `keys` are the machinery underneath `target`, still fully supported.
+
+COMPATIBILITY
+  app · adapter · keys   the machinery underneath `target`. Still fully supported — nothing
+                         you already script has changed. `target add` does all three in one
+                         step: derives the adapter, registers the app, stores the bridge key.
+                           adapter build     → target add --dry-run
+                           adapter validate  → target check
+                           adapter list      → target types
+                           app create        → target add
 
 Every command takes --json. `ascend target add --help` is the fastest way in.
 Full reference: docs/COMMAND_MAP.md  ·  building adapters: docs/BUILD_ADAPTER.md
@@ -5477,6 +5586,9 @@ def _add_onboard_args(s, *, require_source):
     src.add_argument("--api", metavar="URL",
                      help="an HTTP API endpoint (or base URL) — one probe, no browser. The "
                           "simple-contract one-liner.")
+    src.add_argument("--ws", metavar="URL",
+                     help="a WebSocket endpoint (ws:// or wss://) — connects, works out the frame "
+                          "contract, no browser")
     src.add_argument("--url", help="live page with a chat widget: capture the contract in a real browser")
     src.add_argument("--curl", metavar="FILE", help="a curl command in a file (or '-' for stdin)")
     src.add_argument("--har", help="HAR file exported from your own browser (no browser needed here)")
@@ -5604,7 +5716,13 @@ def build_parser():
                            help=argparse.SUPPRESS)
 
     # app
-    ap = sub.add_parser("app", parents=[GLOBALS], formatter_class=_Fmt, help="manage Ascend applications").add_subparsers(dest="verb", required=True)
+    ap = sub.add_parser("app", parents=[GLOBALS], formatter_class=_Fmt,
+                    help=argparse.SUPPRESS,   # machinery underneath `target`; still fully supported
+                    description="Manage Ascend applications directly.\n\n"
+                                "This is the machinery underneath `target` and is still fully\n"
+                                "supported. `ascend target add` creates the application, derives\n"
+                                "the adapter and stores the bridge key in one step."
+                    ).add_subparsers(dest="verb", required=True)
     s = ap.add_parser("list", parents=[GLOBALS], formatter_class=_Fmt,
                       help="list applications (add --with-runs for the assessment table)",
                       epilog="examples:\n"
@@ -5867,7 +5985,15 @@ def build_parser():
     s.set_defaults(func=cmd_runtime_start)
 
     # adapter
-    adp = sub.add_parser("adapter", parents=[GLOBALS], formatter_class=_Fmt, help="adapter configs & capabilities").add_subparsers(dest="verb", required=True)
+    adp = sub.add_parser("adapter", parents=[GLOBALS], formatter_class=_Fmt,
+                     help=argparse.SUPPRESS,   # machinery underneath `target`; still fully supported
+                     description="Build and inspect adapter configs directly.\n\n"
+                                 "An adapter is HOW the CLI speaks one target's protocol, so it is\n"
+                                 "a property of a target rather than a separate thing to manage.\n"
+                                 "`ascend target add` derives it from a URL, a cURL file or a .har,\n"
+                                 "proves it against the live endpoint and stores it. These verbs\n"
+                                 "remain for the cases that need the lower level."
+                     ).add_subparsers(dest="verb", required=True)
     adp.add_parser("list", parents=[GLOBALS], formatter_class=_Fmt, help="list registered adapter types").set_defaults(func=cmd_adapter_list)
     s = adp.add_parser("show", parents=[GLOBALS], formatter_class=_Fmt,
                        help="print a saved adapter config (secrets masked)")
@@ -6027,6 +6153,11 @@ def build_parser():
     s.add_argument("target", help="target name or aapp_ id")
     s.add_argument("--keep-key", action="store_true", help="leave the stored bridge key in place")
     s.set_defaults(func=cmd_target_rm)
+    # The registry of adapter TYPES, i.e. "what kinds of target can this onboard?". It was only
+    # reachable as `adapter list`, which was the single reason anyone still needed that noun.
+    tg.add_parser("types", parents=[GLOBALS], formatter_class=_Fmt,
+                  help="the kinds of target this can speak to (adapter types)"
+                  ).set_defaults(func=cmd_adapter_list)
 
     s = sub.add_parser("results", parents=[GLOBALS], formatter_class=_Fmt,
                        help="read results: a Console CSV export, or a local capture",
@@ -6146,7 +6277,12 @@ def build_parser():
 
     # keys (the local bridge key store)
     kp = sub.add_parser("keys", parents=[GLOBALS], formatter_class=_Fmt,
-                        help="manage stored tc- bridge keys").add_subparsers(dest="verb", required=True)
+                        help=argparse.SUPPRESS,   # machinery underneath `target`; still fully supported
+                        description="Manage stored tc- bridge keys directly.\n\n"
+                                    "This is the machinery underneath `target` and is still fully\n"
+                                    "supported. `ascend target add` stores the key it fetched, and\n"
+                                    "`ascend target rm` drops it."
+                        ).add_subparsers(dest="verb", required=True)
     s = kp.add_parser("list", parents=[GLOBALS], formatter_class=_Fmt, help="list stored keys (masked)")
     s.add_argument("--no-check", action="store_true", help="don't check whether the apps still exist")
     s.set_defaults(func=cmd_keys_list)
@@ -6275,7 +6411,8 @@ def build_parser():
                    help="update this install if a newer release is published "
                         "(git pull for a clone; prints the command for pipx/binary)")
     s.set_defaults(func=cmd_doctor)
-    sub.add_parser("version", parents=[GLOBALS], formatter_class=_Fmt, help="print version").set_defaults(func=lambda a: print(VERSION))
+    sub.add_parser("version", parents=[GLOBALS], formatter_class=_Fmt, help="print version"
+                   ).set_defaults(func=lambda a: _out({"version": VERSION}, a, human=VERSION))
     return p
 
 
@@ -6584,7 +6721,9 @@ class _TwinkleBanner:
         return out
 
     def _render(self, f, first=False):
-        DIM, OFF, PINK = "\033[2m", "\033[0m", "\033[38;5;205m"
+        DIM, OFF = "\033[2m", "\033[0m"
+        # Same brand pink as the launch screen and the logo, from the one palette.
+        PINK = _ui.sgr(_ui.brand("ascend"), stream=sys.stdout) or "\033[38;5;205m"
         with self._lock:
             sub = self._subtitle
         out = [] if first else [f"\033[{self._n}A"]
@@ -6681,38 +6820,172 @@ class _TwinkleBanner:
         return False
 
 
+def _verdict(a, *, detail=False):
+    """The assessment summary with a one-line verdict panel above it.
+
+    `api.summarize_result` is left byte-identical and control/api.py keeps no UI import: the
+    panel is composed here, in the shell, and only when a terminal is going to read it. The
+    tone comes from the severity, so a critical result cannot look like a clean one at a glance.
+
+    The summary itself is NOT boxed. It contains a 32-character control column that routinely
+    exceeds 80 cells, and a box around that is ragged enough to look worse than no box.
+    """
+    import api          # imported locally, as every other consumer in this file does
+    body = api.summarize_result(a, detail=detail)
+    try:
+        sev = str(a.get("severity") or "").lower()
+        status = str(a.get("status") or "?")
+        failed, total = a.get("failed"), a.get("total")
+        tone = {"critical": "alarm", "high": "alarm", "medium": "warn",
+                "low": "ok", "none": "ok", "informational": "info", "info": "info"}.get(sev)
+        if tone is None:
+            return body                       # unknown severity: say nothing rather than guess
+        probes = (f"{failed} failed / {total} probes"
+                  if isinstance(failed, int) and isinstance(total, int) else "")
+        line = f"{status}  ·  risk {sev.upper()}" + (f"  ·  {probes}" if probes else "")
+        return _ui.panel([line], title="RESULT", tone=tone) + "\n" + body
+    except Exception:
+        return body
+
+
 def _launch_screen():
     """A branded home screen for a bare `ascend` on a TTY: wordmark, the flow, next steps.
     No network, so it is instant. Scripts, agents, pipes, and --json never see this."""
     color = _ui.color_ok(sys.stdout)
-    PINK, DIM, B, OFF = "\033[38;5;205m", "\033[2m", "\033[1m", "\033[0m"
+    # The wordmark used a hardcoded 256-colour pink (38;5;205) that was one of three different
+    # pinks in this repo. It comes from the brand palette now, so the terminal, the logo
+    # animation and docs/architecture.html all render the same colour -- and it gets truecolour
+    # where the terminal supports it.
+    PINK = _ui.sgr(_ui.brand("ascend"), stream=sys.stdout) or "\033[38;5;205m"
+    DIM, B, OFF = "\033[2m", "\033[1m", "\033[0m"
     def c(s, code):
         return f"{code}{s}{OFF}" if color else s
     print()
     print(c(_brand_banner(), PINK))
     print("  " + c("red-team CLI for AI targets", DIM) + f"    v{VERSION}")
     print()
-    print("  " + c("THE FLOW", B) + c("   (every command also takes --json for agents)", DIM))
-    print("    adapter build   turn a target into a validated adapter  " +
-          c("--har / --url / --api / --curl / --spec", DIM))
-    print("    app create      register it in Ascend (type bridge is auto-relayed)")
-    print("    assess run      run it  " + c("(the bridge auto-starts and self-stops)", DIM))
-    print("    results / ci    read findings (FAIL% + risk)  ·  gate a pipeline")
+    # This block used to teach `adapter build` -> `app create` as the flow, which is the
+    # pre-1.1 shape: those are the machinery UNDERNEATH `target` now, and leading with them
+    # sent every new reader the long way round.
+    #
+    # The box is built from DATA and padded with vpad, not hand-counted spaces. Hand-counting is
+    # how the first version of this came out ragged, and it cannot survive colour at all.
+    g = _ui._glyphs(sys.stdout)
+    h, vb = g["h"], g["v"]
+    uni = _ui.unicode_ok(sys.stdout)
+    a_r, a_l, down, tick = ("──▶", "◀──", "│", "▼") if uni else ("-->", "<--", "|", "v")
+
+    # (left cell, middle connector, right cell) — colour is applied per cell, width is computed
+    rows = [
+        (c("ascend target add <thing>", B),      "",                  "the target, registered"),
+        (c("  a url · a curl · a har", DIM),     c(f"registers {a_r}", DIM),
+                                                 c("  its controls & size", DIM)),
+        (c("  detect · adapt · prove", DIM),     "",                  ""),
+        ("",                                     "",                  ""),
+        ("",                                     "",                  c("Iris", B)),
+        (c("ascend assess run", B),              "",                  c("  generates the attacks", DIM)),
+        (c("  the bridge starts itself", DIM),   c(f"{a_l} probes", DIM),
+                                                 c("  scores the replies", DIM)),
+        (f"       {c(down, DIM)}",               c(f"replies {a_r}", DIM),  ""),
+        (f"       {c(tick, DIM)}",               "",                  c("findings", B)),
+        (c("  YOUR AGENT", B),                   c(f"{a_l} results", DIM),
+                                                 c("  severity · controls", DIM)),
+    ]
+    LW = max(_ui.vwidth(r[0]) for r in rows) + 2
+    MW = max(_ui.vwidth(r[1]) for r in rows) + 2
+    RW = max(_ui.vwidth(r[2]) for r in rows) + 2
+
+    print("  " + c("HOW IT WORKS", B) + c("   (every command also takes --json for agents)", DIM))
+    print()
+    print("    " + _ui.vpad(c("YOUR MACHINE", DIM), LW + 2 + MW)
+          + c("STRAIKER CLOUD", DIM))
+    print(f"    {g['tl']}{h * LW}{g['tr']}{' ' * MW}{g['tl']}{h * RW}{g['br'] and g['tr']}")
+    for left, mid, right in rows:
+        print(f"    {vb} {_ui.vpad(left, LW - 2)} {vb}"
+              f"{_ui.vpad(mid, MW, align='center')}"
+              f"{vb} {_ui.vpad(right, RW - 2)} {vb}")
+    print(f"    {g['bl']}{h * LW}{g['br']}{' ' * MW}{g['bl']}{h * RW}{g['br']}")
+    print()
+    print("    " + c("ascend results / ci", B)
+          + c("   read the findings  ·  gate a pipeline", DIM))
     print()
     print("  " + c("START HERE", B))
-    print("    ascend status              " + c("# tenant, apps, live runs, bridges", DIM))
-    print("    ascend adapter build --help" + c("  # onboard your first target", DIM))
-    print("    ascend --help              " + c("# every command", DIM))
+    print("    ascend doctor             " + c("# is your key good and the platform reachable?", DIM))
+    print("    ascend target add --help  " + c("# onboard your first target", DIM))
+    print("    ascend status             " + c("# tenant, targets, live runs, bridges", DIM))
+    print("    ascend --help             " + c("# every command", DIM))
+    print()
+    print("  " + c("app · adapter · keys are the machinery underneath target, still supported",
+                   DIM))
     print()
     print("  " + c("locked to one tenant at a time (ascend tenant)  ·  full guide in docs/", DIM))
     print()
 
 
+# `target` is the primary noun as of 1.1.2. `app`, `adapter` and `keys` are the machinery
+# underneath it and keep working forever -- customers are mid-engagement driving them from shell
+# scripts and from Claude Code, so demoting them may not break them. What they get is a one-line
+# pointer to the `target` verb that does the same job.
+#
+# The pointer goes to STDERR, never stdout: stdout is what a pipe, a script and an agent consume,
+# and tests/backcompat/ freezes it byte for byte. It is also suppressed under --json, so a machine
+# invocation stays completely silent on both streams.
+#
+# Only genuine equivalences are listed. `adapter build` is deliberately mapped to
+# `target add --dry-run` rather than `target add`, because build does NOT register the app while
+# `target add` does -- pointing someone at a command with an extra side effect would be worse
+# than saying nothing.
+# (current command, optional aside). The aside is kept OUT of the backticks so the line stays
+# copy-pasteable -- the first cut inlined it and produced nested backticks around a string that
+# was no longer a runnable command.
+_LEGACY_VERB_HINTS = {
+    ("adapter", "build"):    ("target add --dry-run", "`target add` also registers it"),
+    ("adapter", "validate"): ("target check", ""),
+    ("adapter", "show"):     ("target show", ""),
+    ("adapter", "configs"):  ("target list", ""),
+    ("adapter", "list"):     ("target types", ""),
+    ("app", "create"):       ("target add", "it also derives the adapter and stores the key"),
+    ("app", "list"):         ("target list", ""),
+    ("app", "get"):          ("target show", ""),
+    ("app", "delete"):       ("target rm", ""),
+    ("keys", "add"):         ("target add", "it stores the bridge key for you"),
+    ("keys", "list"):        ("target list", ""),
+}
+_LEGACY_NOUNS = ("adapter", "app", "keys")
+
+
+def _legacy_pointer(raw):
+    """Print a one-line `target` pointer when a demoted noun is used. stderr only."""
+    argv = [a for a in raw if not a.startswith("-")]
+    if not argv or argv[0] not in _LEGACY_NOUNS or _wants_json():
+        return
+    noun = argv[0]
+    verb = argv[1] if len(argv) > 1 else None
+    better = _LEGACY_VERB_HINTS.get((noun, verb))
+    try:
+        if better:
+            cmd, aside = better
+            tail = f" ({aside})" if aside else ""
+            print(f"note: `{noun} {verb}` still works; `{cmd}` is the current way{tail}.",
+                  file=sys.stderr)
+        else:
+            print(f"note: `{noun}` is the machinery underneath `target` and still works; "
+                  f"`ascend target --help` is the current way in.", file=sys.stderr)
+    except Exception:
+        pass   # a deprecation note must never be the reason a command fails
+
+
 def main(argv=None):
     raw = list(sys.argv[1:] if argv is None else argv)
     if "--version" in raw and not [a for a in raw if not a.startswith("-")]:
-        print(VERSION)
+        # `--version` is handled before the parser exists, so it has to honour --json itself.
+        # `ascend version` goes through _out(); these two must not disagree.
+        if _wants_json():
+            print(json.dumps({"version": VERSION}, indent=2))
+        else:
+            print(VERSION)
         return
+    _legacy_pointer(raw)
     # Bare `ascend` on a terminal -> the launch home screen. Non-TTY / piped / --json fall through
     # to argparse (unchanged), so scripts and agents behave exactly as before.
     if (not [a for a in raw if not a.startswith("-")] and sys.stdout.isatty()
