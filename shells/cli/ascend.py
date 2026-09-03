@@ -2690,7 +2690,8 @@ def cmd_onboard(args):
     elif getattr(args, "curl", None):
         name = Path(args.curl).stem if args.curl != "-" else "target"
     else:
-        name = ((getattr(args, "api", None) or args.url or args.config or "target")
+        name = ((getattr(args, "api", None) or getattr(args, "ws", None) or args.url
+                 or args.config or "target")
                 .split("//")[-1].split("/")[0])
     # --save-as is the way to NAME the config. Without it the name is derived from the URL's
     # host, which produced things like `127-0-0-1-8791` and `myhost-com`: the one-command path
@@ -2729,6 +2730,20 @@ def cmd_onboard(args):
         _ok(f"{res.method} {res.endpoint} · transport {res.transport} · answer at "
             f"{res.response_path or '(top-level)'}")
         cfg = build_config(res)
+        cfg_path, cfg_name = _write_named_config(cfg, cfg_name, exact=named_exactly)
+    elif getattr(args, "ws", None):
+        _step(1, total, f"probing {args.ws}")
+        from runtime.discovery.probe import probe_ws, build_ws_config
+        auth_headers, _auth_query = _target_auth(args)
+        res = probe_ws(args.ws, prompt=args.prompt or "hello",
+                       headers=auth_headers or None,
+                       timeout_s=args.timeout or 30)
+        if not res.get("ok"):
+            _die(f"{res.get('diagnosis')}: {res.get('message')}\n  {res.get('hint','')}",
+                 code=EXIT_ERROR)
+        _ok(f"WS {res['ws_url']} · frames {res['frames_seen']} · answer at "
+            f"{res.get('response_path') or '(whole frame)'}")
+        cfg = build_ws_config(res)
         cfg_path, cfg_name = _write_named_config(cfg, cfg_name, exact=named_exactly)
     elif getattr(args, "curl", None):
         _step(1, total, f"reading the request from {args.curl}")
@@ -2962,6 +2977,11 @@ def _detect_source(thing):
     if s == "-":
         return "curl", s                                  # a request piped in on stdin
     low = s.lower()
+    if low.startswith(("ws://", "wss://")):
+        # A socket is probeable -- connect, send a frame, read one back -- but it used to fall
+        # past this check to the file test and die with "is not a URL, a file, or a known
+        # config". Sending it to --url was worse: that drives a real browser at a socket.
+        return "ws", s
     if low.startswith(("http://", "https://")):
         # A spec URL is unambiguous; anything else is treated as an endpoint, which is the cheap
         # probe. A page that needs a real browser is `--url`, and the error path says so.
@@ -3016,11 +3036,11 @@ def cmd_target_add(args):
                  error_code="spec_needs_build",
                  hint=(f"ascend adapter build --spec {src} --out mybot\n"
                        f"  then:  ascend target add mybot"))
-        if any(getattr(args, f, None) for f in ("api", "url", "curl", "har", "spec", "config")):
+        if any(getattr(args, f, None) for f in ("api", "ws", "url", "curl", "har", "spec", "config")):
             _die("give either a source argument or an explicit source flag, not both")
         setattr(args, flag, value)
         _say(args, f"detected {flag} source: {value}")
-    elif not any(getattr(args, f, None) for f in ("api", "url", "curl", "har", "spec", "config")):
+    elif not any(getattr(args, f, None) for f in ("api", "ws", "url", "curl", "har", "spec", "config")):
         _die("nothing to onboard: pass a URL, a cURL/HAR file, or a saved config",
              hint="ascend target add https://host/chat")
     # `--run` continues into the assessment; otherwise stop once the target is registered.
@@ -5536,6 +5556,9 @@ def _add_onboard_args(s, *, require_source):
     src.add_argument("--api", metavar="URL",
                      help="an HTTP API endpoint (or base URL) — one probe, no browser. The "
                           "simple-contract one-liner.")
+    src.add_argument("--ws", metavar="URL",
+                     help="a WebSocket endpoint (ws:// or wss://) — connects, works out the frame "
+                          "contract, no browser")
     src.add_argument("--url", help="live page with a chat widget: capture the contract in a real browser")
     src.add_argument("--curl", metavar="FILE", help="a curl command in a file (or '-' for stdin)")
     src.add_argument("--har", help="HAR file exported from your own browser (no browser needed here)")

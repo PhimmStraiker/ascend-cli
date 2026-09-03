@@ -644,6 +644,7 @@ zero to a running assessment in one command (build -> validate -> register -> br
 | Flag | Value | Default | What it does |
 |---|---|---|---|
 | `--api` | `URL` | — | an HTTP API endpoint (or base URL) — one probe, no browser. The simple-contract one-liner. |
+| `--ws` | `URL` | — | a WebSocket endpoint (ws:// or wss://) — connects, works out the frame contract, no browser |
 | `--url` | `URL` | — | live page with a chat widget: capture the contract in a real browser |
 | `--curl` | `FILE` | — | a curl command in a file (or '-' for stdin) |
 | `--har` | `HAR` | — | HAR file exported from your own browser (no browser needed here) |
@@ -857,6 +858,7 @@ onboard a target from a URL, a cURL/HAR file, or a saved config
 | Flag | Value | Default | What it does |
 |---|---|---|---|
 | `--api` | `URL` | — | an HTTP API endpoint (or base URL) — one probe, no browser. The simple-contract one-liner. |
+| `--ws` | `URL` | — | a WebSocket endpoint (ws:// or wss://) — connects, works out the frame contract, no browser |
 | `--url` | `URL` | — | live page with a chat widget: capture the contract in a real browser |
 | `--curl` | `FILE` | — | a curl command in a file (or '-' for stdin) |
 | `--har` | `HAR` | — | HAR file exported from your own browser (no browser needed here) |
