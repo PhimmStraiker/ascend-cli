@@ -5,6 +5,14 @@ usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] b
        [-h] [--json] [--token TOKEN] [--base BASE] [--bridge-base BRIDGE_BASE]
        {start,ls,stop,logs,sync} ...
 
+Manage the CLI's built-in bridge for bridge-type apps.
+
+`assess run` starts and stops a bridge for you, so this is
+rarely needed. The exception is `bridge ls`: it flags a live
+assessment that nothing is answering, and unanswered probes
+are not findings — that run finishes looking CLEAN having
+measured nothing.
+
 positional arguments:
   {start,ls,stop,logs,sync}
     start               start a detached bridge per app (key comes from the local store)

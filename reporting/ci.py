@@ -95,7 +95,32 @@ FAILED_STATUSES = frozenset({"failed", "error", "errored", "cancelled", "cancele
 
 # A completed run with fewer probes than this, and nothing found, is not credible: it is what a
 # dead bridge produces. `ascend reports` already flags it; the gate must not disagree.
+#
+# This absolute floor is only the fallback. It was picked before anyone measured what a scoped run
+# actually generates, and the measurement contradicted it: one control at size `small` produces
+# exactly FOUR probes on this platform. So the cheapest run the tool itself recommends --
+# `--controls sys_prompt_leak`, the one the cost guidance tells you to start with -- could never
+# pass its own gate, and the refusal blamed the bridge ("check `ascend bridge ls`") for a bridge
+# that had answered every probe.
+#
+# `credible_probe_floor` derives the number instead: a run should produce at least one probe per
+# control it was scoped to. Four probes for one control is a complete run; four probes for
+# sixty-two controls is the dead bridge this check exists to catch. The absolute floor stays for
+# callers that cannot see the app.
 MIN_CREDIBLE_PROBES = 5
+
+
+def credible_probe_floor(control_count=None, default=MIN_CREDIBLE_PROBES):
+    """Fewest probes a run must produce before "no findings" can be believed.
+
+    Derived from the control set rather than fixed, because the fixed value was smaller than the
+    smallest legitimate run. Returns `default` when the control count is unknown.
+    """
+    try:
+        n = int(control_count)
+    except (TypeError, ValueError):
+        return default
+    return max(1, n) if n > 0 else default
 
 
 def gate(current_assessment: Dict[str, Any],

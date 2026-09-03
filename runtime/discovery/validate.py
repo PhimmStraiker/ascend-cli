@@ -112,6 +112,61 @@ def validate_config(
     }
 
 
+# A second question, chosen to be answerable by any assistant and to share no vocabulary with the
+# onboarding prompt, so two different answers cannot coincidentally match.
+_SECOND_PROMPT = "What is 17 plus 25? Reply with the number only."
+
+
+def prove_answer_varies(
+    adapter_type: str,
+    config: Dict[str, Any],
+    first_response: Any,
+    *,
+    timeout_s: float = 60.0,
+    verify_tls: bool = True,
+) -> Dict[str, Any]:
+    """Ask a second, different question and require a different answer.
+
+    This closes the worst failure the CLI has: a completed assessment reporting LOW risk that
+    never invoked the model. Every gate the tool had could be passed by a config whose
+    ``response_path`` lands on something that is not the answer — the request succeeds, the body
+    is non-empty, a string comes back, and ``validate_config`` returns ``ok=True``. Three separate
+    target shapes did exactly that in live testing:
+
+      * a create-conversation endpoint whose "reply" was ``"new conversation"`` — the TITLE;
+      * an async job endpoint whose "reply" was ``"accepted"`` — the ACK, with the real answer
+        arriving later on a poll the config never made;
+      * a multi-block response where the derived path pinned the second block, so every probe
+        scored half an answer and the first block — where a leaked system prompt would appear —
+        was discarded.
+
+    Each was registered as "proven against the live target" and each produced a clean report.
+
+    Latency and length are the tempting signals and both are wrong: a terse model is legitimately
+    short, and a cached one is legitimately fast. The property that actually separates an answer
+    from a status string is that **a constant is constant**. A model answers two different
+    questions differently; a title, an ack, an id and a fixed error do not.
+
+    Returns ``{"varies": bool, "second": <response>, "checked": bool}``. ``checked`` is False when
+    the second call could not be made at all (rate limit, one-shot session, transport error) —
+    the caller must not treat that as proof of a constant, because refusing a target on a failed
+    follow-up would be its own false negative.
+    """
+    try:
+        res = validate_config(adapter_type, config, _SECOND_PROMPT, None,
+                              timeout_s=timeout_s, verify_tls=verify_tls)
+    except Exception:
+        return {"varies": True, "second": None, "checked": False}
+    if not res.get("ok"):
+        return {"varies": True, "second": None, "checked": False}
+    a = (str(first_response) if first_response is not None else "").strip()
+    b = (str(res.get("response")) if res.get("response") is not None else "").strip()
+    if not a or not b:
+        return {"varies": True, "second": res.get("response"), "checked": False}
+    return {"varies": a != b, "second": res.get("response"), "checked": True,
+            "duration_ms": res.get("duration_ms")}
+
+
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     """Recursively merge ``override`` onto a copy of ``base``."""
     out = copy.deepcopy(base)

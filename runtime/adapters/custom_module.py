@@ -134,7 +134,7 @@ class CustomModuleAdapter(BotAdapter):
             else:
                 # A per-app handler is usually blocking (requests, a poll loop). Run it off the
                 # event loop so one slow turn cannot stall every other conversation.
-                reply = await asyncio.get_event_loop().run_in_executor(None, fn, prompt)
+                reply = await asyncio.get_running_loop().run_in_executor(None, fn, prompt)
         except Exception as exc:  # the app's own code raised
             return self._fail(f"adapter raised {type(exc).__name__}: {exc}", start,
                               module=str(self._path))

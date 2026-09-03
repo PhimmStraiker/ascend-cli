@@ -170,12 +170,41 @@ def _extract(data: Any, path: str) -> Any:
     """Extract a value from nested dict/list using dot notation.
 
     Example: _extract({"choices": [{"message": {"content": "hi"}}]}, "choices.0.message.content") -> "hi"
+
+    A ``*`` segment (also written ``[]``) maps over a list and CONCATENATES what it finds, which
+    is how an answer split across several content blocks is read back whole::
+
+        _extract({"content": [{"text": "How can"}, {"text": " I help?"}]}, "content.*.text")
+        -> "How can I help?"
+
+    Without this the deriver had to pick one index, and picking one index means every probe scores
+    a fragment. Measured on a two-block target: the path landed on ``content.1.text``, so every
+    answer started mid-sentence and everything in block 0 -- which is where a leaked system prompt
+    appears, since it comes first -- was discarded on every probe of every assessment. The run
+    still completed and reported LOW risk.
+
+    Blocks are joined with no separator because they are consecutive runs of one message, not a
+    list of distinct items; the fragments above concatenate into the original sentence.
     """
-    parts = path.split(".")
+    # `content[].text` splits as ["content[]", "text"], so a trailing `[]` expands into its key
+    # plus a wildcard segment; a bare `[]` is the wildcard on its own.
+    parts = []
+    for p in path.split("."):
+        if p.endswith("[]") and len(p) > 2:
+            parts.extend([p[:-2], "*"])
+        else:
+            parts.append("*" if p == "[]" else p)
     current = data
-    for part in parts:
+    for i, part in enumerate(parts):
         if current is None:
             return None
+        if part == "*":
+            if not isinstance(current, list):
+                return None
+            rest = ".".join(parts[i + 1:])
+            vals = [(_extract(item, rest) if rest else item) for item in current]
+            vals = [v for v in vals if isinstance(v, str)]
+            return "".join(vals) if vals else None
         if isinstance(current, dict):
             current = current.get(part)
         elif isinstance(current, list):

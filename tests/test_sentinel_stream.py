@@ -6,7 +6,9 @@ from adapters.sentinel_stream import SentinelStreamAdapter, parse_frames
 
 B, E = "BOT_CHAT_EVENT_BEGIN", "BOT_CHAT_EVENT_END"
 
-def run_async(c): return asyncio.get_event_loop().run_until_complete(c)
+def run_async(c):
+    # See tests/test_session_poll.py: get_event_loop() makes these tests order-dependent.
+    return asyncio.run(c)
 
 def frame(obj): return f"{B}{json.dumps(obj)}{E}\n\n"
 
