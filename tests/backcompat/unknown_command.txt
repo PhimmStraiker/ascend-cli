@@ -1,0 +1,3 @@
+$ ascend not-a-command
+--- exit 2
+--- stdout

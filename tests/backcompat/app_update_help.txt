@@ -1,0 +1,38 @@
+$ ascend app update --help
+--- exit 0
+--- stdout
+usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] app update
+       [-h] [--json] [--token TOKEN] [--base BASE] [--bridge-base BRIDGE_BASE] [--name NAME]
+       [--system-prompt SYSTEM_PROMPT] [--purpose PURPOSE] [--qpm QPM] [--controls CONTROLS]
+       [--category-severity CAT=SEV] [--input-guardrail TYPE=VALUE]
+       [--frequency {none,weekly,monthly,quarterly}] [--strategy A,B]
+       [--strategy-type {recommended,custom}]
+       app
+
+positional arguments:
+  app                   app name or aapp_ id
+
+options:
+  -h, --help            show this help message and exit
+  --json                machine-readable JSON output (default: False)
+  --token TOKEN         Straiker PAT (s6r_pat_...) or JWT; else $STRAIKER_PAT (default: None)
+  --base BASE           v3 API base URL (default: https://api.prod.straiker.ai/api/v3)
+  --bridge-base BRIDGE_BASE
+                        Ascend lease-service base URL (where bridges fetch probes and post
+                        results) (default: https://ascendai-bridge.prod.straiker.ai)
+  --name NAME           rename the app (default: None)
+  --system-prompt SYSTEM_PROMPT
+                        update the system prompt used for leak scoring (default: None)
+  --purpose PURPOSE     update the business purpose (default: None)
+  --qpm QPM             queries per minute (default: None)
+  --controls CONTROLS   replace the control set (comma-separated, validated) (default: None)
+  --category-severity CAT=SEV
+                        set a category severity (repeatable); pushed to the app (default: None)
+  --input-guardrail TYPE=VALUE
+                        how a block is signalled (default: None)
+  --frequency {none,weekly,monthly,quarterly}
+                        recurring assessment cadence (default: None)
+  --strategy A,B        comma-separated attack strategies (default: None)
+  --strategy-type {recommended,custom}
+
+example: ascend app update 'My Bot' --qpm 60 --controls sys_prompt_leak,pii_leak
