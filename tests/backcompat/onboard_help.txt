@@ -3,9 +3,9 @@ $ ascend onboard --help
 --- stdout
 usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] onboard
        [-h] [--json] [--token TOKEN] [--base BASE] [--bridge-base BRIDGE_BASE]
-       (--api URL | --ws URL | --url URL | --curl FILE | --har HAR | --config CONFIG)
-       [--name NAME] [--app NAME|aapp_id] [--save-as NAME] [--system-prompt SYSTEM_PROMPT]
-       [--controls CONTROLS] [--adapter ADAPTER] [--bearer TOKEN]
+       (--api URL | --ws URL | --url URL | --curl FILE | --har HAR | --config NAME|PATH | --module FILE.py)
+       [--scaffold FILE.py] [--name NAME] [--app NAME|aapp_id] [--save-as NAME]
+       [--system-prompt SYSTEM_PROMPT] [--controls CONTROLS] [--adapter ADAPTER] [--bearer TOKEN]
        [--api-key NAME:VALUE[:in=header|query]] [--header 'Name: value'] [--body-field key=value]
        [--prompt-hint PROMPT_HINT] [--insecure] [--size {small,medium,large}] [--qpm QPM]
        [--prompt PROMPT] [--settle SETTLE] [--headless] [--manual] [--timeout TIMEOUT] [--dry-run]
@@ -27,7 +27,14 @@ options:
   --url URL             live page with a chat widget: capture the contract in a real browser
   --curl FILE           a curl command in a file (or '-' for stdin)
   --har HAR             HAR file exported from your own browser (no browser needed here)
-  --config CONFIG       an existing config in the config dir (skip discovery)
+  --config NAME|PATH    a config already on disk — a name in the config dir, or a path to a .json
+                        file anywhere (skip discovery)
+  --module FILE.py      a custom adapter you wrote: a Python file with `def send_prompt(prompt:
+                        str) -> str`. Use this when the contract cannot be derived — signed
+                        requests, a multi-step handshake, an async poll. It is proven against the
+                        live target like any other.
+  --scaffold FILE.py    write a working custom-adapter stub to this path and stop. Edit it, then
+                        re-run with --module to onboard it.
   --name NAME           application name in Ascend (default: derived from the URL)
   --app NAME|aapp_id    bind to an application that ALREADY exists in the Console instead of
                         creating one — its bridge key is fetched for you. Use this when the app

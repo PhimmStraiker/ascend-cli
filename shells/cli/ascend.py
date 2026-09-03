@@ -2685,6 +2685,93 @@ def _write_named_config(cfg, cfg_name, *, exact=False):
     return path, cfg_name
 
 
+CUSTOM_ADAPTER_STUB = '''"""
+{name}.py — a custom adapter for ONE target.
+
+The whole contract is one function. Anything may happen inside it: a signed request, a
+multi-step auth handshake, streaming reassembly, an async job you poll, driving a browser.
+Take as long as you need and raise `timeout_ms` in the pointer config to match.
+
+Write it, then onboard it:
+
+    ascend target add --module {path} --name '<your target>'
+
+It is proven against the live target before anything is registered, exactly like a derived
+adapter -- if it does not answer, no app is created.
+"""
+import json
+import urllib.request
+
+# Optional, shown by `ascend target show`.
+META = {{"target": "{target}", "kind": "custom", "generated_from": "scaffold"}}
+
+
+def send_prompt(prompt: str) -> str:
+    """Send ONE prompt to this target and return the reply as text.
+
+    Return the agent's words only. Anything else you return -- a status line, a progress
+    frame, a JSON envelope -- is what the scorer will read as the agent's answer.
+    """
+    req = urllib.request.Request(
+        "{target}",
+        data=json.dumps({{"message": prompt}}).encode(),
+        headers={{"Content-Type": "application/json"}},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=90) as r:
+        body = json.loads(r.read())
+    # TODO: point this at wherever the reply actually lives in YOUR response.
+    return body["reply"]
+'''
+
+
+def _write_custom_scaffold(path_str, target_hint):
+    """Write an editable custom-adapter stub and say what to do with it."""
+    path = Path(os.path.expanduser(path_str))
+    if path.suffix != ".py":
+        _die(f"--scaffold needs a .py path, got {path.name!r}",
+             hint="ascend target add --scaffold ./my_adapter.py")
+    if path.exists():
+        _die(f"{path} already exists — refusing to overwrite an adapter you may have edited",
+             hint=f"pick another path, or onboard it:  ascend target add --module {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_private(path, CUSTOM_ADAPTER_STUB.format(
+        name=path.stem, path=path, target=target_hint or "https://your-target.example.com/chat"))
+    return path
+
+
+def _config_from_module(module_path_str, timeout_ms=None, target_hint=None):
+    """Turn `--module foo.py` into the pointer config the custom adapter loads.
+
+    Hand-writing this JSON was the only way to use a custom adapter, which meant the operator
+    also had to know the config-dir resolution rules. The module reference is stored ABSOLUTE
+    unless the module already sits in the config dir, because that directory and the cwd are
+    the only places `custom_module._resolve_module_path` looks -- a bare filename written
+    anywhere else validates here and then fails at run time with "adapter module not found".
+    """
+    mp = Path(os.path.expanduser(module_path_str)).resolve()
+    if not mp.is_file():
+        _die(f"no adapter module at {mp}",
+             hint="write one first:  ascend target add --scaffold ./my_adapter.py")
+    if mp.suffix != ".py":
+        _die(f"--module needs a .py file, got {mp.name!r}")
+    src = mp.read_text(errors="ignore")
+    if "def send_prompt" not in src:
+        _die(f"{mp.name} has no `send_prompt` function.\n"
+             f"  a custom adapter is one function:  def send_prompt(prompt: str) -> str",
+             hint="ascend target add --scaffold ./my_adapter.py   # writes a working stub")
+    try:
+        in_cfg_dir = mp.parent.resolve() == Path(config_dir()).resolve()
+    except Exception:
+        in_cfg_dir = False
+    cfg = {"adapter": "custom",
+           "adapter_module": mp.name if in_cfg_dir else str(mp),
+           "timeout_ms": int(timeout_ms or 90000)}
+    if target_hint:
+        cfg["target"] = target_hint
+    return cfg
+
+
 def cmd_onboard(args):
     """Zero to a running assessment in one command.
 
@@ -2722,7 +2809,21 @@ def cmd_onboard(args):
     cfg_path = resolve_config_path(cfg_name) or (config_dir() / f"{cfg_name}.json")
 
     # 1. obtain a contract -----------------------------------------------------
-    if args.config and not (getattr(args, "api", None) or args.url or args.har or getattr(args, "curl", None)):
+    # --scaffold writes a stub and stops. It is not a source, it is how you GET a source.
+    if getattr(args, "scaffold", None):
+        path = _write_custom_scaffold(args.scaffold, getattr(args, "api", None) or args.url)
+        _out({"scaffold": str(path), "next": f"ascend target add --module {path} --name '<target>'"},
+             args, human=(f"wrote {path}\n"
+                          f"  edit send_prompt() to talk to your target, then:\n"
+                          f"    ascend target add --module {path} --name '<your target>'"))
+        return
+    if getattr(args, "module", None):
+        _step(1, total, f"loading the custom adapter {args.module}")
+        cfg = _config_from_module(args.module, timeout_ms=getattr(args, "timeout_ms", None),
+                                  target_hint=getattr(args, "api", None) or args.url)
+        _ok(f"custom adapter {Path(args.module).name} · send_prompt() found")
+        cfg_path, cfg_name = _write_named_config(cfg, cfg_name, exact=named_exactly)
+    elif args.config and not (getattr(args, "api", None) or args.url or args.har or getattr(args, "curl", None)):
         _step(1, total, f"using existing config '{args.config}'")
         cfg = _load_named_config(args.config)
         cfg_path = resolve_config_path(args.config) or cfg_path
@@ -3066,11 +3167,11 @@ def cmd_target_add(args):
                  error_code="spec_needs_build",
                  hint=(f"ascend adapter build --spec {src} --out mybot\n"
                        f"  then:  ascend target add mybot"))
-        if any(getattr(args, f, None) for f in ("api", "ws", "url", "curl", "har", "spec", "config")):
+        if any(getattr(args, f, None) for f in ("api", "ws", "url", "curl", "har", "spec", "config", "module", "scaffold")):
             _die("give either a source argument or an explicit source flag, not both")
         setattr(args, flag, value)
         _say(args, f"detected {flag} source: {value}")
-    elif not any(getattr(args, f, None) for f in ("api", "ws", "url", "curl", "har", "spec", "config")):
+    elif not any(getattr(args, f, None) for f in ("api", "ws", "url", "curl", "har", "spec", "config", "module", "scaffold")):
         _die("nothing to onboard: pass a URL, a cURL/HAR file, or a saved config",
              hint="ascend target add https://host/chat")
     # `--run` continues into the assessment; otherwise stop once the target is registered.
@@ -5411,8 +5512,17 @@ def _peek_config(name):
 
 def _load_named_config(name):
     if not name:
-        _die("no config given: pass --config <name> (see `ascend adapter configs`) "
+        _die("no config given: pass --config <name> (see `ascend target list`) "
              "or --file <path.json>")
+    # A path is accepted as well as a name. An agent that just wrote /tmp/thing.json could not
+    # point at it before: --config resolved names against the config dir only, so the agent had
+    # to know that directory's resolution rules and move the file there first.
+    direct = Path(os.path.expanduser(str(name)))
+    if direct.is_file() and direct.suffix == ".json":
+        try:
+            return json.loads(direct.read_text())
+        except (OSError, ValueError) as e:
+            _die(f"could not read the config at {direct}: {e}")
     p = resolve_config_path(name)
     if p is None:
         # candidate_paths() is the ONE resolver; it strips a trailing .json so a name
@@ -5592,7 +5702,17 @@ def _add_onboard_args(s, *, require_source):
     src.add_argument("--url", help="live page with a chat widget: capture the contract in a real browser")
     src.add_argument("--curl", metavar="FILE", help="a curl command in a file (or '-' for stdin)")
     src.add_argument("--har", help="HAR file exported from your own browser (no browser needed here)")
-    src.add_argument("--config", help="an existing config in the config dir (skip discovery)")
+    src.add_argument("--config", metavar="NAME|PATH",
+                     help="a config already on disk — a name in the config dir, or a path to a "
+                          ".json file anywhere (skip discovery)")
+    src.add_argument("--module", metavar="FILE.py",
+                     help="a custom adapter you wrote: a Python file with "
+                          "`def send_prompt(prompt: str) -> str`. Use this when the contract "
+                          "cannot be derived — signed requests, a multi-step handshake, an "
+                          "async poll. It is proven against the live target like any other.")
+    s.add_argument("--scaffold", metavar="FILE.py", default=None,
+                   help="write a working custom-adapter stub to this path and stop. Edit it, "
+                        "then re-run with --module to onboard it.")
     s.add_argument("--name", help="application name in Ascend (default: derived from the URL)")
     s.add_argument("--app", metavar="NAME|aapp_id",
                    help="bind to an application that ALREADY exists in the Console instead of "

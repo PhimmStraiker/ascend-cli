@@ -31,8 +31,24 @@ reach the target.
 
 ### 1. Discover + build a validated adapter
 Follow the **build-adapter** skill. Do not continue past it until
-`ascend adapter validate --config <config>` is **green**. A thin app and an assessment
+`ascend target check <config>` is **green**. A thin app and an assessment
 built on an unvalidated config waste the whole run.
+
+**If the contract cannot be derived, write the adapter as code rather than iterating
+forever.** A signature computed per request, a per-request nonce, a rotating conversation id,
+a reply assembled from several fields, SOAP/XML/protobuf framing, a job you poll to
+completion, or two unrelated credentials — none of these can be expressed as a config, so no
+amount of layer-tweaking will land them. The contract is one function,
+`def send_prompt(prompt: str) -> str`:
+
+```
+ascend target add --scaffold ./my_adapter.py --api <target-url>   # stub, seeded with the url
+# edit send_prompt() until it returns the agent's reply
+ascend target add --module ./my_adapter.py --name "<display name>" --save-as mybot
+```
+
+It passes the same hard gate as a derived adapter — nothing registers unless it answered the
+live target — so the rest of this workflow is identical from here. See **build-adapter §5b**.
 
 Output of this step: a config name (e.g. `mybot`) and its adapter type (a
 transport or preset from `ascend adapter list`).

@@ -1,0 +1,7 @@
+{
+  "_comment": "A custom adapter written as CODE, for a target no derivation can express — a signed request, a multi-step handshake, an async job you poll, a browser you drive. The whole contract is one function in the .py file: `def send_prompt(prompt: str) -> str`. Scaffold one with `ascend target add --scaffold ./my_adapter.py`, then onboard it with `ascend target add --module ./my_adapter.py --name '<target>'`. It is proven against the live target before anything registers, exactly like a derived adapter.",
+  "adapter": "custom",
+  "adapter_module": "example-custom_module.py",
+  "target": "https://your-bot.example.com/chat",
+  "timeout_ms": 90000
+}
