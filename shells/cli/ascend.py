@@ -2777,6 +2777,19 @@ def cmd_onboard(args):
             _ok(f"unresolved layers: {res['unresolved']}")
         cfg_path, cfg_name = _write_named_config(cfg, cfg_name, exact=named_exactly)
 
+    # Credentials are deliberately NOT baked into a config on disk, so say which ones were
+    # withheld. Dropping a header the target requires and staying quiet about it just moves the
+    # confusion: the config then 401s for no visible reason, which reads like a tool bug.
+    try:
+        _held = cfg.pop("_withheld_headers", None)
+        if _held:
+            _warn(args, f"withheld from the config (credential-shaped): {', '.join(_held)}")
+            _warn(args, "  re-supply with --header 'Name: value' or --bearer / --api-key, "
+                        "or set the value in the config yourself; the names are recorded, "
+                        "never the values.")
+    except Exception:
+        pass
+
     cfg = _apply_login_auth(cfg, args)
     adapter = args.adapter or cfg.get("adapter")
     if not adapter:
