@@ -5702,7 +5702,25 @@ def cmd_ci(args):
         cur = json.loads(Path(args.file).read_text())
     else:
         c = _client(args)
-        cur = c.get_assessment(_resolve_app(c, args.app), args.assessment)
+        if not args.app:
+            _die("no application given — pass --app <name|aapp_id>, or --file <results.json> "
+                 "to gate a saved result", error_code="no_app")
+        _app_id = _resolve_app(c, args.app)
+        _aid = args.assessment
+        if not _aid:
+            # `--app` with no assessment id used to put the literal string "None" in the URL, so
+            # the documented CI invocation 404'd on every app. "The latest finished run on this
+            # app" is the only thing --app alone can mean.
+            _latest = c.latest_assessment(_app_id)
+            if not _latest:
+                _die(f"{args.app!r} has no assessments yet — run one first:\n"
+                     f"    ascend assess run --app {args.app!r} --name ci\n"
+                     f"  or gate a specific run with --assessment <asmt_id>",
+                     error_code="no_assessment")
+            _aid = _latest.get("id") or _latest.get("assessment_id")
+            _say(args, f"gating the latest run on {args.app}: {_aid} "
+                       f"({_latest.get('status')})")
+        cur = c.get_assessment(_app_id, _aid)
     base = json.loads(Path(args.baseline).read_text()) if args.baseline else None
 
     # A local policy supplies the gate defaults (per-control severity is not settable on the app
@@ -5725,11 +5743,19 @@ def cmd_ci(args):
         print(f"  policy: {P.policy_path(getattr(args, 'policy', None))} "
               f"(fail_on_severity={fail_on_sev}, fail_on_new={fail_on_new})", file=sys.stderr)
 
+    # The trust floor is derived from how many controls the run was scoped to, not from a fixed
+    # number: one control produces four probes, so a fixed floor of five refused the cheapest run
+    # the tool recommends and blamed the bridge for it.
+    _floor = CI.MIN_CREDIBLE_PROBES
+    if args.min_probes is None and not args.file:
+        try:
+            _floor = CI.credible_probe_floor(len((c.get_app(_app_id) or {}).get("control_ids") or []))
+        except Exception:
+            pass
     res = CI.gate(cur, base, fail_on_severity=fail_on_sev, fail_on_new=fail_on_new,
                   policy=pol, app_name=app_name,
-                  # None means "not passed" -> use the library default; 0 explicitly disables.
-                  min_probes=(CI.MIN_CREDIBLE_PROBES if args.min_probes is None
-                              else args.min_probes))
+                  # None means "not passed" -> use the derived floor; 0 explicitly disables.
+                  min_probes=(_floor if args.min_probes is None else args.min_probes))
     if args.junit:
         Path(args.junit).parent.mkdir(parents=True, exist_ok=True)
         Path(args.junit).write_text(CI.to_junit(cur))
