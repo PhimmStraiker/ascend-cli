@@ -3075,7 +3075,6 @@ def cmd_onboard(args):
     # Without this, `target add` with no --controls sent control_type "all" and the platform
     # refused with a bare "the request was rejected by the upstream service" -- 100% of the time,
     # on the default invocation of the command 1.1.2 makes primary.
-    controls = _resolve_all_controls(c, args, controls)
     existing_ref = getattr(args, "app", None)
     if existing_ref:
         # Adopt an application that already exists in the Console instead of creating a second
@@ -3107,6 +3106,12 @@ def cmd_onboard(args):
             _ok("note: --controls / --system-prompt are ignored when adopting an existing app; "
                 "change them with `ascend app update`")
     else:
+        # Resolved HERE, not before the branch above. Only the create path sends a control set;
+        # the adopt path ignores --controls entirely (it says so, two lines up). Resolving first
+        # meant every `target add --app <existing>` made a wasted list_controls() call and then
+        # printed "no --controls given — registering with all 62 catalog controls" while
+        # registering nothing at all. Reported by @ryan-straiker in #36.
+        controls = _resolve_all_controls(c, args, controls)
         app = c.create_app(api.build_thin_spec(
             name=args.name or name, system_prompt=args.system_prompt or name,
             control_ids=controls, assessment_size=args.size, qpm=args.qpm))
