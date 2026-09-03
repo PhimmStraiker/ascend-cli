@@ -139,6 +139,22 @@ def capture(shape: str, port: int, out_dir: Path) -> tuple[Path | None, str | No
                 break
             time.sleep(0.6)
         return h.write(out_dir / "poll.har"), None
+    if shape == "ack-poll":
+        # The ACK-only contract: create, send (ack only), then the answer appears on a
+        # transcript endpoint. Poll until the bot turn lands, so the capture contains a real
+        # polling loop -- the FIRST poll fires before the agent has answered, and deriving the
+        # transcript shape from that incomplete response is exactly how bot_roles fell back to
+        # defaults instead of being read from the evidence.
+        _, raw = h.call("POST", f"{b}/conversation/new", {})
+        cid = (json.loads(raw) or {}).get("conversation_id")
+        h.call("POST", f"{b}/chat/{cid}/message", {"message": QUESTION})
+        for _ in range(40):
+            _, r = h.call("GET", f"{b}/history?conversation_id={cid}")
+            msgs = (json.loads(r) or {}).get("messages") or []
+            if any(m.get("role") == "assistant" for m in msgs):
+                break
+            time.sleep(0.6)
+        return h.write(out_dir / "ack-poll.har"), None
     if shape == "ws":
         return None, f"ws://127.0.0.1:{port}/"
     if shape == "page":
