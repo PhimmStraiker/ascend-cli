@@ -7,6 +7,45 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ## [Unreleased]
 
+### Changed
+- **`target` is now the primary noun; `app`, `adapter` and `keys` are the machinery underneath
+  it.** An adapter is *how the CLI speaks one target's protocol* — a property of a target, not a
+  peer object to manage and keep in sync. Having both at the top level meant `adapter build` vs
+  `target add` was a coin flip between two commands with different side effects (one registers the
+  app, one does not), and it is the single thing about this CLI that has needed re-explaining most.
+  `app`, `adapter` and `keys` are now hidden from the top-level command list and each carries a
+  description saying what `target` verb does the same job.
+
+  **Nothing you already script has changed.** Every pre-1.1 form still resolves with the same
+  stdout and the same exit code — `adapter build`, `adapter validate`, `app create`, `keys add`,
+  `relay ls`, all of it. This is enforced by a new gate rather than promised: 33 legacy invocation
+  forms are frozen in `tests/backcompat/` and checked by `scripts/back_compat.py` and
+  `tests/test_back_compat.py`. The only new behaviour is a one-line pointer on **stderr** naming
+  the current verb, and it is suppressed entirely under `--json`, so a pipe, a script or an agent
+  sees byte-identical output on both streams.
+
+  The mapping, also printed under `COMPATIBILITY` in `ascend --help`:
+
+  | still works | current way |
+  |---|---|
+  | `adapter build` | `target add --dry-run` (`target add` also registers it) |
+  | `adapter validate` | `target check` |
+  | `adapter show` | `target show` |
+  | `adapter configs` | `target list` |
+  | `adapter list` | `target types` |
+  | `app create` | `target add` |
+  | `app list` / `app get` / `app delete` | `target list` / `target show` / `target rm` |
+  | `keys add` / `keys list` | `target add` / `target list` |
+
+- Three `--help` screens gained explanatory prose (`adapter`, `app`, `keys`) describing what they
+  are relative to `target`. Additive only — 20 inserted lines, nothing removed, and no verb, flag
+  or exit code touched.
+
+### Added
+- **`ascend target types`** — the kinds of target the CLI can speak to (the adapter-type registry).
+  This was previously reachable only as `adapter list`, which was the last remaining reason to use
+  that noun at all.
+
 ## [1.1.1] — 2026-09-02
 
 ### Security

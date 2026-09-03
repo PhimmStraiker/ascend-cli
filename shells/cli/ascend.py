@@ -5508,11 +5508,21 @@ EVERYDAY
   assess watch --all     follow live runs; the BRIDGE column flags a run nobody is answering
   results                read the findings
 
+  target types           the kinds of target this can speak to
+
 MORE
-  app · adapter · assess · bridge · chat · ci · controls · export · keys
-  onboard · policy · reports · status · target · tenant · version
+  assess · bridge · chat · ci · controls · export · onboard · policy
+  reports · status · target · tenant · version
   Run `ascend <command> --help` for any of these — each has its own flags and examples.
-  `app`, `adapter` and `keys` are the machinery underneath `target`, still fully supported.
+
+COMPATIBILITY
+  app · adapter · keys   the machinery underneath `target`. Still fully supported — nothing
+                         you already script has changed. `target add` does all three in one
+                         step: derives the adapter, registers the app, stores the bridge key.
+                           adapter build     → target add --dry-run
+                           adapter validate  → target check
+                           adapter list      → target types
+                           app create        → target add
 
 Every command takes --json. `ascend target add --help` is the fastest way in.
 Full reference: docs/COMMAND_MAP.md  ·  building adapters: docs/BUILD_ADAPTER.md
@@ -5653,7 +5663,13 @@ def build_parser():
                            help=argparse.SUPPRESS)
 
     # app
-    ap = sub.add_parser("app", parents=[GLOBALS], formatter_class=_Fmt, help="manage Ascend applications").add_subparsers(dest="verb", required=True)
+    ap = sub.add_parser("app", parents=[GLOBALS], formatter_class=_Fmt,
+                    help=argparse.SUPPRESS,   # machinery underneath `target`; still fully supported
+                    description="Manage Ascend applications directly.\n\n"
+                                "This is the machinery underneath `target` and is still fully\n"
+                                "supported. `ascend target add` creates the application, derives\n"
+                                "the adapter and stores the bridge key in one step."
+                    ).add_subparsers(dest="verb", required=True)
     s = ap.add_parser("list", parents=[GLOBALS], formatter_class=_Fmt,
                       help="list applications (add --with-runs for the assessment table)",
                       epilog="examples:\n"
@@ -5916,7 +5932,15 @@ def build_parser():
     s.set_defaults(func=cmd_runtime_start)
 
     # adapter
-    adp = sub.add_parser("adapter", parents=[GLOBALS], formatter_class=_Fmt, help="adapter configs & capabilities").add_subparsers(dest="verb", required=True)
+    adp = sub.add_parser("adapter", parents=[GLOBALS], formatter_class=_Fmt,
+                     help=argparse.SUPPRESS,   # machinery underneath `target`; still fully supported
+                     description="Build and inspect adapter configs directly.\n\n"
+                                 "An adapter is HOW the CLI speaks one target's protocol, so it is\n"
+                                 "a property of a target rather than a separate thing to manage.\n"
+                                 "`ascend target add` derives it from a URL, a cURL file or a .har,\n"
+                                 "proves it against the live endpoint and stores it. These verbs\n"
+                                 "remain for the cases that need the lower level."
+                     ).add_subparsers(dest="verb", required=True)
     adp.add_parser("list", parents=[GLOBALS], formatter_class=_Fmt, help="list registered adapter types").set_defaults(func=cmd_adapter_list)
     s = adp.add_parser("show", parents=[GLOBALS], formatter_class=_Fmt,
                        help="print a saved adapter config (secrets masked)")
@@ -6076,6 +6100,11 @@ def build_parser():
     s.add_argument("target", help="target name or aapp_ id")
     s.add_argument("--keep-key", action="store_true", help="leave the stored bridge key in place")
     s.set_defaults(func=cmd_target_rm)
+    # The registry of adapter TYPES, i.e. "what kinds of target can this onboard?". It was only
+    # reachable as `adapter list`, which was the single reason anyone still needed that noun.
+    tg.add_parser("types", parents=[GLOBALS], formatter_class=_Fmt,
+                  help="the kinds of target this can speak to (adapter types)"
+                  ).set_defaults(func=cmd_adapter_list)
 
     s = sub.add_parser("results", parents=[GLOBALS], formatter_class=_Fmt,
                        help="read results: a Console CSV export, or a local capture",
@@ -6195,7 +6224,12 @@ def build_parser():
 
     # keys (the local bridge key store)
     kp = sub.add_parser("keys", parents=[GLOBALS], formatter_class=_Fmt,
-                        help="manage stored tc- bridge keys").add_subparsers(dest="verb", required=True)
+                        help=argparse.SUPPRESS,   # machinery underneath `target`; still fully supported
+                        description="Manage stored tc- bridge keys directly.\n\n"
+                                    "This is the machinery underneath `target` and is still fully\n"
+                                    "supported. `ascend target add` stores the key it fetched, and\n"
+                                    "`ascend target rm` drops it."
+                        ).add_subparsers(dest="verb", required=True)
     s = kp.add_parser("list", parents=[GLOBALS], formatter_class=_Fmt, help="list stored keys (masked)")
     s.add_argument("--no-check", action="store_true", help="don't check whether the apps still exist")
     s.set_defaults(func=cmd_keys_list)
@@ -6834,11 +6868,65 @@ def _launch_screen():
     print()
 
 
+# `target` is the primary noun as of 1.1.2. `app`, `adapter` and `keys` are the machinery
+# underneath it and keep working forever -- customers are mid-engagement driving them from shell
+# scripts and from Claude Code, so demoting them may not break them. What they get is a one-line
+# pointer to the `target` verb that does the same job.
+#
+# The pointer goes to STDERR, never stdout: stdout is what a pipe, a script and an agent consume,
+# and tests/backcompat/ freezes it byte for byte. It is also suppressed under --json, so a machine
+# invocation stays completely silent on both streams.
+#
+# Only genuine equivalences are listed. `adapter build` is deliberately mapped to
+# `target add --dry-run` rather than `target add`, because build does NOT register the app while
+# `target add` does -- pointing someone at a command with an extra side effect would be worse
+# than saying nothing.
+# (current command, optional aside). The aside is kept OUT of the backticks so the line stays
+# copy-pasteable -- the first cut inlined it and produced nested backticks around a string that
+# was no longer a runnable command.
+_LEGACY_VERB_HINTS = {
+    ("adapter", "build"):    ("target add --dry-run", "`target add` also registers it"),
+    ("adapter", "validate"): ("target check", ""),
+    ("adapter", "show"):     ("target show", ""),
+    ("adapter", "configs"):  ("target list", ""),
+    ("adapter", "list"):     ("target types", ""),
+    ("app", "create"):       ("target add", "it also derives the adapter and stores the key"),
+    ("app", "list"):         ("target list", ""),
+    ("app", "get"):          ("target show", ""),
+    ("app", "delete"):       ("target rm", ""),
+    ("keys", "add"):         ("target add", "it stores the bridge key for you"),
+    ("keys", "list"):        ("target list", ""),
+}
+_LEGACY_NOUNS = ("adapter", "app", "keys")
+
+
+def _legacy_pointer(raw):
+    """Print a one-line `target` pointer when a demoted noun is used. stderr only."""
+    argv = [a for a in raw if not a.startswith("-")]
+    if not argv or argv[0] not in _LEGACY_NOUNS or _wants_json():
+        return
+    noun = argv[0]
+    verb = argv[1] if len(argv) > 1 else None
+    better = _LEGACY_VERB_HINTS.get((noun, verb))
+    try:
+        if better:
+            cmd, aside = better
+            tail = f" ({aside})" if aside else ""
+            print(f"note: `{noun} {verb}` still works; `{cmd}` is the current way{tail}.",
+                  file=sys.stderr)
+        else:
+            print(f"note: `{noun}` is the machinery underneath `target` and still works; "
+                  f"`ascend target --help` is the current way in.", file=sys.stderr)
+    except Exception:
+        pass   # a deprecation note must never be the reason a command fails
+
+
 def main(argv=None):
     raw = list(sys.argv[1:] if argv is None else argv)
     if "--version" in raw and not [a for a in raw if not a.startswith("-")]:
         print(VERSION)
         return
+    _legacy_pointer(raw)
     # Bare `ascend` on a terminal -> the launch home screen. Non-TTY / piped / --json fall through
     # to argparse (unchanged), so scripts and agents behave exactly as before.
     if (not [a for a in raw if not a.startswith("-")] and sys.stdout.isatty()

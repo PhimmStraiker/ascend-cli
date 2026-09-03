@@ -5,6 +5,12 @@ usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] a
        [-h] [--json] [--token TOKEN] [--base BASE] [--bridge-base BRIDGE_BASE]
        {list,get,resolve,create,update,bind,delete} ...
 
+Manage Ascend applications directly.
+
+This is the machinery underneath `target` and is still fully
+supported. `ascend target add` creates the application, derives
+the adapter and stores the bridge key in one step.
+
 positional arguments:
   {list,get,resolve,create,update,bind,delete}
     list                list applications (add --with-runs for the assessment table)

@@ -39,11 +39,21 @@ EVERYDAY
   assess watch --all     follow live runs; the BRIDGE column flags a run nobody is answering
   results                read the findings
 
+  target types           the kinds of target this can speak to
+
 MORE
-  app · adapter · assess · bridge · chat · ci · controls · export · keys
-  onboard · policy · reports · status · target · tenant · version
+  assess · bridge · chat · ci · controls · export · onboard · policy
+  reports · status · target · tenant · version
   Run `ascend <command> --help` for any of these — each has its own flags and examples.
-  `app`, `adapter` and `keys` are the machinery underneath `target`, still fully supported.
+
+COMPATIBILITY
+  app · adapter · keys   the machinery underneath `target`. Still fully supported — nothing
+                         you already script has changed. `target add` does all three in one
+                         step: derives the adapter, registers the app, stores the bridge key.
+                           adapter build     → target add --dry-run
+                           adapter validate  → target check
+                           adapter list      → target types
+                           app create        → target add
 
 Every command takes --json. `ascend target add --help` is the fastest way in.
 Full reference: docs/COMMAND_MAP.md  ·  building adapters: docs/BUILD_ADAPTER.md
