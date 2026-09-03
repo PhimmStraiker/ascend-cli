@@ -270,8 +270,11 @@ def print_table(rows, stage):
                  ("no-reply" if r.get("validated") else "-")))
         if r.get("chatter_leak"):
             live += "+CHATTER"
+        # str() on both: `expect` is None for a shape no adapter covers, and a bare
+        # f"{None:<16}" raises TypeError -- which crashed the whole table after five good rows.
+        exp = r["expect"] if r["expect"] is not None else "(none fits)"
         print(f"{r['shape']:<11} {r.get('source','-'):<4} {str(r.get('adapter')):<16} "
-              f"{r['expect']:<16} {live:<10} {mark:<6}")
+              f"{str(exp):<16} {live:<10} {mark:<6}")
         if r.get("note"):
             print(f"{'':<11} └─ {r['note']}")
         if stage == "full":
