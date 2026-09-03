@@ -11,6 +11,13 @@ stderr for a fixed set of offline commands under NO_COLOR and diffs them later.
 
 Only commands that need no network are listed: the point is a deterministic byte comparison, not
 coverage of the platform.
+
+Two cases were tried and removed rather than fudged: `adapter configs` and a not-found `--config`
+both LIST the operator's own config files. Every config directory that gets searched -- including
+the repo's own `configs/` -- holds untracked local files, so that output differs per machine by
+design and no amount of path normalization makes it comparable. A corpus case that cannot hold
+everywhere is worse than no case: it fails for whoever runs it next, and the natural response is
+to re-record and bury whatever it was protecting.
 """
 import argparse
 import os
@@ -34,14 +41,28 @@ CASES = {
     "help_results":       ["results", "--help"],
     "help_status":        ["status", "--help"],
     "adapter_list":       ["adapter", "list"],
-    "adapter_configs":    ["adapter", "configs"],
-    "bad_config":         ["adapter", "validate", "--config", "definitely-not-here"],
     "bad_out_dir":        ["adapter", "build", "--api", "http://127.0.0.1:1/x", "--out", "./"],
     "unknown_command":    ["not-a-command"],
 }
 
 ENV = {"NO_COLOR": "1", "ASCEND_NO_SPINNER": "1", "ASCEND_SKIP_TENANT_CHECK": "1",
        "STRAIKER_PAT": "s6r_pat_dummy", "COLUMNS": "100", "TERM": "dumb"}
+
+
+def _normalize(text):
+    """Strip anything machine-specific so the corpus is comparable in ANY checkout.
+
+    The first recording baked in the absolute path of the clone it was made in, so the corpus
+    passed on exactly one machine and failed everywhere else -- which makes it worthless as a
+    shared gate, and reads as a real regression to whoever hits it first.
+    """
+    repo = str(REPO)
+    home = os.path.expanduser("~")
+    out = text.replace(repo + os.sep, "<REPO>/").replace(repo, "<REPO>")
+    out = out.replace(home + os.sep, "<HOME>/").replace(home, "<HOME>")
+    # macOS reports /private/tmp for /tmp; either spelling must compare equal
+    out = out.replace("/private/tmp", "/tmp")
+    return out
 
 
 def run(argv):
@@ -52,8 +73,9 @@ def run(argv):
     r = subprocess.run([sys.executable, str(CLI), *argv], capture_output=True, text=True,
                        cwd=str(REPO), env=env, timeout=180)
     # The exit code is part of the contract, so it is recorded alongside the text.
-    return f"$ ascend {' '.join(argv)}\n--- exit {r.returncode}\n--- stdout\n{r.stdout}" \
-           f"--- stderr\n{r.stderr}"
+    return _normalize(
+        f"$ ascend {' '.join(argv)}\n--- exit {r.returncode}\n--- stdout\n{r.stdout}"
+        f"--- stderr\n{r.stderr}")
 
 
 def main():
