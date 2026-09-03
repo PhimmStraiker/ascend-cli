@@ -47,6 +47,26 @@ All notable changes to the Ascend CLI. Newest first. Format follows
   that noun at all.
 
 ### Fixed
+- **A plain-text bot could not be onboarded at all, and its stream terminator became the answer.**
+  Two defects found by pointing the CLI at a real chunked `text/plain` agent.
+
+  For a non-JSON body `_guess_response_path` still returns its `"response"` fallback, and both
+  `_http_params` and `compose` wrote that key unconditionally. `direct_api` then saw a
+  response_path, demanded JSON, and failed with "expected JSON for response_path 'response' but
+  got non-JSON". With the key **absent** the same adapter treats the raw body as the answer,
+  which `test_direct_api_non_json_response_no_path_is_text` has asserted since v1.0 — so
+  discovery was the only thing standing between a text/plain target and a working config, and it
+  was inventing the obstacle. Fixed in both places; fixing one left the other to re-add the key.
+
+  Separately, a chunked text agent closes its body with a marker (`<<<END>>>`, `[DONE]`,
+  `<EOS>`). With no JSON envelope to separate transport from speech, that marker is simply the
+  last characters of the answer and the scorer reads it as something the agent said — quietly, on
+  every turn, which is worse than failing loudly once. Same class as SSE progress chatter
+  arriving as the reply. Discovery now records a `stop_marker` when it observes one and
+  `direct_api` strips it. Strictly opt-in, and the detector is deliberately narrow: the final
+  line must be short, whitespace-free and either bracket-wrapped or a known terminator word, so a
+  target whose answer genuinely ends in a short word cannot lose it.
+
 - **`ASCEND_FORCE_COLOR=0` forced colour ON, and `ASCEND_PLAIN=0` turned it off.** Every non-empty
   string is truthy in Python, so both switches did the opposite of what `=0` plainly means. The
   damaging case is a pipe: someone sets `ASCEND_FORCE_COLOR=0` intending "off" and gets ANSI

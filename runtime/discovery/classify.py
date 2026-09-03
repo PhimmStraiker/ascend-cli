@@ -477,8 +477,52 @@ def _http_params(req: Dict[str, Any], resp: Dict[str, Any], stream: Optional[str
         if hints.get("text_path"):
             params["stream"].update({k: v for k, v in hints.items() if k != "format"})
     else:
-        params["response_path"] = _guess_response_path(resp["json"], _REPLY_TEXT.get("v"))
+        # Only claim a response_path when the body actually parsed as JSON. For a plain-text
+        # bot, `_guess_response_path` still returns its "response" fallback, and that single
+        # key turns a working config into a broken one: direct_api sees a response_path, demands
+        # JSON, and fails with "expected JSON for response_path 'response' but got non-JSON".
+        # With the key ABSENT the same adapter treats the raw text as the answer and works --
+        # which test_direct_api_non_json_response_no_path_is_text has always asserted. So the
+        # capture path was the only thing standing between a text/plain target and a valid
+        # config, and it was inventing the obstacle.
+        if resp.get("json") is not None:
+            params["response_path"] = _guess_response_path(resp["json"], _REPLY_TEXT.get("v"))
+        else:
+            stop = _detect_stop_marker(resp.get("raw_body") or "")
+            if stop:
+                params["stop_marker"] = stop
     return params
+
+
+# A streaming terminator on a plain-text body: `<<<END>>>`, `[DONE]`, `<EOS>`, `--END--`.
+_STOP_WORDS = ("done", "end", "eos", "eof", "stop", "fin", "finish", "complete", "completed")
+
+
+def _detect_stop_marker(body: str) -> Optional[str]:
+    """Find the terminator a chunked text/plain body closes with.
+
+    Without this the marker is simply the last few characters of the answer, and the scorer
+    reads it as the agent's words -- on every single turn, quietly, which is worse than failing
+    once. Same class as SSE progress chatter arriving as the reply.
+
+    Deliberately narrow: the final non-empty line must be short, contain no whitespace, and
+    either be wrapped in bracket/angle/dash punctuation or be one of a few terminator words.
+    A target whose answer genuinely ends in a short word must not lose it, so ambiguity means
+    no marker rather than a guess.
+    """
+    lines = [l.strip() for l in (body or "").splitlines() if l.strip()]
+    if len(lines) < 2:
+        return None
+    last = lines[-1]
+    if len(last) > 32 or " " in last or "\t" in last:
+        return None
+    core = last.strip("<>[](){}|-_*=.: ").lower()
+    if not core:
+        return None
+    bracketed = last[0] in "<[({|-*=" and last[-1] in ">])}|-*="
+    if bracketed or core in _STOP_WORDS:
+        return last
+    return None
 
 
 def _ws_params(ev: Dict[str, Any]) -> Dict[str, Any]:
@@ -1024,8 +1068,17 @@ def compose(classified: Dict[str, Any]) -> Dict[str, Any]:
         else:  # rest_json (default)
             adapter = "direct_api"
             config.update({"endpoint": endpoint, "method": tparams.get("method", "POST"),
-                           "body": tparams.get("body", {"prompt": "{{PROMPT}}"}),
-                           "response_path": tparams.get("response_path", "response")})
+                           "body": tparams.get("body", {"prompt": "{{PROMPT}}"})})
+            # Same trap as in _http_params, and it had to be fixed in both places: defaulting
+            # response_path to "response" for a target that answered in plain text makes
+            # direct_api demand JSON and fail, when omitting the key entirely makes the same
+            # adapter treat the raw body as the answer. Only carry a path that was derived
+            # from a body that really was JSON.
+            if tparams.get("response_path"):
+                config["response_path"] = tparams["response_path"]
+            if tparams.get("stop_marker"):
+                # the streaming terminator is transport, not the agent's words
+                config["stop_marker"] = tparams["stop_marker"]
         # Session upgrade for a rest_json transport that actually has id-flow.
         if adapter == "direct_api" and session.get("value") in ("create_session", "create_conversation"):
             adapter = "session_api"
