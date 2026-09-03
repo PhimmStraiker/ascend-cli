@@ -480,3 +480,61 @@ class TestPlainHatchCoversEverything:
 
     def test_the_spinner_refuses_to_animate(self):
         assert ui.Progress("x", stream=_Tty()).enabled is False
+
+
+# ---- 10. the design system's law ---------------------------------------------------------------
+class TestDesignCanon:
+    """Rules from straiker-design-skill (.claude/skills/straiker-ui). These are the mechanical
+    ones -- the skill says to apply them without prompting -- so a test is the right place for
+    them: they are the kind of thing that drifts back one commit at a time."""
+
+    def test_corners_are_square(self):
+        """"No rounded corners -- the system is square by default." """
+        class Utf8:
+            encoding = "utf-8"
+            def isatty(self): return False
+        box = ui.panel(["x"], title="T", stream=Utf8()) + ui.header("ascend", stream=Utf8())
+        for rounded in "╭╮╰╯":
+            assert rounded not in box, f"rounded corner {rounded!r} in a square system"
+
+    def test_critical_and_high_share_the_red_family(self):
+        """Canon: critical IS the fail treatment; both sit in the red family."""
+        assert ui.SEV_TOKEN["critical"] == ui.SEV_TOKEN["high"] == "ascend"
+
+    def test_low_severity_is_neutral_not_green(self):
+        """Green reads "good". Low severity is still an issue, and inverting red=bad/green=good
+        is an explicit reject."""
+        assert ui.SEV_TOKEN["low"] == "gris"
+        assert ui.brand("gris") == (217, 217, 217)
+        assert "\033[32m" not in ui.severity_chip("low"), "low must not be green"
+
+    def test_informational_is_the_defend_cyan(self):
+        """informational is not an issue -- it renders as benign info."""
+        assert ui.SEV_TOKEN["informational"] == ui.SEV_TOKEN["info"] == "defend"
+
+    def test_severity_anchors_match_the_design_tokens(self):
+        """Converted from the dark-mode `-600` HSL anchors. Eyeballing a colour is a bug."""
+        assert ui.brand("ascend") == (255, 97, 107)     # hsla(356,100%,69%) ~ #FF616B
+        assert ui.brand("pulse") == (255, 223, 82)      # hsla(49,100%,66%)
+        assert ui.brand("defend") == (77, 222, 255)     # hsla(191,100%,65%)
+        assert ui.brand("secure") == (133, 255, 137)    # hsla(122,100%,76%)
+
+    def test_progress_is_status_coloured_not_brand_or_severity(self):
+        """"Brand colors (rose/gold) are for the logo only." And a bar that fills with the
+        severity-high red would read as "this is getting worse"."""
+        assert ui.PROGRESS_RAMP == ("defend", "defend")
+        assert ui.GRADIENT_BAR == ui.PROGRESS_RAMP
+        rendered = ui.gradient_bar(0.6, width=24, depth=24)
+        for token in ("rose", "gold"):
+            r, g, b = ui.brand(token)
+            assert f"38;2;{r};{g};{b}m" not in rendered, f"brand {token} used as decoration"
+
+    def test_the_default_ramp_is_flat_not_decorative(self):
+        """"No decorative color, no 'visual interest' palettes." A flat fill collapses to one
+        escape; a ramp would emit many."""
+        assert ui.gradient_bar(1.0, width=24, depth=24).count("38;2;") == 1
+
+    def test_the_brand_ramp_remains_available_for_a_logged_deviation(self):
+        """The law is challengeable, not absent -- an override must be possible and explicit."""
+        out = ui.gradient_bar(0.6, width=24, depth=24, ramp=ui.BRAND_RAMP)
+        assert out.count("38;2;") > 1

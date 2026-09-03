@@ -36,8 +36,11 @@ _CYA = "\033[36m"
 _MAG = "\033[35m"
 
 _SEV_COLOR = {
-    "critical": _MAG, "high": _RED, "medium": _YEL,
-    "low": _GRN, "info": _CYA, "informational": _CYA, "none": _DIM, "unknown": _RED,
+    # Canon: critical and high are both the red family (critical is the fail treatment itself),
+    # medium is yellow, low is NEUTRAL GRAY -- not green. Green reads "good", and low severity is
+    # still an issue; "inverting red = bad, green = good" is a rejected design.
+    "critical": _RED, "high": _RED, "medium": _YEL,
+    "low": _DIM, "info": _CYA, "informational": _CYA, "none": _DIM, "unknown": _RED,
 }
 
 
@@ -261,16 +264,46 @@ import unicodedata as _ud
 # The brand ramp, taken from docs/architecture.html so the terminal and the docs cannot drift.
 # Three different pinks used to coexist in this repo (38;5;205, 38;5;204, #FF5378); this is the
 # one definition.
+# The design system's dark-mode `-600` anchors, converted from the HSL in
+# straiker-design-skill (.claude/skills/straiker-ui/references/design-tokens.md). Dark mode is
+# the product default and a terminal is always dark, so `-600` is the right column.
+# "Eyeballing a color is a bug" — these are the tokens, not approximations.
 BRAND = {
-    "ascend":   (255, 83, 120),    # #FF5378 — Ascend red/pink, the primary accent
-    "pink":     (240, 109, 154),   # #F06D9A
-    "gold":     (200, 138, 30),    # #C88A1E
-    "gold_lt":  (255, 201, 113),   # #FFC971 — the light end of the progress ramp
-    "defend":   (45, 198, 255),    # #2DC6FF
-    "unveil":   (192, 132, 252),   # #C084FC
+    # severity / status anchors
+    "gris":     (217, 217, 217),   # #D9D9D9  severity-low
+    "pulse":    (255, 223, 82),    # #FFDF52  severity-medium, warn
+    "ascend":   (255, 97, 107),    # #FF616B  severity-high, and the fail treatment = critical
+    "defend":   (77, 222, 255),    # #4DDEFF  severity-info
+    "secure":   (133, 255, 137),   # #85FF89  success
+    "veil":     (222, 138, 255),   # #DE8AFF  decorative purple (unused here by design)
+    # brand — LOGO ONLY. The design law is explicit: "Brand colors (rose/gold) are for the logo
+    # only. Never as chart series, decorative accents, or emphasis in new surfaces."
+    "rose":     (255, 68, 158),    # #FF449E  --brand-1
+    "gold":     (255, 184, 42),    # #FFB82A  --brand-2
+    "logo":     (255, 83, 120),    # #FF5378  the established wordmark red, existing chrome
     "glint":    (255, 190, 210),
 }
-GRADIENT_BAR = ("gold_lt", "ascend")     # #FFC971 -> #FF5378, warm to brand
+
+# Progress is STATUS, not severity. A bar that fills with the severity-high red as it advances
+# would read as "this is getting worse" in a system where red means high severity, so the fill is
+# the defend/info anchor and colour does the one job the design law allows it: communicating
+# status. Flat, not a ramp -- a decorative gradient is an explicit reject
+# ("no decorative color, no 'visual interest' palettes").
+PROGRESS_RAMP = ("defend", "defend")
+
+# The brand ramp exists only for a deliberate, logged deviation. The law: "Brand colors
+# (rose/gold) are for the logo only. Never as chart series, decorative accents, or emphasis in
+# new surfaces." Pass ramp=BRAND_RAMP to override, and mark the call site DEVIATION:.
+BRAND_RAMP = ("gold", "rose")
+
+GRADIENT_BAR = PROGRESS_RAMP     # what every caller gets unless it says otherwise
+
+# Severity -> token, per the canon: critical and high share the red family (critical IS the fail
+# treatment), medium is pulse, low is gris, informational is defend cyan and is NOT an issue.
+SEV_TOKEN = {
+    "critical": "ascend", "high": "ascend", "medium": "pulse", "low": "gris",
+    "info": "defend", "informational": "defend", "none": None, "unknown": "ascend",
+}
 
 # Colour for a state word. A whitelist on purpose: an unrecognised word passes through
 # untouched rather than being guessed at, so a new platform status can never come out
@@ -283,7 +316,7 @@ STATE_TONE = {
     "fail": "alarm", "none": "dim", "-": "dim", "not": "dim", "unknown": "dim",
 }
 _TONE_8 = {"ok": _GRN, "warn": _YEL, "alarm": _RED, "info": _CYA, "dim": _DIM, "": ""}
-_TONE_RGB = {"ok": (120, 220, 150), "warn": BRAND["gold_lt"], "alarm": BRAND["ascend"],
+_TONE_RGB = {"ok": BRAND["secure"], "warn": BRAND["pulse"], "alarm": BRAND["ascend"],
              "info": BRAND["defend"], "dim": None}
 
 _ANSI_RE = _re.compile(r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])")
@@ -487,7 +520,7 @@ def term_width(stream=None, *, default: int = 100, minimum: int = 40, maximum: i
 # ---- structure ----------------------------------------------------------------------------
 def _glyphs(stream):
     if unicode_ok(stream):
-        return {"h": "─", "v": "│", "tl": "╭", "tr": "╮", "bl": "╰", "br": "╯",
+        return {"h": "─", "v": "│", "tl": "┌", "tr": "┐", "bl": "└", "br": "┘",
                 "full": "█", "void": "░", "warn": "▲", "dot": "·"}
     return {"h": "-", "v": "|", "tl": "+", "tr": "+", "bl": "+", "br": "+",
             "full": "#", "void": ".", "warn": "!", "dot": "-"}
