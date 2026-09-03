@@ -3,13 +3,14 @@ $ ascend target add --help
 --- stdout
 usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] target add
        [-h] [--json] [--token TOKEN] [--base BASE] [--bridge-base BRIDGE_BASE]
-       [--api URL | --url URL | --curl FILE | --har HAR | --config CONFIG] [--name NAME]
-       [--app NAME|aapp_id] [--save-as NAME] [--system-prompt SYSTEM_PROMPT] [--controls CONTROLS]
-       [--adapter ADAPTER] [--bearer TOKEN] [--api-key NAME:VALUE[:in=header|query]]
-       [--header 'Name: value'] [--body-field key=value] [--prompt-hint PROMPT_HINT] [--insecure]
-       [--size {small,medium,large}] [--qpm QPM] [--prompt PROMPT] [--settle SETTLE] [--headless]
-       [--manual] [--timeout TIMEOUT] [--dry-run] [--wait] [--detail] [--interval INTERVAL]
-       [--timeout-assess TIMEOUT_ASSESS] [--assessment-name ASSESSMENT_NAME] [-v] [--run]
+       [--api URL | --ws URL | --url URL | --curl FILE | --har HAR | --config CONFIG]
+       [--name NAME] [--app NAME|aapp_id] [--save-as NAME] [--system-prompt SYSTEM_PROMPT]
+       [--controls CONTROLS] [--adapter ADAPTER] [--bearer TOKEN]
+       [--api-key NAME:VALUE[:in=header|query]] [--header 'Name: value'] [--body-field key=value]
+       [--prompt-hint PROMPT_HINT] [--insecure] [--size {small,medium,large}] [--qpm QPM]
+       [--prompt PROMPT] [--settle SETTLE] [--headless] [--manual] [--timeout TIMEOUT] [--dry-run]
+       [--wait] [--detail] [--interval INTERVAL] [--timeout-assess TIMEOUT_ASSESS]
+       [--assessment-name ASSESSMENT_NAME] [-v] [--run]
        [source]
 
 positional arguments:
@@ -26,6 +27,8 @@ options:
                         results) (default: https://ascendai-bridge.prod.straiker.ai)
   --api URL             an HTTP API endpoint (or base URL) — one probe, no browser. The simple-
                         contract one-liner. (default: None)
+  --ws URL              a WebSocket endpoint (ws:// or wss://) — connects, works out the frame
+                        contract, no browser (default: None)
   --url URL             live page with a chat widget: capture the contract in a real browser
                         (default: None)
   --curl FILE           a curl command in a file (or '-' for stdin) (default: None)

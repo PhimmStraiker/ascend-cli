@@ -47,6 +47,23 @@ All notable changes to the Ascend CLI. Newest first. Format follows
   that noun at all.
 
 ### Fixed
+- **A WebSocket target can now be onboarded from its URL.** `websocket_direct` shipped as an
+  adapter, with an example config and its own tests — but nothing could *derive* one. `probe.py`
+  spoke only HTTP, and `classify.py` reached `websocket_direct` solely from a HAR that already
+  contained a WebSocket entry. Measured against a real socket agent:
+  `ascend target add ws://host/chat` exited 3 with "is not a URL, a file, or a known config",
+  and `--url wss://host/` was worse — it drove a real browser at a socket and then reported
+  "the capture never delivered the prompt". So a customer with a WebSocket bot and no HAR export
+  had no path at all, for an adapter that was already written and working.
+
+  A socket is perfectly probeable: connect, send a frame, read one back. `ascend target add`
+  now accepts `ws://` and `wss://` (and there is an explicit `--ws` flag), tries the frame
+  shapes that actually occur in the wild, and derives `send_template`, `response_path`,
+  `aggregate` and a terminal-frame `done_when`. It reuses the same `score_answer` as the HTTP
+  path, so "which field is the reply" is decided identically everywhere. Stopping on a terminal
+  frame rather than waiting out the idle window matters across a few thousand probes: it is the
+  difference between an assessment finishing and timing out.
+
 - **A plain-text bot could not be onboarded at all, and its stream terminator became the answer.**
   Two defects found by pointing the CLI at a real chunked `text/plain` agent.
 

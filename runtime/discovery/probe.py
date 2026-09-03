@@ -42,6 +42,7 @@ monkeypatched (see ``tests/conftest.py::install_fake_requests``).
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -1588,3 +1589,167 @@ __all__ = [
     "candidate_endpoints", "default_shapes", "score_answer",
     "string_paths", "dot_get",
 ]
+
+
+# --------------------------------------------------------------------------- #
+# WebSocket probing                                                           #
+# --------------------------------------------------------------------------- #
+# `websocket_direct` shipped as an adapter and as an example config, but nothing could DERIVE
+# one: probe.py spoke only HTTP, and classify.py reached `websocket_direct` solely from a HAR
+# containing a WebSocket entry. So `ascend target add ws://host/chat` did not even parse -- it
+# died with "is not a URL, a file, or a known config" -- and `--url wss://...` was worse, routing
+# a socket endpoint into the browser driver, which reported "the capture never delivered the
+# prompt". A customer with a WebSocket bot and no HAR had no path at all.
+#
+# A socket IS probeable: connect, send a frame, read what comes back. That is what this does,
+# reusing the same answer scoring as the HTTP path so "which field is the reply" is decided the
+# same way everywhere.
+
+# Ordered by how often they appear in the wild. A plain-text frame goes last: it "succeeds"
+# against servers that echo, so trying it early would mask a real JSON contract.
+WS_SEND_CANDIDATES: List[Any] = [
+    {"message": PROMPT_TOKEN},
+    {"type": "message", "text": PROMPT_TOKEN},
+    {"prompt": PROMPT_TOKEN},
+    {"text": PROMPT_TOKEN},
+    {"query": PROMPT_TOKEN},
+    {"input": PROMPT_TOKEN},
+    {"action": "message", "data": {"text": PROMPT_TOKEN}},
+    PROMPT_TOKEN,
+]
+
+_WS_DONE_VALUES = {"done", "complete", "completed", "end", "finished", "final", "stop", "eos"}
+
+
+def _ws_render(template: Any, prompt: str) -> str:
+    if isinstance(template, str):
+        return template.replace(PROMPT_TOKEN, prompt)
+    return json.dumps(template).replace(PROMPT_TOKEN, _json_escape(prompt))
+
+
+def _ws_done_marker(frames: List[Any]) -> Optional[Dict[str, str]]:
+    """Spot a terminal frame, so the adapter can stop on it instead of waiting out idle_ms.
+
+    Waiting for silence works but costs the idle window on every single probe. Across a few
+    thousand probes that is the difference between an assessment finishing and timing out.
+    """
+    for frame in reversed(frames):
+        if not isinstance(frame, dict):
+            continue
+        for key in ("type", "event", "status", "state", "kind"):
+            val = frame.get(key)
+            if isinstance(val, str) and val.strip().lower() in _WS_DONE_VALUES:
+                return {"path": key, "equals": val}
+    return None
+
+
+def probe_ws(url: str, *, prompt: str, headers: Optional[Dict[str, str]] = None,
+             timeout_s: float = 30.0, idle_ms: int = 1500,
+             subprotocols: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Connect to a WebSocket target, work out its frame contract, and report it.
+
+    Returns a dict with ``ok`` plus, on success, everything a websocket_direct config needs.
+    Never raises: a probe that explodes is indistinguishable from a target that is down, and the
+    operator needs to be told which.
+    """
+    try:
+        import websockets            # noqa: F401  (import here: only the ws path needs it)
+    except ImportError:
+        return {"ok": False, "diagnosis": "dependency",
+                "message": "the `websockets` package is required to probe a WebSocket target",
+                "hint": "pip install websockets"}
+
+    async def _attempt(template: Any) -> Dict[str, Any]:
+        import websockets
+        rendered = _ws_render(template, prompt)
+        frames: List[Any] = []
+        raw_frames: List[str] = []
+        kwargs: Dict[str, Any] = {"open_timeout": min(10.0, timeout_s)}
+        if headers:
+            kwargs["additional_headers"] = headers
+        if subprotocols:
+            kwargs["subprotocols"] = subprotocols
+        async with websockets.connect(url, **kwargs) as sock:
+            await sock.send(rendered)
+            deadline = time.time() + timeout_s
+            while time.time() < deadline:
+                try:
+                    raw = await asyncio.wait_for(sock.recv(), timeout=idle_ms / 1000.0)
+                except asyncio.TimeoutError:
+                    break                      # idle gap: the turn is over
+                except Exception:
+                    break                      # closed by the server
+                text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+                raw_frames.append(text)
+                try:
+                    frames.append(json.loads(text))
+                except (ValueError, TypeError):
+                    frames.append(text)
+        return {"frames": frames, "raw": raw_frames, "template": template}
+
+    best: Optional[Dict[str, Any]] = None
+    errors: List[str] = []
+    for template in WS_SEND_CANDIDATES:
+        try:
+            got = asyncio.run(_attempt(template))
+        except Exception as e:                            # noqa: BLE001 - reported, not raised
+            errors.append(f"{type(e).__name__}: {e}")
+            continue
+        frames = got["frames"]
+        if not frames:
+            continue
+        # Score every string in every frame the same way the HTTP path does.
+        scored: List[Tuple[float, str, str]] = []
+        for frame in frames:
+            if isinstance(frame, str):
+                scored.append((score_answer("", frame, prompt), "", frame))
+                continue
+            for path, value in string_paths(frame):
+                scored.append((score_answer(path, value, prompt), path, value))
+        scored.sort(key=lambda t: t[0], reverse=True)
+        if not scored or scored[0][0] < MIN_ANSWER_SCORE:
+            continue
+        score, path, value = scored[0]
+        # Several frames each carrying text at the same path is a delta stream -> concat.
+        same_path = [v for s, p, v in scored if p == path and s >= MIN_ANSWER_SCORE]
+        cand = {
+            "ok": True, "diagnosis": "ok", "ws_url": url,
+            "send_template": template,
+            "response_path": path or None,
+            "aggregate": "concat" if len(same_path) > 1 else "last",
+            "done_when": _ws_done_marker(frames),
+            "idle_ms": idle_ms,
+            "answer": value,
+            "frames_seen": len(frames),
+            "score": score,
+        }
+        if best is None or cand["score"] > best["score"]:
+            best = cand
+        break            # first template that produces a real answer wins
+    if best:
+        return best
+    return {"ok": False, "diagnosis": "no_answer",
+            "message": (f"connected to {url} but no frame looked like an answer"
+                        if not errors else f"could not talk to {url}"),
+            "hint": ("send one turn in a browser and export a .har, then "
+                     "`ascend target add session.har` — or copy "
+                     "configs/example-websocket_direct.json and set ws_url"),
+            "errors": errors[:3]}
+
+
+def build_ws_config(res: Dict[str, Any], *, timeout_ms: Optional[int] = None) -> Dict[str, Any]:
+    """Turn a probe_ws result into a websocket_direct config."""
+    cfg: Dict[str, Any] = {
+        "adapter": "websocket_direct",
+        "ws_url": res["ws_url"],
+        "send_template": res["send_template"],
+        "idle_ms": res.get("idle_ms", 1500),
+        "aggregate": res.get("aggregate", "concat"),
+    }
+    if res.get("response_path"):
+        cfg["response_path"] = res["response_path"]
+    if res.get("done_when"):
+        cfg["done_when"] = res["done_when"]
+    if timeout_ms:
+        cfg["timeout_ms"] = int(timeout_ms)
+    return cfg
