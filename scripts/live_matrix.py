@@ -210,9 +210,19 @@ def derive(shape, port, out_dir, expect):
                answered=bool(reply.strip()),
                on_topic=bool(ANSWER_MARK.search(reply)),
                chatter_leak=bool(CHATTER.search(reply)))
+    # A shape whose `expect` is None is one no shipped adapter covers. For those, PASSING means
+    # the CLI REFUSED and said why -- not that it validated. Scoring them the same way as the
+    # rest would demand a wrong answer, and a harness that cannot express "correctly declined"
+    # will eventually be satisfied by making the product guess.
+    tail = [l for l in stderr.strip().splitlines() if l.strip()][-1:] or [""]
+    if expect is None:
+        row["ok"] = (code != 0 and not got)
+        row["note"] = ("correctly declined: " + tail[0][:88]) if row["ok"] else (
+            f"expected NO adapter (no shipped adapter fits this shape), got {got}")
+        row["declined"] = True
+        return row
     row["ok"] = (code == 0 and got == expect and row["validated"])
     if not row["ok"]:
-        tail = [l for l in stderr.strip().splitlines() if l.strip()][-1:] or [""]
         row["note"] = (f"expected {expect}, got {got}" if got != expect else tail[0][:100])
     return row
 
@@ -253,7 +263,8 @@ def print_table(rows, stage):
     print(hdr)
     print("-" * min(w, 108))
     for r in rows:
-        mark = "PASS" if r.get("ok") else "FAIL"
+        mark = ("DECLINE" if (r.get("ok") and r.get("declined"))
+                else "PASS" if r.get("ok") else "FAIL")
         live = ("on-topic" if r.get("on_topic") else
                 ("answered" if r.get("answered") else
                  ("no-reply" if r.get("validated") else "-")))
@@ -270,7 +281,9 @@ def print_table(rows, stage):
                   f"({r.get('assess_secs')}s)")
     ok = sum(1 for r in rows if r.get("ok"))
     print("-" * min(w, 108))
-    print(f"{ok}/{len(rows)} shapes derived the expected adapter and answered live")
+    dec = sum(1 for r in rows if r.get("ok") and r.get("declined"))
+    print(f"{ok}/{len(rows)} shapes behaved correctly "
+          f"({ok - dec} derived and answered live, {dec} correctly declined as unsupported)")
     leaks = [r["shape"] for r in rows if r.get("chatter_leak")]
     if leaks:
         print(f"progress chatter reached the scored reply on: {', '.join(leaks)}")
