@@ -648,7 +648,9 @@ zero to a running assessment in one command (build -> validate -> register -> br
 | `--url` | `URL` | — | live page with a chat widget: capture the contract in a real browser |
 | `--curl` | `FILE` | — | a curl command in a file (or '-' for stdin) |
 | `--har` | `HAR` | — | HAR file exported from your own browser (no browser needed here) |
-| `--config` | `CONFIG` | — | an existing config in the config dir (skip discovery) |
+| `--config` | `NAME|PATH` | — | a config already on disk — a name in the config dir, or a path to a .json file anywhere (skip discovery) |
+| `--module` | `FILE.py` | — | a custom adapter you wrote: a Python file with `def send_prompt(prompt: str) -> str`. Use this when the contract cannot be derived — signed requests, a multi-step handshake, an async poll. It is proven against the live target like any other. |
+| `--scaffold` | `FILE.py` | — | write a working custom-adapter stub to this path and stop. Edit it, then re-run with --module to onboard it. |
 | `--name` | `NAME` | — | application name in Ascend (default: derived from the URL) |
 | `--app` | `NAME|aapp_id` | — | bind to an application that ALREADY exists in the Console instead of creating one — its bridge key is fetched for you. Use this when the app was set up in the UI and all that is missing is something serving it. |
 | `--save-as` | `NAME` | — | name the adapter config (default: derived from the URL, e.g. 'myhost-com'). Use this and you always know what to pass to --config. |
@@ -862,7 +864,9 @@ onboard a target from a URL, a cURL/HAR file, or a saved config
 | `--url` | `URL` | — | live page with a chat widget: capture the contract in a real browser |
 | `--curl` | `FILE` | — | a curl command in a file (or '-' for stdin) |
 | `--har` | `HAR` | — | HAR file exported from your own browser (no browser needed here) |
-| `--config` | `CONFIG` | — | an existing config in the config dir (skip discovery) |
+| `--config` | `NAME|PATH` | — | a config already on disk — a name in the config dir, or a path to a .json file anywhere (skip discovery) |
+| `--module` | `FILE.py` | — | a custom adapter you wrote: a Python file with `def send_prompt(prompt: str) -> str`. Use this when the contract cannot be derived — signed requests, a multi-step handshake, an async poll. It is proven against the live target like any other. |
+| `--scaffold` | `FILE.py` | — | write a working custom-adapter stub to this path and stop. Edit it, then re-run with --module to onboard it. |
 | `--name` | `NAME` | — | application name in Ascend (default: derived from the URL) |
 | `--app` | `NAME|aapp_id` | — | bind to an application that ALREADY exists in the Console instead of creating one — its bridge key is fetched for you. Use this when the app was set up in the UI and all that is missing is something serving it. |
 | `--save-as` | `NAME` | — | name the adapter config (default: derived from the URL, e.g. 'myhost-com'). Use this and you always know what to pass to --config. |
