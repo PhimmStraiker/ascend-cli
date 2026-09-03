@@ -76,28 +76,53 @@ class TestOnARealTerminal:
         out, _ = run_on_pty(["--json", "doctor"])
         json.loads(out.replace("\r\n", "\n"))
 
-    def test_human_output_is_styled_on_a_tty(self):
-        """The positive case. Without it, a broken colour path would look like a pass.
+    # The bare launch screen is the styling probe for every test below.
+    #
+    # These used `bridge ls --no-check`, and that was wrong in a way worth recording. Its
+    # coloured output is the NO-BRIDGE alarm panel, which only renders when ORPHANS exist -- a
+    # bridge-based app with a live assessment and nothing answering it. With no bridges the
+    # command takes a plain `print()` branch that has never been coloured, since v1.0.0.
+    #
+    # So the two positive tests passed only on a machine whose tenant happened to have live
+    # bridges, and failed for everyone else -- reading as a colour regression when nothing was
+    # broken. Worse, the two opt-out tests below (NO_COLOR / ASCEND_PLAIN) asserted the ABSENCE
+    # of escapes from a command that emits none anyway, so they passed vacuously and would have
+    # kept passing if the opt-out broke completely.
+    #
+    # The launch screen is styled with no platform state at all, so all four now assert
+    # something real. ASCEND_LOGO=off pins the logo tier, whose braille/image variants are
+    # terminal-specific.
+    STYLED = []                     # bare `ascend` -> the launch home screen
+    STYLED_ENV = {"ASCEND_LOGO": "off"}
 
-        `bridge ls` is used rather than `adapter configs`: the latter is deliberately left
-        unstyled, so asserting on it proved nothing -- which is exactly how this test first
-        failed.
-        """
-        out, _ = run_on_pty(["bridge", "ls", "--no-check"])
+    def test_human_output_is_styled_on_a_tty(self):
+        """The positive case. Without it, a broken colour path would look like a pass."""
+        out, _ = run_on_pty(self.STYLED, dict(self.STYLED_ENV))
         assert ANSI.search(out), "no styling reached a real terminal"
 
     def test_no_color_still_wins_on_a_tty(self):
-        out, _ = run_on_pty(["bridge", "ls", "--no-check"], {"NO_COLOR": "1"})
+        out, _ = run_on_pty(self.STYLED, dict(self.STYLED_ENV, NO_COLOR="1"))
         assert ESC not in out
 
     def test_ascend_plain_still_wins_on_a_tty(self):
-        out, _ = run_on_pty(["bridge", "ls", "--no-check"], {"ASCEND_PLAIN": "1"})
+        out, _ = run_on_pty(self.STYLED, dict(self.STYLED_ENV, ASCEND_PLAIN="1"))
         assert ESC not in out
 
-    @pytest.mark.parametrize("depth", ["8", "256", "24"])
-    def test_every_depth_renders_on_a_tty(self, depth):
-        out, _ = run_on_pty(["bridge", "ls", "--no-check"], {"ASCEND_COLOR_DEPTH": depth})
-        assert ANSI.search(out), depth
+    # Each depth must emit its OWN escape family, not merely "some escape". Asserting any ANSI
+    # cannot tell 256-colour from truecolour, so a depth resolved by numeric order rather than
+    # membership -- 24 < 256 is arithmetically true and semantically backwards -- would satisfy
+    # the weaker check while painting the wrong tier.
+    @pytest.mark.parametrize("depth,family", [("8", r"\x1b\[3[0-7]m"),
+                                              ("256", r"\x1b\[38;5;\d+m"),
+                                              ("24", r"\x1b\[38;2;\d+;\d+;\d+m")])
+    def test_every_depth_renders_its_own_escape_family(self, depth, family):
+        out, _ = run_on_pty(self.STYLED, dict(self.STYLED_ENV, ASCEND_COLOR_DEPTH=depth))
+        assert re.search(family, out), f"depth {depth} did not emit {family}"
+        # and must NOT reach for a richer tier than it was given
+        if depth == "8":
+            assert "38;5;" not in out and "38;2;" not in out
+        if depth == "256":
+            assert "38;2;" not in out
 
     def test_exit_code_is_unchanged_on_a_tty(self):
         """Styling must not alter the CI contract."""
