@@ -85,10 +85,17 @@ class TestBothCallSitesUseTheOneCopy:
     was that one of the two registration paths never called it.
     """
 
-    def _body(self, fn_name):
+    def _body(self, fn_name, *, code_only=False):
         m = re.search(rf"^def {fn_name}\(args\):(.*?)(?=^def )", SRC, re.S | re.M)
         assert m, f"could not find {fn_name} in ascend.py"
-        return m.group(1)
+        body = m.group(1)
+        if code_only:
+            # Strip comments before looking for a call. This guard greps source text, so a
+            # comment that merely NAMES `list_controls()` -- explaining why the resolution moved,
+            # for instance -- tripped it. A guard that fires on prose gets muted, and then it is
+            # not guarding anything.
+            body = "\n".join(re.sub(r"#.*$", "", l) for l in body.splitlines())
+        return body
 
     @pytest.mark.parametrize("fn", ["cmd_app_create", "cmd_onboard"])
     def test_the_registration_path_calls_the_helper(self, fn):
@@ -99,7 +106,7 @@ class TestBothCallSitesUseTheOneCopy:
     @pytest.mark.parametrize("fn", ["cmd_app_create", "cmd_onboard"])
     def test_no_call_site_carries_its_own_copy(self, fn):
         """A second inline `list_controls()` resolution is the drift starting over."""
-        body = self._body(fn)
+        body = self._body(fn, code_only=True)
         assert "list_controls()" not in body, (
             f"{fn} resolves the catalog inline again — that is exactly the duplication that let "
             f"cmd_onboard and cmd_app_create disagree in the first place")
