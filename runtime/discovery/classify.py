@@ -500,25 +500,139 @@ def _ws_params(ev: Dict[str, Any]) -> Dict[str, Any]:
             "idle_ms": 1500}
 
 
+def _guess_transcript(obj: Any) -> Dict[str, Any]:
+    """Work out how to read a bot turn out of a transcript response.
+
+    `session_poll` walks `list_path` for turns, filters on `role_field` against `bot_roles`, and
+    reads the text at `text_path`. Those four were previously hardcoded to
+    messages/role/[assistant,bot,agent]/text, which is right for maybe half of real transcript
+    endpoints and silently wrong for the rest. Derived from the evidence instead.
+    """
+    out = {"list_path": "messages", "role_field": "role", "text_path": "text",
+           "bot_roles": ["assistant", "bot", "agent", "ai", "system"]}
+    best: Tuple[int, str, List[Any]] = (0, "", [])
+    def walk(o: Any, prefix: str = "") -> None:
+        nonlocal best
+        if isinstance(o, list):
+            dicts = [x for x in o if isinstance(x, dict)]
+            if len(dicts) > best[0] and prefix:
+                best = (len(dicts), prefix, dicts)
+        elif isinstance(o, dict):
+            for k, v in o.items():
+                walk(v, f"{prefix}.{k}" if prefix else k)
+    walk(obj)
+    count, path, turns = best
+    if not count:
+        return out
+    out["list_path"] = path
+    sample = turns[0]
+    # role: a short string field whose values look like speaker labels
+    for k, v in sample.items():
+        if isinstance(v, str) and len(v) <= 24 and k.lower() in (
+                "role", "sender", "author", "from", "speaker", "type", "direction"):
+            out["role_field"] = k
+            break
+    # text: the longest string field across the sampled turns, which is the message body
+    longest = (0, "text")
+    for turn in turns[:8]:
+        for k, v in turn.items():
+            if isinstance(v, str) and len(v) > longest[0] and k != out["role_field"]:
+                longest = (len(v), k)
+    if longest[0]:
+        out["text_path"] = longest[1]
+    # bot roles: any observed role value that is not the human side
+    seen = {str(t.get(out["role_field"], "")).lower() for t in turns}
+    seen.discard("")
+    bots = sorted(seen - {"user", "human", "customer", "me", "client", "you", "in", "inbound"})
+    if bots:
+        out["bot_roles"] = bots
+    return out
+
+
 def _detect_poll(pairs: List[Dict[str, Any]], chat_idx: int) -> Optional[Dict[str, Any]]:
-    submit = pairs[chat_idx]
-    sid = _first_id(submit["response"]["json"])
+    """Find an ACK-only contract: (create) -> send-returns-ack -> poll a transcript.
+
+    Rewritten because the params this emitted and the keys the composer read were two different
+    schemas that were never connected: it published `submit`/`poll.endpoint_template`, while
+    `_session_poll_from_poll` looked for `create_url`/`send_url`/`poll_url`. Every lookup missed,
+    so the composed config carried three EMPTY urls and the adapter refused with "session_poll
+    needs create.url, send.url and poll.url" -- unconditionally, for any evidence. The shape
+    session_poll's own example calls "the most common enterprise web-chat contract" could
+    therefore never be derived at all; it had to be hand-written every time.
+
+    Two further fixes fall out of doing it properly:
+      - the conversation id is often in the send URL (`/chat/{id}/message`), not just in the
+        response body, so both are searched;
+      - the CREATE call happens BEFORE the pair carrying the prompt, so it is found by looking
+        backward. Only looking forward meant create was never captured even when present.
+    """
+    send = pairs[chat_idx]
+    send_url_raw = _strip_query(send["request"]["url"])
+    # the id may be in the send response, or already in the send URL
+    sid = _first_id(send["response"]["json"])
+    id_in_url = None
+    if not sid:
+        for cand in re.findall(r"/([0-9a-fA-F]{8,}|\d{3,})(?=/|$)", send_url_raw):
+            id_in_url = cand
+            break
+        sid = id_in_url
     if not sid:
         return None
+    sid = str(sid)
+
+    # Take the LAST matching poll, not the first. A real capture contains the whole polling
+    # loop, and the early responses are by definition incomplete -- the first GET fires before
+    # the bot has answered, so sampling it derives the transcript shape from a transcript
+    # containing only the user's turn. That is how `bot_roles` silently fell back to defaults
+    # instead of being read from the evidence. The last response is the finished one.
+    poll_pair = None
     for j in range(chat_idx + 1, len(pairs)):
         later = pairs[j]
-        if later["request"]["method"] == "GET" and str(sid) in later["request"]["url"]:
-            return {"value": "poll", "confidence": 0.7,
-                    "evidence": f"submit returned id={sid!r}; GET {(_strip_query(later['request']['url']))} polls it",
-                    "params": {
-                        "submit": {"endpoint": _strip_query(submit["request"]["url"]),
-                                   "method": submit["request"]["method"],
-                                   "body": _body_template(submit["request"])},
-                        "poll": {"endpoint_template": _strip_query(later["request"]["url"]).replace(str(sid), "{{ID}}"),
-                                 "id_field": _id_field_of(submit["response"]["json"], sid)},
-                        "response_path": _guess_response_path(later["response"]["json"], _REPLY_TEXT.get("v")),
-                    }}
-    return None
+        if later["request"]["method"] in ("GET", "POST") and sid in later["request"]["url"]:
+            poll_pair = later
+    if poll_pair is None:
+        return None
+
+    # The create step precedes the prompt-carrying pair. Its response mints the id.
+    create = None
+    for j in range(chat_idx - 1, -1, -1):
+        prior = pairs[j]
+        if prior["request"]["method"] != "POST":
+            continue
+        if sid in json.dumps(prior["response"]["json"] or ""):
+            create = {"url": _strip_query(prior["request"]["url"]),
+                      "method": prior["request"]["method"],
+                      "body": _body_template(prior["request"]),
+                      "extract": _id_field_of(prior["response"]["json"], sid) or "id"}
+            break
+
+    transcript = _guess_transcript(poll_pair["response"]["json"])
+    poll_url = _strip_query(poll_pair["request"]["url"]).replace(sid, "{{CONV}}")
+    q = _query_from_url(poll_pair["request"]["url"])
+    if q:
+        qs = "&".join(f"{k}={'{{CONV}}' if v == sid else v}" for k, v in q.items())
+        poll_url = f"{poll_url}?{qs}"
+
+    return {"value": "poll", "confidence": 0.8 if create else 0.6,
+            "evidence": (f"send returned/carried id={sid!r}; "
+                         f"{poll_pair['request']['method']} "
+                         f"{_strip_query(poll_pair['request']['url'])} reads the transcript"
+                         + ("" if create else "; no create call seen in the capture")),
+            "params": {
+                "create": create,
+                "send": {"url": send_url_raw.replace(sid, "{{CONV}}"),
+                         "method": send["request"]["method"],
+                         "body": _body_template(send["request"])},
+                "poll": {"url": poll_url,
+                         "method": poll_pair["request"]["method"], **transcript},
+                "id": sid,
+                # kept for _session_api_from_poll, which reads the older schema
+                "submit": {"endpoint": send_url_raw,
+                           "method": send["request"]["method"],
+                           "body": _body_template(send["request"])},
+                "response_path": _guess_response_path(poll_pair["response"]["json"],
+                                                      _REPLY_TEXT.get("v")),
+            }}
 
 
 # --------------------------------------------------------------------------- #
@@ -1091,23 +1205,45 @@ def _session_api_from_session(session: Dict[str, Any], tparams: Dict[str, Any]) 
 
 
 def _session_poll_from_poll(tparams: Dict[str, Any]) -> Dict[str, Any]:
-    """Build a session_poll config from a detected create/submit + fetch pattern."""
-    return {
-        "create": {"url": tparams.get("create_url", tparams.get("endpoint", "")),
-                   "method": tparams.get("create_method", "POST"),
-                   "body": tparams.get("create_body", {}),
-                   "extract": tparams.get("id_path", "conversation_id")},
-        "send": {"url": tparams.get("send_url", tparams.get("endpoint", "")),
-                 "method": tparams.get("method", "POST"),
-                 "body": tparams.get("body", {"message": "{{PROMPT}}"})},
-        "poll": {"url": tparams.get("poll_url", ""),
-                 "method": tparams.get("poll_method", "GET"),
-                 "list_path": tparams.get("list_path", "messages"),
-                 "role_field": tparams.get("role_field", "role"),
-                 "bot_roles": tparams.get("bot_roles", ["assistant", "bot", "agent"]),
-                 "text_path": tparams.get("text_path", "text"),
+    """Build a session_poll config from the create/send/poll blocks `_detect_poll` publishes.
+
+    This used to read `create_url`, `send_url`, `poll_url`, `id_path`, `list_path`, `text_path` --
+    none of which the detector has ever emitted. Every `.get()` fell through to its default, so
+    the result was always three empty URLs plus plausible-looking guesses
+    (`extract: conversation_id`, `text_path: text`), and the adapter refused it. Reads the real
+    schema now, and carries the detector's derived transcript shape rather than re-guessing it.
+    """
+    create = tparams.get("create") or {}
+    send = tparams.get("send") or {}
+    poll = tparams.get("poll") or {}
+    cfg: Dict[str, Any] = {
+        "create": {"url": create.get("url", ""),
+                   "method": create.get("method", "POST"),
+                   "body": create.get("body", {}),
+                   "extract": create.get("extract", "conversation_id")},
+        "send": {"url": send.get("url", ""),
+                 "method": send.get("method", "POST"),
+                 "body": send.get("body", {"message": "{{PROMPT}}"})},
+        "poll": {"url": poll.get("url", ""),
+                 "method": poll.get("method", "GET"),
+                 "list_path": poll.get("list_path", "messages"),
+                 "role_field": poll.get("role_field", "role"),
+                 "bot_roles": poll.get("bot_roles", ["assistant", "bot", "agent"]),
+                 "text_path": poll.get("text_path", "text"),
                  "interval_ms": 1000, "timeout_ms": 30000},
     }
+    if not create:
+        # A two-step job API (submit -> GET status until done) has no create call to find, and
+        # session_poll requires one -- it models create/send/poll-a-transcript, not a job. Say so
+        # in the config rather than emitting an empty url and letting the adapter fail with a
+        # message that reads like a capture problem.
+        cfg["_note"] = (
+            "No create call was found in the capture. session_poll models "
+            "create-conversation -> send -> poll-a-transcript (the ACK-only web-chat contract). "
+            "If this target is instead a two-step job API (POST returns a job id, GET polls its "
+            "status until done), no shipped adapter covers that shape: set create.url to the "
+            "submit endpoint and send.url to the same, or use --module for a custom adapter.")
+    return cfg
 
 
 def _session_api_from_poll(tparams: Dict[str, Any]) -> Dict[str, Any]:
