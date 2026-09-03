@@ -6776,17 +6776,59 @@ def _launch_screen():
     print(c(_brand_banner(), PINK))
     print("  " + c("red-team CLI for AI targets", DIM) + f"    v{VERSION}")
     print()
-    print("  " + c("THE FLOW", B) + c("   (every command also takes --json for agents)", DIM))
-    print("    adapter build   turn a target into a validated adapter  " +
-          c("--har / --url / --api / --curl / --spec", DIM))
-    print("    app create      register it in Ascend (type bridge is auto-relayed)")
-    print("    assess run      run it  " + c("(the bridge auto-starts and self-stops)", DIM))
-    print("    results / ci    read findings (FAIL% + risk)  ·  gate a pipeline")
+    # This block used to teach `adapter build` -> `app create` as the flow, which is the
+    # pre-1.1 shape: those are the machinery UNDERNEATH `target` now, and leading with them
+    # sent every new reader the long way round.
+    #
+    # The box is built from DATA and padded with vpad, not hand-counted spaces. Hand-counting is
+    # how the first version of this came out ragged, and it cannot survive colour at all.
+    g = _ui._glyphs(sys.stdout)
+    h, vb = g["h"], g["v"]
+    uni = _ui.unicode_ok(sys.stdout)
+    a_r, a_l, down, tick = ("──▶", "◀──", "│", "▼") if uni else ("-->", "<--", "|", "v")
+
+    # (left cell, middle connector, right cell) — colour is applied per cell, width is computed
+    rows = [
+        (c("ascend target add <thing>", B),      "",                  "the target, registered"),
+        (c("  a url · a curl · a har", DIM),     c(f"registers {a_r}", DIM),
+                                                 c("  its controls & size", DIM)),
+        (c("  detect · adapt · prove", DIM),     "",                  ""),
+        ("",                                     "",                  ""),
+        ("",                                     "",                  c("Iris", B)),
+        (c("ascend assess run", B),              "",                  c("  generates the attacks", DIM)),
+        (c("  the bridge starts itself", DIM),   c(f"{a_l} probes", DIM),
+                                                 c("  scores the replies", DIM)),
+        (f"       {c(down, DIM)}",               c(f"replies {a_r}", DIM),  ""),
+        (f"       {c(tick, DIM)}",               "",                  c("findings", B)),
+        (c("  YOUR AGENT", B),                   c(f"{a_l} results", DIM),
+                                                 c("  severity · controls", DIM)),
+    ]
+    LW = max(_ui.vwidth(r[0]) for r in rows) + 2
+    MW = max(_ui.vwidth(r[1]) for r in rows) + 2
+    RW = max(_ui.vwidth(r[2]) for r in rows) + 2
+
+    print("  " + c("HOW IT WORKS", B) + c("   (every command also takes --json for agents)", DIM))
+    print()
+    print("    " + _ui.vpad(c("YOUR MACHINE", DIM), LW + 2 + MW)
+          + c("STRAIKER CLOUD", DIM))
+    print(f"    {g['tl']}{h * LW}{g['tr']}{' ' * MW}{g['tl']}{h * RW}{g['br'] and g['tr']}")
+    for left, mid, right in rows:
+        print(f"    {vb} {_ui.vpad(left, LW - 2)} {vb}"
+              f"{_ui.vpad(mid, MW, align='center')}"
+              f"{vb} {_ui.vpad(right, RW - 2)} {vb}")
+    print(f"    {g['bl']}{h * LW}{g['br']}{' ' * MW}{g['bl']}{h * RW}{g['br']}")
+    print()
+    print("    " + c("ascend results / ci", B)
+          + c("   read the findings  ·  gate a pipeline", DIM))
     print()
     print("  " + c("START HERE", B))
-    print("    ascend status              " + c("# tenant, apps, live runs, bridges", DIM))
-    print("    ascend adapter build --help" + c("  # onboard your first target", DIM))
-    print("    ascend --help              " + c("# every command", DIM))
+    print("    ascend doctor             " + c("# is your key good and the platform reachable?", DIM))
+    print("    ascend target add --help  " + c("# onboard your first target", DIM))
+    print("    ascend status             " + c("# tenant, targets, live runs, bridges", DIM))
+    print("    ascend --help             " + c("# every command", DIM))
+    print()
+    print("  " + c("app · adapter · keys are the machinery underneath target, still supported",
+                   DIM))
     print()
     print("  " + c("locked to one tenant at a time (ascend tenant)  ·  full guide in docs/", DIM))
     print()
