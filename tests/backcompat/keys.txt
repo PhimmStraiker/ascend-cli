@@ -5,6 +5,12 @@ usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] k
        [-h] [--json] [--token TOKEN] [--base BASE] [--bridge-base BRIDGE_BASE]
        {list,prune,add,rm} ...
 
+Manage stored tc- bridge keys directly.
+
+This is the machinery underneath `target` and is still fully
+supported. `ascend target add` stores the key it fetched, and
+`ascend target rm` drops it.
+
 positional arguments:
   {list,prune,add,rm}
     list                list stored keys (masked)

@@ -17,3 +17,4 @@ sse_stream
 vertex_ai
 websocket_direct
 --- stderr
+note: `adapter list` still works; `target types` is the current way.

@@ -5,6 +5,14 @@ usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] a
        [-h] [--json] [--token TOKEN] [--base BASE] [--bridge-base BRIDGE_BASE]
        {list,show,configs,layers,validate,build} ...
 
+Build and inspect adapter configs directly.
+
+An adapter is HOW the CLI speaks one target's protocol, so it is
+a property of a target rather than a separate thing to manage.
+`ascend target add` derives it from a URL, a cURL file or a .har,
+proves it against the live endpoint and stores it. These verbs
+remain for the cases that need the lower level.
+
 positional arguments:
   {list,show,configs,layers,validate,build}
     list                list registered adapter types
