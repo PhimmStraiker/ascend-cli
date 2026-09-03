@@ -5690,7 +5690,11 @@ def cmd_export(args):
         a = json.loads(Path(args.file).read_text())
     else:
         c = _client(args)
-        a = c.get_assessment(_resolve_app(c, args.app), args.assessment)
+        if not args.app:
+            _die("no application given — pass --app <name|aapp_id>, or --file <results.json> "
+                 "to export a saved result", error_code="no_app")
+        _app_id = _resolve_app(c, args.app)
+        a = c.get_assessment(_app_id, _resolve_assessment(c, _app_id, args, verb="exporting"))
     fmt = args.format
     out = {"json": E.to_json, "csv": E.to_csv, "sarif": E.to_sarif,
            "markdown": E.to_markdown}[fmt](a)
@@ -5699,6 +5703,38 @@ def cmd_export(args):
         Path(args.out).write_text(out); print(f"wrote {args.out}")
     else:
         print(out)
+
+
+def _resolve_assessment(c, app_id, args, *, verb="reading"):
+    """Return an assessment id, defaulting to the latest FINISHED run on the app.
+
+    Every command with an optional `--assessment` passed `args.assessment` straight into the URL,
+    so omitting it requested `/assessments/None` and 404'd:
+
+        GET /ascend/applications/aapp_.../assessments/None -> 404 assessment_not_found
+          not found — check the app id/name with `ascend app list`
+
+    and the advice named the one thing that HAD resolved. `ci` was fixed first, inline; `export`
+    and `assess results` were left with the identical defect, and `export` is how a report reaches
+    a customer. Fixing one call site of a shared rule and not the others is the drift that has
+    caused most of the bugs in this release, so this is one function with three callers rather
+    than a third copy.
+
+    Finished by default: a run still in progress carries partial counts, and exporting or gating
+    those reports numbers that change after the file is written.
+    """
+    aid = getattr(args, "assessment", None)
+    if aid:
+        return aid
+    latest = c.latest_assessment(app_id)
+    if not latest:
+        _die(f"{args.app!r} has no assessments yet — run one first:\n"
+             f"    ascend assess run --app {args.app!r} --name 'run 1'\n"
+             f"  or name a specific run with --assessment <asmt_id>",
+             error_code="no_assessment")
+    aid = latest.get("id") or latest.get("assessment_id")
+    _say(args, f"{verb} the latest run on {args.app}: {aid} ({latest.get('status')})")
+    return aid
 
 
 def cmd_ci(args):
@@ -5711,20 +5747,7 @@ def cmd_ci(args):
             _die("no application given — pass --app <name|aapp_id>, or --file <results.json> "
                  "to gate a saved result", error_code="no_app")
         _app_id = _resolve_app(c, args.app)
-        _aid = args.assessment
-        if not _aid:
-            # `--app` with no assessment id used to put the literal string "None" in the URL, so
-            # the documented CI invocation 404'd on every app. "The latest finished run on this
-            # app" is the only thing --app alone can mean.
-            _latest = c.latest_assessment(_app_id)
-            if not _latest:
-                _die(f"{args.app!r} has no assessments yet — run one first:\n"
-                     f"    ascend assess run --app {args.app!r} --name ci\n"
-                     f"  or gate a specific run with --assessment <asmt_id>",
-                     error_code="no_assessment")
-            _aid = _latest.get("id") or _latest.get("assessment_id")
-            _say(args, f"gating the latest run on {args.app}: {_aid} "
-                       f"({_latest.get('status')})")
+        _aid = _resolve_assessment(c, _app_id, args, verb="gating")
         cur = c.get_assessment(_app_id, _aid)
     base = json.loads(Path(args.baseline).read_text()) if args.baseline else None
 

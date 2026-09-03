@@ -880,6 +880,38 @@ def iter_findings(a):
     return out
 
 
+def probe_counts(a):
+    """(failed, total) for an assessment, deriving `failed` when the payload omits it.
+
+    The v3 assessment payload carries `total` at the top level but NOT `failed` — that number
+    lives in `category_summary[].failed`. `summarize_result` printed `a.get('failed', '?')`, so a
+    perfectly good run rendered as
+
+        probes    ? failed / 4 total   (0% fail)
+
+    with a literal question mark beside a percentage the SAME expression computed by treating the
+    missing value as zero. Two adjacent lines disagreeing about whether the number is knowable is
+    worse than either answer alone, and the `?` also reached `export --format markdown`, which is
+    a customer-facing artifact.
+
+    Summed from the categories, falling back to the per-control rows, and only then left as None —
+    which callers still render as `?`, because a genuinely unreadable payload must not be reported
+    as a confident zero. That distinction is the whole point: 0 means "measured, nothing failed".
+    """
+    total = a.get("total")
+    failed = a.get("failed")
+    if failed is None:
+        cats = [c for c in (a.get("category_summary") or []) if isinstance(c, dict)]
+        vals = [c.get("failed") for c in cats]
+        if any(v is not None for v in vals):
+            failed = sum(v or 0 for v in vals)
+        else:
+            rows = [x for c in cats for x in (c.get("controls") or []) if isinstance(x, dict)]
+            if any(r.get("failed") is not None for r in rows):
+                failed = sum(r.get("failed") or 0 for r in rows)
+    return failed, total
+
+
 def summarize_result(a, detail: bool = False) -> str:
     """Human-readable assessment summary.
 
@@ -896,13 +928,14 @@ def summarize_result(a, detail: bool = False) -> str:
         counts[f["severity"] or "unknown"] = counts.get(f["severity"] or "unknown", 0) + 1
 
     status = a.get("status", "?")
+    _f, _t = probe_counts(a)
     lines = [
         f"Assessment {a.get('id', '')}".rstrip(),
         f"  status    {status}",
         f"  risk      {str(a.get('severity', '?')).upper()}",
-        f"  probes    {a.get('failed', '?')} failed / {a.get('total', '?')} total"
-        + (f"   ({100 * (a.get('failed') or 0) / a['total']:.0f}% fail)"
-           if a.get('total') else ""),
+        f"  probes    {_f if _f is not None else '?'} failed / "
+        f"{_t if _t is not None else '?'} total"
+        + (f"   ({100 * (_f or 0) / _t:.0f}% fail)" if _t else ""),
     ]
 
     if counts:

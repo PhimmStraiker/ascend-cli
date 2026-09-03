@@ -7,6 +7,73 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ## [Unreleased]
 
+### Added
+
+- **CI (workflow pending a token scope — see `docs/CHANGE_CONTROL.md`).** `.github/` contained only `dependabot.yml`. The test suite, the back-compat corpus, the
+  golden-output corpus and the command-map check all existed and all ran only when somebody
+  remembered. Every bug that shipped this release shipped green, because green meant green on the
+  machine that wrote it. `.github/workflows/ci.yml` now runs all of them on every push and pull
+  request, on the declared Python floor (3.9) and a current release, plus a clean `pip install .`
+  that runs the *installed* entry point from a temp directory — the check that catches a fix which
+  exists locally and was never committed. `docs/CHANGE_CONTROL.md` describes what each gate
+  protects and what still depends on a person.
+
+- **`ascend ci --app <name>` resolves the latest finished run.** `--assessment` is now optional.
+
+### Fixed
+
+- **`ascend ci` and `ascend export` requested `/assessments/None`.** Both take an optional
+  `--assessment` and passed it straight into the URL, so omitting it produced
+
+      GET /ascend/applications/aapp_.../assessments/None -> 404 assessment_not_found
+        not found — check the app id/name with `ascend app list`
+
+  on every app — and the advice named the one thing that *had* resolved correctly. `ci` was fixed
+  first, on its own; `export` was found afterwards, by re-running the audit against a clean clone.
+  Both now call one `_resolve_assessment`, which defaults to the latest **finished** run (a run
+  still in progress carries partial counts, so gating or exporting those reports numbers that
+  change after the file is written). `assess pause`/`resume`/`results` require the flag and are
+  deliberately untouched.
+
+- **The CI trust floor was smaller than the smallest legitimate run.** `MIN_CREDIBLE_PROBES = 5`
+  guards something real — a completed run with almost no probes and no findings is what a dead
+  bridge produces — but the number predates anyone measuring a scoped run. One control at size
+  `small` produces exactly **four** probes, so `--controls sys_prompt_leak`, the cheap run the cost
+  guidance recommends, could never pass its own gate, and the refusal blamed a bridge that had
+  answered every probe. The floor is derived from the app's control set now: at least one probe per
+  control. Four probes for one control is a complete run; four for sixty-two is the dead bridge the
+  check exists to catch.
+
+- **`probes ? failed / N total` printed a literal question mark.** The v3 assessment payload
+  carries `total` but not `failed` — that number lives in `category_summary[].failed`.
+  `summarize_result` rendered `a.get('failed', '?')` while the *same line* computed the percentage
+  by treating the missing value as zero, so two adjacent expressions disagreed about whether the
+  number was knowable. `api.probe_counts()` derives it, and the `?` is kept only for a genuinely
+  unreadable payload — 0 means "measured, nothing failed", which is a different claim. The same
+  placeholder was reaching `export --format markdown`, a customer-facing artifact.
+
+- **`target add --app <existing>` resolved a control catalog it then discarded.** The control set
+  was resolved before the branch that decides whether to create or adopt; the adopt path ignores
+  `--controls` entirely, so adopting cost a wasted `list_controls()` round trip and printed
+  `no --controls given — registering with all 62 catalog controls` while registering nothing at
+  all. Reported by @ryan-straiker in #36.
+
+- **The launcher ignored the clone's own virtualenv.** `./ascend` resolved `python3` off PATH
+  before `.venv/bin/python` sitting beside it, so a fresh clone died on `No module named
+  'requests'` with a working virtualenv one directory away — the first command a new user runs,
+  failing with an error that names a package rather than the problem. `$ASCEND_PYTHON` still wins.
+  Fixed by @ryan-straiker in #36.
+
+### Known
+
+- **`export --format csv` writes only failed controls**, so a clean assessment produces a header
+  and nothing else: 63 bytes, exit 0, hard to distinguish from a broken export. `to_markdown`
+  handles the same case by saying "No failed controls"; CSV has nowhere to put that sentence.
+  Widening it to a full control table would change what a row means — `wc -l` on that file is a
+  findings count in somebody's pipeline — so it is left as-is pending a deliberate format decision.
+
+### Fixed (earlier in this cycle)
+
 ### Fixed
 
 - **Playwright is no longer imported unless a browser target is used.** `adapters/__init__`
