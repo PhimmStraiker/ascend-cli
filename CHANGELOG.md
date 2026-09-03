@@ -7,6 +7,15 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ## [Unreleased]
 
+### Fixed
+- **Playwright is no longer imported unless a browser target is used.** `adapters/__init__`
+  imported the browser adapter eagerly and the adapter imported Playwright at module scope, so
+  every run path required it — `adapter validate`, `chat`, `target add`, `assess run` — even for a
+  plain REST target, contradicting `pyproject.toml`, the README and `doctor`. Anyone with it
+  installed never noticed; a clean install got `No module named 'playwright'`. The import is lazy
+  now, matching `websocket_direct` and `bedrock`, and a missing package produces a
+  `pip install playwright` hint through the normal failure path instead of a traceback.
+
 ## [1.1.1] — 2026-09-02
 
 ### Security
