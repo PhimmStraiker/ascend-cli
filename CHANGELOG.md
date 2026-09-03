@@ -5,7 +5,7 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ---
 
-## [Unreleased]
+## [1.1.2] — 2026-09-03
 
 ### Security
 - **A credential under an unanticipated header name was written into the config in cleartext.**
