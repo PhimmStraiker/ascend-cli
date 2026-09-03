@@ -42,6 +42,49 @@ _SECRET_HEADERS = {
     "x-authentication", "authentication", "x-access-token", "cookie",
 }
 _CSRF_HEADERS = {"x-csrf-token", "x-xsrf-token", "csrf-token", "x-csrftoken"}
+
+# `_SECRET_HEADERS` above is a fixed list of nine names, and it drove BOTH "is this auth?" and
+# "is this safe to bake into the config?". So a custom-named credential -- X-Tenant-Key,
+# X-Subscription-Key, X-Nonce, X-Session-Token -- was neither recognised as auth NOR dropped, and
+# landed in the config on disk in cleartext beside `auth: none`. This module's own docstring
+# promises the opposite: secrets "carry an `env:` `value_ref` placeholder instead, and record
+# only the header". Recognition has to be open-ended, because the whole point is that the name
+# is one we have not seen before.
+_SECRETISH_NAME = re.compile(
+    r"(api[-_]?key|access[-_]?key|secret|token|signature|^x-sig|hmac|nonce|"
+    r"credential|password|passwd|pwd|bearer|session[-_]?(id|key|token)|"
+    r"subscription[-_]?key|tenant[-_]?key|client[-_]?(id|secret))", re.I)
+# Headers that routinely carry long opaque values and are NOT credentials. Without this an
+# entropy rule would strip the very headers a target needs to answer at all.
+_NEVER_SECRET = {
+    "user-agent", "accept", "accept-language", "accept-encoding", "content-type",
+    "content-length", "referer", "origin", "host", "connection", "cache-control",
+    "sec-fetch-mode", "sec-fetch-site", "sec-fetch-dest", "sec-ch-ua", "sec-ch-ua-platform",
+    "sec-ch-ua-mobile", "pragma", "dnt", "te", "upgrade-insecure-requests", "priority",
+    "x-requested-with", "traceparent", "x-request-id", "x-correlation-id", "x-trace-id",
+}
+_OPAQUE_VALUE = re.compile(r"^[A-Za-z0-9_.\-=+/]{20,}$")
+
+
+def _looks_secret_header(name_lower: str, value: str) -> bool:
+    """Would baking this header into a config on disk leak a credential?
+
+    Name first, because a name is deliberate and a value is circumstantial. The entropy rule is
+    the backstop for a name we cannot anticipate, and it is scoped to `x-*` so an ordinary
+    long-but-public header (a User-Agent, a trace id) is not stripped from a config that needs it.
+    """
+    if name_lower in _NEVER_SECRET:
+        return False
+    if name_lower in _SECRET_HEADERS or name_lower in _CSRF_HEADERS:
+        return True
+    if _SECRETISH_NAME.search(name_lower):
+        return True
+    v = (value or "").strip()
+    if name_lower.startswith("x-") and _OPAQUE_VALUE.match(v):
+        # long, opaque, and on a non-standard header: treat as a credential rather than risk it
+        classes = sum(bool(re.search(p, v)) for p in (r"[a-z]", r"[A-Z0-9]", r"[_.\-=+/]"))
+        return classes >= 2
+    return False
 _ID_FIELDS = (
     "id", "sessionId", "session_id", "conversationId", "conversation_id",
     "threadId", "thread_id", "chatId", "chat_id", "ticketId", "ticket_id",
@@ -229,6 +272,9 @@ def _har_started_ms(entry: Dict[str, Any]) -> Optional[float]:
 
 
 _REPLY_TEXT: Dict[str, Any] = {"v": None}
+# The prompt the operator actually sent during the capture. Ground truth beats every
+# heuristic, and its absence is what let a GraphQL body freeze the real prompt (below).
+_PROMPT_SENT: Dict[str, Any] = {"v": None}
 
 
 def _evidence(evidence: Dict[str, Any]) -> Dict[str, Any]:
@@ -251,6 +297,7 @@ def _evidence(evidence: Dict[str, Any]) -> Dict[str, Any]:
     # carry the capture ground-truth through — the classifiers use it to pick the
     # request that actually carried our prompt (beats every heuristic).
     _REPLY_TEXT["v"] = evidence.get("reply_text")
+    _PROMPT_SENT["v"] = evidence.get("prompt_sent")
     return {"pairs": norm, "ws_messages": evidence.get("ws_messages", []),
             "prompt_sent": evidence.get("prompt_sent"),
             "reply_text": evidence.get("reply_text")}
@@ -300,16 +347,80 @@ def _pick_chat_index(pairs: List[Dict[str, Any]], known_prompt: Optional[str] = 
     return best_idx
 
 
+# A GraphQL document, not a question. `query` is in _PROMPT_FIELDS because plenty of REST bots
+# call their field that, but in a GraphQL body it holds the OPERATION.
+_GQL_DOC = re.compile(r"^\s*(?:query|mutation|subscription)\b|^\s*\{[^\"]*\{", re.S)
+
+
+def _looks_like_graphql_doc(value: str) -> bool:
+    return bool(value) and "{" in value and bool(_GQL_DOC.match(value))
+
+
+def _find_exact(obj: Any, needle: str) -> bool:
+    """Is `needle` present verbatim as a string leaf anywhere in this body?"""
+    if isinstance(obj, str):
+        return obj == needle
+    if isinstance(obj, dict):
+        return any(_find_exact(v, needle) for v in obj.values())
+    if isinstance(obj, list):
+        return any(_find_exact(v, needle) for v in obj)
+    return False
+
+
+def _nested_prompt_field(obj: Any, depth: int = 0) -> Optional[str]:
+    """Find a prompt-named string field below the top level (GraphQL `variables`, DTO wrappers)."""
+    if depth > 6 or not isinstance(obj, (dict, list)):
+        return None
+    if isinstance(obj, dict):
+        for f in _PROMPT_FIELDS:
+            v = obj.get(f)
+            if isinstance(v, str) and v.strip() and not _looks_like_graphql_doc(v):
+                return v
+        for v in obj.values():
+            got = _nested_prompt_field(v, depth + 1)
+            if got is not None:
+                return got
+        return None
+    for v in obj:
+        got = _nested_prompt_field(v, depth + 1)
+        if got is not None:
+            return got
+    return None
+
+
 def _request_has_prompt(req: Dict[str, Any]) -> Optional[str]:
-    """Return the prompt-like string in a request body, if any."""
+    """Return the prompt-like string in a request body, if any.
+
+    Ground truth first. When the operator told us what they typed, an exact match anywhere in
+    the body beats field-name order outright -- and that ordering caused the worst possible
+    failure on a GraphQL target. The body is
+    `{"query": "<graphql document>", "variables": {"input": {"message": "<real prompt>"}}}`,
+    `query` is in _PROMPT_FIELDS, so the DOCUMENT was returned as the prompt, templated to
+    {{PROMPT}}, and the real question was frozen as a literal in `variables`. The config then
+    validated green while every probe re-asked the capture-time question -- a false pass, which
+    is worse than a failure because nothing looks wrong.
+    """
     body = req.get("json")
+    known = (_PROMPT_SENT.get("v") or "").strip()
+    if known and isinstance(body, (dict, list)) and _find_exact(body, known):
+        return known
     if isinstance(body, dict):
         for f in _PROMPT_FIELDS:
-            if isinstance(body.get(f), str):
-                return body[f]
-        # deepest / longest string fallback
+            v = body.get(f)
+            if isinstance(v, str):
+                if f == "query" and _looks_like_graphql_doc(v):
+                    continue      # the operation, not the question
+                return v
+        # Nothing at the top level. A GraphQL body carries the question one level down, in
+        # `variables`, so look for a prompt-named field anywhere before falling back.
+        nested = _nested_prompt_field(body)
+        if nested is not None:
+            return nested
+        # Deepest / longest string fallback -- but never a GraphQL document. Skipping it above
+        # and then handing it back here was the actual bug: the guard fired and the fallback
+        # undid it, so the document still became {{PROMPT}}.
         longest = _longest_string(body)
-        if longest and len(longest) >= 3:
+        if longest and len(longest) >= 3 and not _looks_like_graphql_doc(longest):
             return longest
     elif isinstance(body, str) and body.strip():
         return body
@@ -467,6 +578,9 @@ def _http_params(req: Dict[str, Any], resp: Dict[str, Any], stream: Optional[str
         "headers": _nonsecret_headers(req["headers"]),
         "body": _body_template(req),
     }
+    held = dropped_secret_headers(req["headers"])
+    if held:
+        params["withheld_headers"] = held
     if stream:
         # Derive the field mapping from the captured body rather than emitting a bare
         # {"format": "sse"}. Without text_path/token_types the adapter collects no frames and
@@ -477,8 +591,52 @@ def _http_params(req: Dict[str, Any], resp: Dict[str, Any], stream: Optional[str
         if hints.get("text_path"):
             params["stream"].update({k: v for k, v in hints.items() if k != "format"})
     else:
-        params["response_path"] = _guess_response_path(resp["json"], _REPLY_TEXT.get("v"))
+        # Only claim a response_path when the body actually parsed as JSON. For a plain-text
+        # bot, `_guess_response_path` still returns its "response" fallback, and that single
+        # key turns a working config into a broken one: direct_api sees a response_path, demands
+        # JSON, and fails with "expected JSON for response_path 'response' but got non-JSON".
+        # With the key ABSENT the same adapter treats the raw text as the answer and works --
+        # which test_direct_api_non_json_response_no_path_is_text has always asserted. So the
+        # capture path was the only thing standing between a text/plain target and a valid
+        # config, and it was inventing the obstacle.
+        if resp.get("json") is not None:
+            params["response_path"] = _guess_response_path(resp["json"], _REPLY_TEXT.get("v"))
+        else:
+            stop = _detect_stop_marker(resp.get("raw_body") or "")
+            if stop:
+                params["stop_marker"] = stop
     return params
+
+
+# A streaming terminator on a plain-text body: `<<<END>>>`, `[DONE]`, `<EOS>`, `--END--`.
+_STOP_WORDS = ("done", "end", "eos", "eof", "stop", "fin", "finish", "complete", "completed")
+
+
+def _detect_stop_marker(body: str) -> Optional[str]:
+    """Find the terminator a chunked text/plain body closes with.
+
+    Without this the marker is simply the last few characters of the answer, and the scorer
+    reads it as the agent's words -- on every single turn, quietly, which is worse than failing
+    once. Same class as SSE progress chatter arriving as the reply.
+
+    Deliberately narrow: the final non-empty line must be short, contain no whitespace, and
+    either be wrapped in bracket/angle/dash punctuation or be one of a few terminator words.
+    A target whose answer genuinely ends in a short word must not lose it, so ambiguity means
+    no marker rather than a guess.
+    """
+    lines = [l.strip() for l in (body or "").splitlines() if l.strip()]
+    if len(lines) < 2:
+        return None
+    last = lines[-1]
+    if len(last) > 32 or " " in last or "\t" in last:
+        return None
+    core = last.strip("<>[](){}|-_*=.: ").lower()
+    if not core:
+        return None
+    bracketed = last[0] in "<[({|-*=" and last[-1] in ">])}|-*="
+    if bracketed or core in _STOP_WORDS:
+        return last
+    return None
 
 
 def _ws_params(ev: Dict[str, Any]) -> Dict[str, Any]:
@@ -500,25 +658,139 @@ def _ws_params(ev: Dict[str, Any]) -> Dict[str, Any]:
             "idle_ms": 1500}
 
 
+def _guess_transcript(obj: Any) -> Dict[str, Any]:
+    """Work out how to read a bot turn out of a transcript response.
+
+    `session_poll` walks `list_path` for turns, filters on `role_field` against `bot_roles`, and
+    reads the text at `text_path`. Those four were previously hardcoded to
+    messages/role/[assistant,bot,agent]/text, which is right for maybe half of real transcript
+    endpoints and silently wrong for the rest. Derived from the evidence instead.
+    """
+    out = {"list_path": "messages", "role_field": "role", "text_path": "text",
+           "bot_roles": ["assistant", "bot", "agent", "ai", "system"]}
+    best: Tuple[int, str, List[Any]] = (0, "", [])
+    def walk(o: Any, prefix: str = "") -> None:
+        nonlocal best
+        if isinstance(o, list):
+            dicts = [x for x in o if isinstance(x, dict)]
+            if len(dicts) > best[0] and prefix:
+                best = (len(dicts), prefix, dicts)
+        elif isinstance(o, dict):
+            for k, v in o.items():
+                walk(v, f"{prefix}.{k}" if prefix else k)
+    walk(obj)
+    count, path, turns = best
+    if not count:
+        return out
+    out["list_path"] = path
+    sample = turns[0]
+    # role: a short string field whose values look like speaker labels
+    for k, v in sample.items():
+        if isinstance(v, str) and len(v) <= 24 and k.lower() in (
+                "role", "sender", "author", "from", "speaker", "type", "direction"):
+            out["role_field"] = k
+            break
+    # text: the longest string field across the sampled turns, which is the message body
+    longest = (0, "text")
+    for turn in turns[:8]:
+        for k, v in turn.items():
+            if isinstance(v, str) and len(v) > longest[0] and k != out["role_field"]:
+                longest = (len(v), k)
+    if longest[0]:
+        out["text_path"] = longest[1]
+    # bot roles: any observed role value that is not the human side
+    seen = {str(t.get(out["role_field"], "")).lower() for t in turns}
+    seen.discard("")
+    bots = sorted(seen - {"user", "human", "customer", "me", "client", "you", "in", "inbound"})
+    if bots:
+        out["bot_roles"] = bots
+    return out
+
+
 def _detect_poll(pairs: List[Dict[str, Any]], chat_idx: int) -> Optional[Dict[str, Any]]:
-    submit = pairs[chat_idx]
-    sid = _first_id(submit["response"]["json"])
+    """Find an ACK-only contract: (create) -> send-returns-ack -> poll a transcript.
+
+    Rewritten because the params this emitted and the keys the composer read were two different
+    schemas that were never connected: it published `submit`/`poll.endpoint_template`, while
+    `_session_poll_from_poll` looked for `create_url`/`send_url`/`poll_url`. Every lookup missed,
+    so the composed config carried three EMPTY urls and the adapter refused with "session_poll
+    needs create.url, send.url and poll.url" -- unconditionally, for any evidence. The shape
+    session_poll's own example calls "the most common enterprise web-chat contract" could
+    therefore never be derived at all; it had to be hand-written every time.
+
+    Two further fixes fall out of doing it properly:
+      - the conversation id is often in the send URL (`/chat/{id}/message`), not just in the
+        response body, so both are searched;
+      - the CREATE call happens BEFORE the pair carrying the prompt, so it is found by looking
+        backward. Only looking forward meant create was never captured even when present.
+    """
+    send = pairs[chat_idx]
+    send_url_raw = _strip_query(send["request"]["url"])
+    # the id may be in the send response, or already in the send URL
+    sid = _first_id(send["response"]["json"])
+    id_in_url = None
+    if not sid:
+        for cand in re.findall(r"/([0-9a-fA-F]{8,}|\d{3,})(?=/|$)", send_url_raw):
+            id_in_url = cand
+            break
+        sid = id_in_url
     if not sid:
         return None
+    sid = str(sid)
+
+    # Take the LAST matching poll, not the first. A real capture contains the whole polling
+    # loop, and the early responses are by definition incomplete -- the first GET fires before
+    # the bot has answered, so sampling it derives the transcript shape from a transcript
+    # containing only the user's turn. That is how `bot_roles` silently fell back to defaults
+    # instead of being read from the evidence. The last response is the finished one.
+    poll_pair = None
     for j in range(chat_idx + 1, len(pairs)):
         later = pairs[j]
-        if later["request"]["method"] == "GET" and str(sid) in later["request"]["url"]:
-            return {"value": "poll", "confidence": 0.7,
-                    "evidence": f"submit returned id={sid!r}; GET {(_strip_query(later['request']['url']))} polls it",
-                    "params": {
-                        "submit": {"endpoint": _strip_query(submit["request"]["url"]),
-                                   "method": submit["request"]["method"],
-                                   "body": _body_template(submit["request"])},
-                        "poll": {"endpoint_template": _strip_query(later["request"]["url"]).replace(str(sid), "{{ID}}"),
-                                 "id_field": _id_field_of(submit["response"]["json"], sid)},
-                        "response_path": _guess_response_path(later["response"]["json"], _REPLY_TEXT.get("v")),
-                    }}
-    return None
+        if later["request"]["method"] in ("GET", "POST") and sid in later["request"]["url"]:
+            poll_pair = later
+    if poll_pair is None:
+        return None
+
+    # The create step precedes the prompt-carrying pair. Its response mints the id.
+    create = None
+    for j in range(chat_idx - 1, -1, -1):
+        prior = pairs[j]
+        if prior["request"]["method"] != "POST":
+            continue
+        if sid in json.dumps(prior["response"]["json"] or ""):
+            create = {"url": _strip_query(prior["request"]["url"]),
+                      "method": prior["request"]["method"],
+                      "body": _body_template(prior["request"]),
+                      "extract": _id_field_of(prior["response"]["json"], sid) or "id"}
+            break
+
+    transcript = _guess_transcript(poll_pair["response"]["json"])
+    poll_url = _strip_query(poll_pair["request"]["url"]).replace(sid, "{{CONV}}")
+    q = _query_from_url(poll_pair["request"]["url"])
+    if q:
+        qs = "&".join(f"{k}={'{{CONV}}' if v == sid else v}" for k, v in q.items())
+        poll_url = f"{poll_url}?{qs}"
+
+    return {"value": "poll", "confidence": 0.8 if create else 0.6,
+            "evidence": (f"send returned/carried id={sid!r}; "
+                         f"{poll_pair['request']['method']} "
+                         f"{_strip_query(poll_pair['request']['url'])} reads the transcript"
+                         + ("" if create else "; no create call seen in the capture")),
+            "params": {
+                "create": create,
+                "send": {"url": send_url_raw.replace(sid, "{{CONV}}"),
+                         "method": send["request"]["method"],
+                         "body": _body_template(send["request"])},
+                "poll": {"url": poll_url,
+                         "method": poll_pair["request"]["method"], **transcript},
+                "id": sid,
+                # kept for _session_api_from_poll, which reads the older schema
+                "submit": {"endpoint": send_url_raw,
+                           "method": send["request"]["method"],
+                           "body": _body_template(send["request"])},
+                "response_path": _guess_response_path(poll_pair["response"]["json"],
+                                                      _REPLY_TEXT.get("v")),
+            }}
 
 
 # --------------------------------------------------------------------------- #
@@ -574,10 +846,33 @@ def classify_auth(ev: Dict[str, Any], chat_idx: Optional[int]) -> Dict[str, Any]
                         "params": {"bootstrap_url": _strip_query(ourl),
                                    "extract": {"path": ofield} if ofield else {"regex": "TOKEN=([A-Za-z0-9_-]+)"},
                                    "into_header": _orig_header_name(pairs[chat_idx], h)}}
+            # The token usually lives in the PAGE, not in a JSON response -- a <meta> tag, a
+            # hidden input, or an inline JS assignment. `_collect_prior_values` only walks JSON
+            # string leaves, so an HTML-borne token was invisible to it and this fell through to
+            # the branch below, which emitted bootstrap_url:"" -- a config the auth layer refuses
+            # outright ("csrf auth requires 'bootstrap_url'"). The auth layer has always been
+            # able to regex a token out of an HTML bootstrap body; only the finding was missing.
+            html = _html_token_origin(pairs, chat_idx, headers[h])
+            if html is not None:
+                hurl, hregex, hwhere = html
+                return {"value": "csrf", "confidence": 0.75,
+                        "evidence": f"'{h}' echoes the {hwhere} token in GET {_strip_query(hurl)}",
+                        "params": {"bootstrap_url": _strip_query(hurl),
+                                   "extract": {"regex": hregex},
+                                   "into_header": _orig_header_name(pairs[chat_idx], h)}}
+            # Origin genuinely not in the capture. Emitting a csrf block with an empty
+            # bootstrap_url guarantees a hard failure at validate time and reads like a capture
+            # problem, so say what is actually missing instead.
             return {"value": "csrf", "confidence": 0.5,
                     "evidence": f"CSRF-style header '{h}' present (origin not in capture)",
                     "params": {"bootstrap_url": "", "extract": {},
-                               "into_header": _orig_header_name(pairs[chat_idx], h)}}
+                               "into_header": _orig_header_name(pairs[chat_idx], h),
+                               "_incomplete": (
+                                   f"The request sends '{h}', but nothing in this capture shows "
+                                   f"where that token comes from. Set bootstrap_url to the page "
+                                   f"or endpoint that issues it and extract.regex/path to pull it "
+                                   f"out -- or re-capture starting from the first page load, "
+                                   f"which is usually what is missing.")}}
 
     # 3) API-key style headers.
     for name_lower, value in headers.items():
@@ -910,8 +1205,17 @@ def compose(classified: Dict[str, Any]) -> Dict[str, Any]:
         else:  # rest_json (default)
             adapter = "direct_api"
             config.update({"endpoint": endpoint, "method": tparams.get("method", "POST"),
-                           "body": tparams.get("body", {"prompt": "{{PROMPT}}"}),
-                           "response_path": tparams.get("response_path", "response")})
+                           "body": tparams.get("body", {"prompt": "{{PROMPT}}"})})
+            # Same trap as in _http_params, and it had to be fixed in both places: defaulting
+            # response_path to "response" for a target that answered in plain text makes
+            # direct_api demand JSON and fail, when omitting the key entirely makes the same
+            # adapter treat the raw body as the answer. Only carry a path that was derived
+            # from a body that really was JSON.
+            if tparams.get("response_path"):
+                config["response_path"] = tparams["response_path"]
+            if tparams.get("stop_marker"):
+                # the streaming terminator is transport, not the agent's words
+                config["stop_marker"] = tparams["stop_marker"]
         # Session upgrade for a rest_json transport that actually has id-flow.
         if adapter == "direct_api" and session.get("value") in ("create_session", "create_conversation"):
             adapter = "session_api"
@@ -923,6 +1227,11 @@ def compose(classified: Dict[str, Any]) -> Dict[str, Any]:
     # Non-secret request headers.
     if tparams.get("headers"):
         config.setdefault("headers", {}).update(tparams["headers"])
+    # Record the NAMES of any credential-shaped headers that were withheld, so the CLI can tell
+    # the operator what to re-supply. Names only -- the values are exactly what must not persist.
+    _held = tparams.get("withheld_headers")
+    if _held:
+        config["_withheld_headers"] = _held
 
     # Warmup preset support.
     if session.get("value") == "warmup":
@@ -1091,23 +1400,45 @@ def _session_api_from_session(session: Dict[str, Any], tparams: Dict[str, Any]) 
 
 
 def _session_poll_from_poll(tparams: Dict[str, Any]) -> Dict[str, Any]:
-    """Build a session_poll config from a detected create/submit + fetch pattern."""
-    return {
-        "create": {"url": tparams.get("create_url", tparams.get("endpoint", "")),
-                   "method": tparams.get("create_method", "POST"),
-                   "body": tparams.get("create_body", {}),
-                   "extract": tparams.get("id_path", "conversation_id")},
-        "send": {"url": tparams.get("send_url", tparams.get("endpoint", "")),
-                 "method": tparams.get("method", "POST"),
-                 "body": tparams.get("body", {"message": "{{PROMPT}}"})},
-        "poll": {"url": tparams.get("poll_url", ""),
-                 "method": tparams.get("poll_method", "GET"),
-                 "list_path": tparams.get("list_path", "messages"),
-                 "role_field": tparams.get("role_field", "role"),
-                 "bot_roles": tparams.get("bot_roles", ["assistant", "bot", "agent"]),
-                 "text_path": tparams.get("text_path", "text"),
+    """Build a session_poll config from the create/send/poll blocks `_detect_poll` publishes.
+
+    This used to read `create_url`, `send_url`, `poll_url`, `id_path`, `list_path`, `text_path` --
+    none of which the detector has ever emitted. Every `.get()` fell through to its default, so
+    the result was always three empty URLs plus plausible-looking guesses
+    (`extract: conversation_id`, `text_path: text`), and the adapter refused it. Reads the real
+    schema now, and carries the detector's derived transcript shape rather than re-guessing it.
+    """
+    create = tparams.get("create") or {}
+    send = tparams.get("send") or {}
+    poll = tparams.get("poll") or {}
+    cfg: Dict[str, Any] = {
+        "create": {"url": create.get("url", ""),
+                   "method": create.get("method", "POST"),
+                   "body": create.get("body", {}),
+                   "extract": create.get("extract", "conversation_id")},
+        "send": {"url": send.get("url", ""),
+                 "method": send.get("method", "POST"),
+                 "body": send.get("body", {"message": "{{PROMPT}}"})},
+        "poll": {"url": poll.get("url", ""),
+                 "method": poll.get("method", "GET"),
+                 "list_path": poll.get("list_path", "messages"),
+                 "role_field": poll.get("role_field", "role"),
+                 "bot_roles": poll.get("bot_roles", ["assistant", "bot", "agent"]),
+                 "text_path": poll.get("text_path", "text"),
                  "interval_ms": 1000, "timeout_ms": 30000},
     }
+    if not create:
+        # A two-step job API (submit -> GET status until done) has no create call to find, and
+        # session_poll requires one -- it models create/send/poll-a-transcript, not a job. Say so
+        # in the config rather than emitting an empty url and letting the adapter fail with a
+        # message that reads like a capture problem.
+        cfg["_note"] = (
+            "No create call was found in the capture. session_poll models "
+            "create-conversation -> send -> poll-a-transcript (the ACK-only web-chat contract). "
+            "If this target is instead a two-step job API (POST returns a job id, GET polls its "
+            "status until done), no shipped adapter covers that shape: set create.url to the "
+            "submit endpoint and send.url to the same, or use --module for a custom adapter.")
+    return cfg
 
 
 def _session_api_from_poll(tparams: Dict[str, Any]) -> Dict[str, Any]:
@@ -1180,9 +1511,24 @@ def _nonsecret_headers(headers: Dict[str, str]) -> Dict[str, str]:
     for k, v in headers.items():
         if k in drop or k.startswith(":"):     # ':authority' etc. — HTTP/2 internals
             continue
+        if _looks_secret_header(k, v):
+            # A credential under a name we did not anticipate. Dropping it is the whole promise
+            # of this function; `dropped_secret_headers()` tells the operator what to re-supply.
+            continue
         # Preserve a canonical-ish casing for a couple of common headers.
         keep[_canonical_header(k)] = v
     return keep
+
+
+def dropped_secret_headers(headers: Dict[str, str]) -> List[str]:
+    """Names (only) of headers withheld from a config because they look like credentials.
+
+    Silently dropping a header the target requires just moves the confusion: the config then 401s
+    for no visible reason. The names are safe to print; the values never are.
+    """
+    return sorted(_canonical_header(k) for k, v in headers.items()
+                  if not k.startswith(":") and k not in _NEVER_SECRET
+                  and _looks_secret_header(k, v))
 
 
 def _canonical_header(name_lower: str) -> str:
@@ -1321,6 +1667,66 @@ def _iter_string_leaves(obj: Any, prefix: str = ""):
             yield from _iter_string_leaves(v, f"{prefix}{i}.")
     elif isinstance(obj, str):
         yield (prefix.rstrip("."), obj)
+
+
+# Where a CSRF token actually hides in a rendered page. A meta tag is the most common by a
+# wide margin; a hidden form input is the classic server-rendered form; the inline-JS
+# assignment covers SPA bootstraps that print the token into a script block.
+_HTML_TOKEN_PATTERNS = (
+    ("meta tag",
+     r"""<meta[^>]+?name=["']([\w:.-]*(?:csrf|xsrf)[\w:.-]*)["'][^>]+?content=["']([^"']+)["']"""),
+    ("meta tag",   # attribute order is not guaranteed
+     r"""<meta[^>]+?content=["']([^"']+)["'][^>]+?name=["']([\w:.-]*(?:csrf|xsrf)[\w:.-]*)["']"""),
+    ("hidden input",
+     r"""<input[^>]+?name=["']([\w:._-]*(?:csrf|xsrf|authenticity)[\w:._-]*)["'][^>]+?value=["']([^"']+)["']"""),
+    ("hidden input",   # attribute order is not guaranteed here either
+     r"""<input[^>]+?value=["']([^"']+)["'][^>]+?name=["']([\w:._-]*(?:csrf|xsrf|authenticity)[\w:._-]*)["']"""),
+    ("inline script",
+     r"""["']([\w.]*(?:csrf|xsrf)[\w.]*[Tt]oken)["']\s*[:=]\s*["']([^"']+)["']"""),
+)
+
+
+def _html_token_origin(pairs: List[Dict[str, Any]], chat_idx: int,
+                       needle: str) -> Optional[Tuple[str, str, str]]:
+    """Find `needle` in a prior page body and return (url, re-extraction regex, where).
+
+    The regex is keyed on the ATTRIBUTE NAME observed, never on the token value -- the value
+    rotates every session, so anchoring on it would produce a config that worked exactly once
+    and then failed as a mysterious auth error.
+
+    It is also built with a lookahead rather than a fixed attribute order. HTML attribute order
+    is not guaranteed, and the first cut emitted `name=... content=...` after matching a tag
+    written `content=... name=...`, so the generated regex could not re-extract the very token
+    it had just found. A lookahead matches either order and still exposes exactly one capture
+    group, which is what the auth layer's `m.group(1)` expects.
+    """
+    if not needle or len(needle) < 8:
+        return None
+    for i in range(chat_idx):
+        body = pairs[i]["response"].get("raw_body") or ""
+        if not body or len(body) > 4_000_000:
+            continue
+        for where, pat in _HTML_TOKEN_PATTERNS:
+            for m in re.finditer(pat, body, re.I):
+                a, b = m.group(1), m.group(2)
+                # whichever group IS the token is the value; the other names it
+                if a == needle:
+                    name = b
+                elif b == needle:
+                    name = a
+                else:
+                    continue
+                esc = re.escape(name)
+                if where == "meta tag":
+                    rx = (r'<meta(?=[^>]*name=["\']' + esc
+                          + r'["\'])[^>]*content=["\']([^"\']+)["\']')
+                elif where == "hidden input":
+                    rx = (r'<input(?=[^>]*name=["\']' + esc
+                          + r'["\'])[^>]*value=["\']([^"\']+)["\']')
+                else:
+                    rx = r'["\']' + esc + r'["\']\s*[:=]\s*["\']([^"\']+)["\']'
+                return pairs[i]["request"]["url"], rx, where
+    return None
 
 
 def _reuse_origin(needle: str, prior: List[Tuple[int, str, str, str]],

@@ -38,7 +38,7 @@ STATIC = re.compile(r"(\.png|\.jpe?g|\.svg|\.css|\.woff2?|\.gif|\.ico|\.mp4|\.we
                     r"\.ttf|\.eot|/fonts?/)", re.I)
 
 
-def _worth_recording(url: str, method: str) -> bool:
+def _worth_recording(url: str, method: str, resource_type: str = "") -> bool:
     """What the capture keeps.
 
     This used to be `NOISE.search(u) or not INTERESTING.search(u)` — i.e. a request was recorded
@@ -54,7 +54,16 @@ def _worth_recording(url: str, method: str) -> bool:
         return False
     if method in ("POST", "PUT", "PATCH"):
         return True                      # any body-carrying request can be the send
-    return bool(INTERESTING.search(url))  # GETs still need a reason to be kept
+    if resource_type == "document":
+        # ALWAYS keep the page itself. The same argument as above applies to the document and
+        # was missed: a GET was kept only when its URL contained a guessed word, and the page
+        # being captured is served from `/`, which contains none of them. So the one response
+        # that bootstraps everything -- the CSRF token in a <meta> tag, the session cookie, the
+        # inline config -- was discarded before classification ever saw it. Auth then classified
+        # as "origin not in capture" and composed a csrf block with an empty bootstrap_url, which
+        # the auth layer refuses outright. The evidence was there; the filter threw it away.
+        return True
+    return bool(INTERESTING.search(url))  # other GETs still need a reason to be kept
 
 LAUNCHER_SELECTORS = [
     "button[aria-label*='chat' i]", "[data-testid*='chat' i]", "button[title*='chat' i]",
@@ -163,7 +172,8 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
                 u = req.url
                 if req.method not in ("POST", "GET", "PUT", "PATCH"):
                     return
-                if not _worth_recording(u, req.method):
+                if not _worth_recording(u, req.method,
+                                        getattr(req, "resource_type", "") or ""):
                     return
                 body = None
                 ct = (resp.headers or {}).get("content-type", "")

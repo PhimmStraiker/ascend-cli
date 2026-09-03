@@ -1,0 +1,26 @@
+$ ascend app list --help
+--- exit 0
+--- stdout
+usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] app list
+       [-h] [--json] [--token TOKEN] [--base BASE] [--bridge-base BRIDGE_BASE] [--with-runs]
+       [--running] [--all-runs]
+
+options:
+  -h, --help            show this help message and exit
+  --json                machine-readable JSON output (default: False)
+  --token TOKEN         Straiker PAT (s6r_pat_...) or JWT; else $STRAIKER_PAT (default: None)
+  --base BASE           v3 API base URL (default: https://api.prod.straiker.ai/api/v3)
+  --bridge-base BRIDGE_BASE
+                        Ascend lease-service base URL (where bridges fetch probes and post
+                        results) (default: https://ascendai-bridge.prod.straiker.ai)
+  --with-runs           show the assessment table: state, run count, latest run,
+                        progress/score/severity (default: False)
+  --running             only apps that have a live (running/created/paused) assessment (default:
+                        False)
+  --all-runs            list every assessment per app, not just the latest (default: False)
+
+examples:
+  ascend app list                    # just the apps (fast)
+  ascend app list --with-runs        # + assessment status table
+  ascend app list --running          # only apps with a LIVE assessment
+  ascend app list --all-runs         # every assessment per app

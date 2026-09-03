@@ -36,16 +36,46 @@ _CYA = "\033[36m"
 _MAG = "\033[35m"
 
 _SEV_COLOR = {
-    "critical": _MAG, "high": _RED, "medium": _YEL,
-    "low": _GRN, "info": _CYA, "informational": _CYA, "none": _DIM, "unknown": _RED,
+    # Canon: critical and high are both the red family (critical is the fail treatment itself),
+    # medium is yellow, low is NEUTRAL GRAY -- not green. Green reads "good", and low severity is
+    # still an issue; "inverting red = bad, green = good" is a rejected design.
+    "critical": _RED, "high": _RED, "medium": _YEL,
+    "low": _DIM, "info": _CYA, "informational": _CYA, "none": _DIM, "unknown": _RED,
 }
 
 
-def color_ok(stream=None) -> bool:
-    """True when it is safe to emit ANSI: a real TTY, and the user has not opted out."""
-    if os.environ.get("NO_COLOR"):
+def _env_flag(name: str) -> bool:
+    """Is one of OUR OWN switches on? `=0`, `=false`, `=no` and `=off` all mean off.
+
+    `os.environ.get(name)` is the obvious spelling and it is wrong for a switch, because every
+    non-empty string is truthy in Python: `ASCEND_FORCE_COLOR=0` turned colour ON and
+    `ASCEND_PLAIN=0` turned colour OFF. Someone reaching for `=0` means "off" in both cases, and
+    `ASCEND_PLAIN` is the "something is corrupting my terminal, make it stop" hatch -- the one
+    switch that must not do the opposite of what it says.
+
+    NO_COLOR is deliberately NOT routed through here. Its spec (no-color.org) is presence-based:
+    any non-empty value disables colour, so `NO_COLOR=0` correctly means no colour. Honouring
+    `=0` there would break a documented convention rather than fix a bug.
+    """
+    v = os.environ.get(name)
+    if v is None:
         return False
-    if os.environ.get("ASCEND_FORCE_COLOR"):
+    return v.strip().lower() not in ("", "0", "false", "no", "off")
+
+
+def color_ok(stream=None) -> bool:
+    """True when it is safe to emit ANSI: a real TTY, and the user has not opted out.
+
+    ASCEND_PLAIN is checked here as well as in color_depth(): the older helpers
+    (severity_chip, risk_dot, bar, Progress) gate on this function, so without it the
+    "make my terminal stop" hatch would silence the new renderers and leave the old ones
+    still painting.
+    """
+    if _env_flag("ASCEND_PLAIN"):
+        return False
+    if os.environ.get("NO_COLOR"):        # presence-based by spec; see _env_flag
+        return False
+    if _env_flag("ASCEND_FORCE_COLOR"):
         return True
     s = stream or sys.stdout
     try:
@@ -88,17 +118,24 @@ def score_cell(v, width: int = 5) -> str:
     return paint(txt.rjust(width), col, sys.stdout)
 
 
-def bar(passed: int, failed: int, width: int = 10) -> str:
-    """`▓▓▓▓▓▓▓░░░` — pass/fail at a glance. ASCII when the terminal can't do blocks."""
+def bar(passed: int, failed: int, width: int = 10, cell: Optional[int] = None) -> str:
+    """`▓▓▓▓▓▓▓░░░` — pass/fail at a glance. ASCII when the terminal can't do blocks.
+
+    `cell` pads the result to a visible column width. Callers must use it rather than
+    `f"{bar(...):11}"`: this returns ~28 bytes for 10 visible cells, so a format spec measures
+    the escapes and adds no padding at all, which silently under-pads the column whenever colour
+    is on. Padding here is the only way a caller cannot get it wrong.
+    """
     total = max(0, passed) + max(0, failed)
     if not total:
-        return "-".ljust(width)
+        return vpad("-", cell or width)
     filled = int(round(width * (max(0, passed) / total)))
     if _unicode_ok():
         good, bad = "▓", "░"
     else:
         good, bad = "#", "."
-    return paint(good * filled, _GRN, sys.stdout) + paint(bad * (width - filled), _RED, sys.stdout)
+    out = paint(good * filled, _GRN, sys.stdout) + paint(bad * (width - filled), _RED, sys.stdout)
+    return vpad(out, cell) if cell else out
 
 
 def sparkline(values) -> str:
@@ -196,11 +233,16 @@ class Progress:
             self._stop.wait(self.interval)
 
     def _write(self, line: str) -> None:
+        # vwidth, not len: _line() embeds _DIM/_OFF around the elapsed clock, so len() counts
+        # escape BYTES. The two disagree by 8 the moment the clock appears at the 3s mark, which
+        # is exactly when the padding has to be right -- the frame before it is narrower. Same
+        # bug class as bar() and _watch_many, and the reason both of those now pad by cells.
         try:
-            pad = max(0, self._width - len(line))
+            cells = vwidth(line)
+            pad = max(0, self._width - cells)
             self.stream.write("\r" + line + " " * pad)
             self.stream.flush()
-            self._width = len(line)
+            self._width = cells
         except Exception:
             self.enabled = False
 
@@ -221,3 +263,490 @@ def progress(phase: str, total: Optional[int] = None, *, args=None, **kw) -> Pro
     if enabled is None and args is not None and getattr(args, "json", False):
         enabled = False
     return Progress(phase, total, enabled=enabled, **kw)
+
+
+# ===========================================================================================
+# Presentation primitives — brand colour, visible width, panels, and a progress bar.
+#
+# Everything below obeys the two rules at the top of this module, plus three of its own:
+#
+#   a. ONE colour gate. `color_depth()` folds every reason not to emit escapes into a single
+#      integer (0 | 8 | 256 | 24). Renderers branch on that and nothing else, which is what
+#      makes four-tier degradation testable: monkeypatch one function, assert four outputs.
+#   b. GEOMETRY BEFORE COLOUR. Widths are computed in visible cells before a colour is chosen,
+#      so every tier renders the same number of columns by construction rather than because
+#      four code paths happen to agree.
+#   c. NEVER RAISE. These are decorations on someone else's output. A renderer that throws on an
+#      odd locale would turn a cosmetic feature into an outage, so each one falls back to plain
+#      text. `Progress._write` already sets the precedent.
+# ===========================================================================================
+
+import re as _re
+import shutil as _shutil
+import unicodedata as _ud
+
+# The brand ramp, taken from docs/architecture.html so the terminal and the docs cannot drift.
+# Three different pinks used to coexist in this repo (38;5;205, 38;5;204, #FF5378); this is the
+# one definition.
+# The design system's dark-mode `-600` anchors, converted from the HSL in
+# straiker-design-skill (.claude/skills/straiker-ui/references/design-tokens.md). Dark mode is
+# the product default and a terminal is always dark, so `-600` is the right column.
+# "Eyeballing a color is a bug" — these are the tokens, not approximations.
+BRAND = {
+    # severity / status anchors
+    "gris":     (217, 217, 217),   # #D9D9D9  severity-low
+    "pulse":    (255, 223, 82),    # #FFDF52  severity-medium, warn
+    "ascend":   (255, 97, 107),    # #FF616B  severity-high, and the fail treatment = critical
+    "defend":   (77, 222, 255),    # #4DDEFF  severity-info
+    "secure":   (133, 255, 137),   # #85FF89  success
+    "veil":     (222, 138, 255),   # #DE8AFF  decorative purple (unused here by design)
+    # brand — LOGO ONLY. The design law is explicit: "Brand colors (rose/gold) are for the logo
+    # only. Never as chart series, decorative accents, or emphasis in new surfaces."
+    "rose":     (255, 68, 158),    # #FF449E  --brand-1
+    "gold":     (255, 184, 42),    # #FFB82A  --brand-2
+    "logo":     (255, 83, 120),    # #FF5378  the established wordmark red, existing chrome
+    "glint":    (255, 190, 210),
+}
+
+# Progress is STATUS, not severity. A bar that fills with the severity-high red as it advances
+# would read as "this is getting worse" in a system where red means high severity, so the fill is
+# the defend/info anchor and colour does the one job the design law allows it: communicating
+# status. Flat, not a ramp -- a decorative gradient is an explicit reject
+# ("no decorative color, no 'visual interest' palettes").
+PROGRESS_RAMP = ("defend", "defend")
+
+# The brand ramp exists only for a deliberate, logged deviation. The law: "Brand colors
+# (rose/gold) are for the logo only. Never as chart series, decorative accents, or emphasis in
+# new surfaces." Pass ramp=BRAND_RAMP to override, and mark the call site DEVIATION:.
+BRAND_RAMP = ("gold", "rose")
+
+GRADIENT_BAR = PROGRESS_RAMP     # what every caller gets unless it says otherwise
+
+# Severity -> token, per the canon: critical and high share the red family (critical IS the fail
+# treatment), medium is pulse, low is gris, informational is defend cyan and is NOT an issue.
+SEV_TOKEN = {
+    "critical": "ascend", "high": "ascend", "medium": "pulse", "low": "gris",
+    "info": "defend", "informational": "defend", "none": None, "unknown": "ascend",
+}
+
+# Colour for a state word. A whitelist on purpose: an unrecognised word passes through
+# untouched rather than being guessed at, so a new platform status can never come out
+# mis-coloured (green "failed" is worse than uncoloured "failed").
+STATE_TONE = {
+    "serving": "ok", "running": "ok", "complete": "ok", "yes": "ok", "ok": "ok",
+    "pass": "ok", "up_to_date": "ok",
+    "paused": "warn", "queued": "warn", "created": "warn", "pending": "warn",
+    "dead": "alarm", "failed": "alarm", "error": "alarm", "gone": "alarm",
+    "fail": "alarm", "none": "dim", "-": "dim", "not": "dim", "unknown": "dim",
+}
+_TONE_8 = {"ok": _GRN, "warn": _YEL, "alarm": _RED, "info": _CYA, "dim": _DIM, "": ""}
+_TONE_RGB = {"ok": BRAND["secure"], "warn": BRAND["pulse"], "alarm": BRAND["ascend"],
+             "info": BRAND["defend"], "dim": None}
+
+_ANSI_RE = _re.compile(r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])")
+
+
+# ---- capability gates ---------------------------------------------------------------------
+def json_mode() -> bool:
+    """True when `--json` is on the command line.
+
+    Mirrors `_wants_json()` in the CLI, which reads argv directly because errors can be raised
+    before argparse runs. Colour has 48 separate `args.json` checks upstream of it; folding this
+    into `color_depth` means even a mistaken paint call under `--json` emits plain bytes.
+    """
+    try:
+        return "--json" in sys.argv
+    except Exception:
+        return False
+
+
+def truecolor_ok() -> bool:
+    """24-bit colour support, by declaration or by known-good terminal."""
+    try:
+        if (os.environ.get("COLORTERM") or "").lower() in ("truecolor", "24bit"):
+            return True
+        return (os.environ.get("TERM_PROGRAM") or "") in (
+            "iTerm.app", "WezTerm", "ghostty", "vscode", "Apple_Terminal")
+    except Exception:
+        return False
+
+
+def color_depth(stream=None) -> int:
+    """How much colour this stream may carry: 0 (none) | 8 | 256 | 24.
+
+    The single gate. Ordered so the loudest opt-out wins:
+      ASCEND_PLAIN > NO_COLOR > --json (stdout only) > TERM=dumb > ASCEND_COLOR_DEPTH > detection
+    """
+    try:
+        if _env_flag("ASCEND_PLAIN"):
+            return 0
+        s = stream if stream is not None else sys.stdout
+        # `--json` silences stdout only. Progress and notes live on stderr and stay readable.
+        if json_mode() and s is sys.stdout:
+            return 0
+        if not color_ok(s):
+            return 0
+        if (os.environ.get("TERM") or "").lower() in ("dumb", "unknown"):
+            return 0
+        forced = os.environ.get("ASCEND_COLOR_DEPTH")
+        if forced:
+            want = {"0": 0, "1": 0, "8": 8, "16": 8, "256": 256, "24": 24, "24bit": 24}
+            return want.get(forced.strip().lower(), 256)
+        if truecolor_ok():
+            return 24
+        if "256" in (os.environ.get("TERM") or ""):
+            return 256
+        return 256 if os.environ.get("TERM") else 8
+    except Exception:
+        return 0
+
+
+def unicode_ok(stream=None) -> bool:
+    """Whether this stream can carry block/box glyphs.
+
+    `_unicode_ok()` inspects stderr only, which is wrong for stdout renderers but is relied on by
+    the existing helpers; this is the stream-aware form, defaulting to the old behaviour.
+    """
+    try:
+        s = stream if stream is not None else sys.stderr
+        enc = (getattr(s, "encoding", "") or "").lower()
+        return "utf" in enc
+    except Exception:
+        return False
+
+
+# ---- colour conversion --------------------------------------------------------------------
+_XT_STEPS = (0, 95, 135, 175, 215, 255)
+
+
+def rgb256(r: int, g: int, b: int) -> int:
+    """Nearest xterm-256 cube index for an RGB triple."""
+    def _ix(v):
+        return min(range(6), key=lambda i: abs(_XT_STEPS[i] - max(0, min(255, int(v)))))
+    return 16 + 36 * _ix(r) + 6 * _ix(g) + _ix(b)
+
+
+def brand(name: str):
+    return BRAND.get(name, BRAND["ascend"])
+
+
+def rich(depth: int) -> bool:
+    """Whether this depth can carry a per-cell RGB ramp (256-colour or truecolour).
+
+    Depth is NOT an ordered scale: 24 means bit depth, 256 means colour count, so `24 < 256`
+    is arithmetically true and semantically backwards. Every decision uses explicit membership.
+    """
+    return depth in (256, 24)
+
+
+def sgr(rgb, *, layer: int = 38, depth: Optional[int] = None, stream=None) -> str:
+    """An RGB triple as an escape at the right depth. The ONE place that conversion happens."""
+    try:
+        d = color_depth(stream) if depth is None else depth
+        if not d:
+            return ""
+        r, g, b = rgb
+        if d == 24:
+            return f"\033[{layer};2;{int(r)};{int(g)};{int(b)}m"
+        if d == 256:
+            return f"\033[{layer};5;{rgb256(r, g, b)}m"
+        # 8-colour has no brand hue; approximate by luminance-free nearest primary.
+        return _RED if r >= g and r >= b else (_GRN if g >= b else _CYA)
+    except Exception:
+        return ""
+
+
+# ---- measurement --------------------------------------------------------------------------
+def _dim(text: str, depth: int) -> str:
+    """Dim `text` honouring an EXPLICIT depth. `paint()` re-checks color_ok and therefore
+    discards a caller-supplied depth, which made every tier render as plain."""
+    return f"{_DIM}{text}{_OFF}" if depth else text
+
+
+def strip_ansi(s: str) -> str:
+    """`s` with every escape sequence removed."""
+    try:
+        return _ANSI_RE.sub("", str(s))
+    except Exception:
+        return str(s)
+
+
+def vwidth(s: str) -> int:
+    """Visible width in terminal cells: escapes are free, combining marks are zero, CJK is two."""
+    try:
+        w = 0
+        for ch in strip_ansi(s):
+            if _ud.combining(ch):
+                continue
+            w += 2 if _ud.east_asian_width(ch) in ("W", "F") else 1
+        return w
+    except Exception:
+        return len(strip_ansi(s))
+
+
+def vpad(s: str, width: int, *, align: str = "left") -> str:
+    """Pad to a VISIBLE width. `f"{s:10}"` counts escape bytes and silently under-pads."""
+    try:
+        gap = max(0, int(width) - vwidth(s))
+        if align == "right":
+            return " " * gap + s
+        if align == "center":
+            left = gap // 2
+            return " " * left + s + " " * (gap - left)
+        return s + " " * gap
+    except Exception:
+        return s
+
+
+def vtrunc(s: str, width: int, *, ellipsis: str = "…") -> str:
+    """Truncate to a visible width without ever splitting an escape sequence."""
+    try:
+        if vwidth(s) <= width:
+            return s
+        ell = ellipsis if unicode_ok(sys.stdout) else "..."
+        budget = max(0, int(width) - vwidth(ell))
+        out, seen, i, raw = [], 0, 0, str(s)
+        while i < len(raw):
+            m = _ANSI_RE.match(raw, i)
+            if m:                                  # escapes cost nothing and are never cut
+                out.append(m.group(0))
+                i = m.end()
+                continue
+            ch = raw[i]
+            cw = 0 if _ud.combining(ch) else (2 if _ud.east_asian_width(ch) in ("W", "F") else 1)
+            if seen + cw > budget:
+                break
+            out.append(ch)
+            seen += cw
+            i += 1
+        return "".join(out) + (_OFF if "\033" in raw else "") + ell
+    except Exception:
+        return str(s)[:max(0, width)]
+
+
+def term_width(stream=None, *, default: int = 100, minimum: int = 40, maximum: int = 120) -> int:
+    """Usable width, clamped.
+
+    Returns `default` when the stream is not a TTY. That is deliberate: if box widths tracked the
+    real terminal size on a pipe, every subprocess test would become width-dependent and
+    irreproducible across machines and CI.
+    """
+    try:
+        s = stream if stream is not None else sys.stdout
+        if not s.isatty():
+            return default
+        cols = _shutil.get_terminal_size(fallback=(default, 24)).columns
+        return max(minimum, min(maximum, int(cols)))
+    except Exception:
+        return default
+
+
+# ---- structure ----------------------------------------------------------------------------
+def _glyphs(stream):
+    if unicode_ok(stream):
+        return {"h": "─", "v": "│", "tl": "┌", "tr": "┐", "bl": "└", "br": "┘",
+                "full": "█", "void": "░", "warn": "▲", "dot": "·"}
+    return {"h": "-", "v": "|", "tl": "+", "tr": "+", "bl": "+", "br": "+",
+            "full": "#", "void": ".", "warn": "!", "dot": "-"}
+
+
+def rule(width: Optional[int] = None, *, stream=None, indent: str = "  ") -> str:
+    g = _glyphs(stream)
+    w = width if width is not None else term_width(stream) - len(indent)
+    return indent + g["h"] * max(1, w)
+
+
+def section(label: str, *, stream=None, indent: str = "  ") -> str:
+    """A quiet, dim, upper-case section label — the existing house style, just styled."""
+    d = color_depth(stream)
+    txt = str(label).upper()
+    return indent + (f"{_DIM}{txt}{_OFF}" if d else txt)
+
+
+def state(word, *, width: int = 0, stream=None) -> str:
+    """A state word, coloured by meaning, padded to a VISIBLE width.
+
+    Unknown words pass through unchanged — see STATE_TONE.
+    """
+    try:
+        raw = "-" if word is None else str(word)
+        tone = STATE_TONE.get(raw.strip().lower().lstrip("*!"), "")
+        d = color_depth(stream)
+        if not d or not tone:
+            return vpad(raw, width) if width else raw
+        rgbv = _TONE_RGB.get(tone)
+        pre = (sgr(rgbv, depth=d, stream=stream) if rgbv and rich(d) else _TONE_8.get(tone, ""))
+        return vpad(f"{pre}{raw}{_OFF}", width) if width else f"{pre}{raw}{_OFF}"
+    except Exception:
+        return vpad(str(word), width) if width else str(word)
+
+
+def header(title: str, *, subtitle: str = "", accent: str = "ascend",
+           width: Optional[int] = None, stream=None, indent: str = "  ") -> str:
+    """A boxed command header: the wordmark letter-spaced, the command path verbatim.
+
+    Only the wordmark is letter-spaced. Letter-spacing the command path would make it
+    unsearchable and unreadable, and would break anything grepping for `assess run`.
+    """
+    try:
+        g, d = _glyphs(stream), color_depth(stream)
+        spaced = " ".join(str(title).upper())
+        acc = sgr(brand(accent), depth=d, stream=stream) if d else ""
+        body = (f"{acc}{spaced}{_OFF}" if d else spaced)
+        if subtitle:
+            sep = f"{_DIM} {g['dot']} {_OFF}" if d else f" {g['dot']} "
+            body += sep + (f"{_DIM}{subtitle}{_OFF}" if d else subtitle)
+        inner = vwidth(body) + 2
+        w = min(inner, (width if width is not None else term_width(stream)) - len(indent) - 2)
+        line = f"{indent}{g['tl']}{g['h'] * w}{g['tr']}\n"
+        line += f"{indent}{g['v']} {vpad(body, max(0, w - 2))} {g['v']}\n"
+        line += f"{indent}{g['bl']}{g['h'] * w}{g['br']}"
+        return line
+    except Exception:
+        return f"{indent}{title}" + (f" - {subtitle}" if subtitle else "")
+
+
+def panel(lines, *, title: str = "", tone: str = "info", hint: str = "",
+          width: Optional[int] = None, stream=None, indent: str = "  ") -> str:
+    """A bordered block for something the operator must not scroll past.
+
+    Wraps by VISIBLE width and clamps to the terminal, so a long control id cannot produce a
+    ragged box that looks worse than no box at all.
+    """
+    try:
+        g, d = _glyphs(stream), color_depth(stream)
+        rgbv = _TONE_RGB.get(tone)
+        acc = (sgr(rgbv, depth=d, stream=stream) if rgbv and rich(d) else _TONE_8.get(tone, "")) if d else ""
+        avail = (width if width is not None else term_width(stream)) - len(indent) - 4
+        body = []
+        for ln in ([lines] if isinstance(lines, str) else list(lines)):
+            for chunk in _wrap_visible(str(ln), avail):
+                body.append(chunk)
+        hint_lines = _wrap_visible(str(hint), avail) if hint else []
+        inner = max([vwidth(b) for b in body] + [vwidth(h) for h in hint_lines]
+                    + [vwidth(title) + 2, 1])
+        inner = min(inner, avail)
+        head = f"{g['h'] * 1} {acc}{title}{_OFF} " if (title and d) else (f"{g['h']} {title} " if title else "")
+        top = f"{indent}{g['tl']}{head}{g['h'] * max(0, inner + 2 - vwidth(head))}{g['tr']}"
+        out = [top]
+        for b in body:
+            out.append(f"{indent}{g['v']} {vpad(b, inner)} {g['v']}")
+        for hl in hint_lines:
+            h = f"{_DIM}{hl}{_OFF}" if d else hl
+            out.append(f"{indent}{g['v']} {vpad(h, inner)} {g['v']}")
+        out.append(f"{indent}{g['bl']}{g['h'] * (inner + 2)}{g['br']}")
+        return "\n".join(out)
+    except Exception:
+        pre = f"{indent}{title}: " if title else indent
+        return pre + " ".join(str(x) for x in ([lines] if isinstance(lines, str) else lines))
+
+
+def _wrap_visible(s: str, width: int):
+    """Word-wrap by visible width. Escapes ride along with the word they are attached to."""
+    if width <= 0 or vwidth(s) <= width:
+        return [s]
+    out, cur = [], ""
+    for word in str(s).split(" "):
+        cand = word if not cur else f"{cur} {word}"
+        if vwidth(cand) <= width:
+            cur = cand
+        else:
+            if cur:
+                out.append(cur)
+            cur = word if vwidth(word) <= width else vtrunc(word, width)
+    if cur:
+        out.append(cur)
+    return out or [s]
+
+
+def kv(pairs, *, label_width: Optional[int] = None, stream=None,
+       indent: str = "  ", gap: int = 2):
+    """An aligned key/value block: dim labels, one column, computed not hand-typed.
+
+    Returns a list of lines. Skips pairs whose value is None, matching how these blocks are
+    already built by hand.
+    """
+    try:
+        items = [(str(k), v) for k, v in (pairs.items() if hasattr(pairs, "items") else pairs)
+                 if v is not None]
+        if not items:
+            return []
+        d = color_depth(stream)
+        lw = label_width if label_width is not None else max(len(k) for k, _ in items)
+        out = []
+        for k, v in items:
+            label = vpad(f"{_DIM}{k}{_OFF}" if d else k, lw)
+            out.append(f"{indent}{label}{' ' * gap}{v}")
+        return out
+    except Exception:
+        return [f"{indent}{k}  {v}" for k, v in
+                (pairs.items() if hasattr(pairs, "items") else pairs) if v is not None]
+
+
+# ---- the progress bar ---------------------------------------------------------------------
+def gradient_bar(frac, *, width: int = 24, ramp=GRADIENT_BAR, label: str = "",
+                 eta: str = "", depth: Optional[int] = None, stream=None) -> str:
+    """A progress bar whose visible width is identical at every colour depth.
+
+    Geometry is decided first, in cells, and colour is then painted onto a fixed cell array —
+    so the plain, 8-colour, 256-colour and truecolour renderings occupy the same columns by
+    construction rather than by four code paths agreeing.
+
+    `eta` is the CALLER's string. This function does no timing: a duration derived from a single
+    sample is exactly the invented progress this module's header forbids.
+    """
+    try:
+        g = _glyphs(stream)
+        w = max(1, int(width))
+        # 1. geometry, in visible cells
+        try:
+            f = float(frac)
+            if f != f:                      # NaN
+                raise ValueError
+        except (TypeError, ValueError):
+            f = None
+        if f is None:
+            filled, empty = 0, w
+        else:
+            f = min(1.0, max(0.0, f))
+            filled = int(f * w)             # floor: round() shows a full bar at 97.9%
+            if filled == 0 and f > 0.0:
+                filled = 1                  # any real progress must be visible
+            if filled == w and f < 1.0:
+                filled = w - 1              # only 100% looks finished
+            empty = w - filled
+        assert filled + empty == w
+
+        # 2. colour the fixed cells
+        d = color_depth(stream) if depth is None else depth
+        full, void = g["full"], g["void"]
+        if not d:
+            body = full * filled + void * empty
+        elif not rich(d):
+            # 8-colour has no orange; a red+yellow "ramp" reads as a barber pole, i.e. a fault.
+            body = f"{_MAG}{full * filled}{_OFF}" + _dim(void * empty, d)
+        else:
+            a, b = brand(ramp[0]), brand(ramp[1])
+            body, prev = "", None
+            for i in range(filled):
+                # ramp across the FULL width: if it were rescaled to `filled`, every cell's hue
+                # would shift on each tick and the bar would read as a rendering glitch.
+                t = i / max(1, w - 1)
+                rgbv = tuple(int(a[j] + (b[j] - a[j]) * t) for j in range(3))
+                code = rgbv if d == 24 else rgb256(*rgbv)
+                if code != prev:            # run-length: ~6 escapes instead of one per cell
+                    body += sgr(rgbv, depth=d, stream=stream)
+                    prev = code
+                body += full
+            body += _OFF + _dim(void * empty, d)
+
+        # 3. trailing text, padded by visible width
+        pct = "  —  " if f is None else vpad(f"{f * 100:.0f}%", 4, align="right")
+        tail = f"  {pct}"
+        if label:
+            tail += f"  {label}"
+        if eta:
+            tail += f"  {eta}"
+        return body + (_dim(tail, d) if d else tail)
+    except Exception:
+        return ("#" * max(0, int(width or 0)))[:int(width or 0)]

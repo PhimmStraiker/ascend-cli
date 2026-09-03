@@ -1,0 +1,87 @@
+$ ascend target add --help
+--- exit 0
+--- stdout
+usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] target add
+       [-h] [--json] [--token TOKEN] [--base BASE] [--bridge-base BRIDGE_BASE]
+       [--api URL | --ws URL | --url URL | --curl FILE | --har HAR | --config CONFIG]
+       [--name NAME] [--app NAME|aapp_id] [--save-as NAME] [--system-prompt SYSTEM_PROMPT]
+       [--controls CONTROLS] [--adapter ADAPTER] [--bearer TOKEN]
+       [--api-key NAME:VALUE[:in=header|query]] [--header 'Name: value'] [--body-field key=value]
+       [--prompt-hint PROMPT_HINT] [--insecure] [--size {small,medium,large}] [--qpm QPM]
+       [--prompt PROMPT] [--settle SETTLE] [--headless] [--manual] [--timeout TIMEOUT] [--dry-run]
+       [--wait] [--detail] [--interval INTERVAL] [--timeout-assess TIMEOUT_ASSESS]
+       [--assessment-name ASSESSMENT_NAME] [-v] [--run]
+       [source]
+
+positional arguments:
+  source                a URL, a cURL/HAR file, or a saved config name — detected for you
+                        (default: None)
+
+options:
+  -h, --help            show this help message and exit
+  --json                machine-readable JSON output (default: False)
+  --token TOKEN         Straiker PAT (s6r_pat_...) or JWT; else $STRAIKER_PAT (default: None)
+  --base BASE           v3 API base URL (default: https://api.prod.straiker.ai/api/v3)
+  --bridge-base BRIDGE_BASE
+                        Ascend lease-service base URL (where bridges fetch probes and post
+                        results) (default: https://ascendai-bridge.prod.straiker.ai)
+  --api URL             an HTTP API endpoint (or base URL) — one probe, no browser. The simple-
+                        contract one-liner. (default: None)
+  --ws URL              a WebSocket endpoint (ws:// or wss://) — connects, works out the frame
+                        contract, no browser (default: None)
+  --url URL             live page with a chat widget: capture the contract in a real browser
+                        (default: None)
+  --curl FILE           a curl command in a file (or '-' for stdin) (default: None)
+  --har HAR             HAR file exported from your own browser (no browser needed here) (default:
+                        None)
+  --config CONFIG       an existing config in the config dir (skip discovery) (default: None)
+  --name NAME           application name in Ascend (default: derived from the URL) (default: None)
+  --app NAME|aapp_id    bind to an application that ALREADY exists in the Console instead of
+                        creating one — its bridge key is fetched for you. Use this when the app
+                        was set up in the UI and all that is missing is something serving it.
+                        (default: None)
+  --save-as NAME        name the adapter config (default: derived from the URL, e.g. 'myhost-
+                        com'). Use this and you always know what to pass to --config. (default:
+                        None)
+  --system-prompt SYSTEM_PROMPT
+                        what the target is, for the assessment context (default: None)
+  --controls CONTROLS   comma-separated control ids (validated before the run) (default: None)
+  --adapter ADAPTER     override the adapter type (default: from the config) (default: None)
+  --bearer TOKEN        Authorization: Bearer <token> (with --api/--curl) (default: None)
+  --api-key NAME:VALUE[:in=header|query]
+                        API key (with --api) (default: None)
+  --header 'Name: value'
+                        raw header (repeatable) (default: None)
+  --body-field key=value
+                        extra JSON body field (repeatable) — for a key/tenant that lives in the
+                        body (default: None)
+  --prompt-hint PROMPT_HINT
+                        with --curl: the literal prompt text used in that command (default: None)
+  --insecure            skip TLS verification (self-signed internal) (default: False)
+  --size {small,medium,large}
+                        assessment size (default: small)
+  --qpm QPM             queries per minute against the target (default: 20)
+  --prompt PROMPT       benign prompt used for capture and validation (default: Hello, what can
+                        you help me with?)
+  --settle SETTLE       seconds to wait for the widget/reply during capture (default: 8)
+  --headless            headless capture (bot protection often blocks it) (default: False)
+  --manual              you drive the widget; we record (default: False)
+  --timeout TIMEOUT     per-request timeout for validation (default: 60.0)
+  --dry-run             stop after validating the config — do not register or run anything
+                        (default: False)
+  --wait                block until the assessment completes, then print findings (default: False)
+  --detail              with --wait, show key findings per control (default: False)
+  --interval INTERVAL   poll interval while waiting (default: 20)
+  --timeout-assess TIMEOUT_ASSESS
+                        max seconds to wait for completion (default: 7200)
+  --assessment-name ASSESSMENT_NAME
+                        assessment name (default: '<app> run 1') (default: None)
+  -v, --verbose         debug logging for the bridge (default: False)
+  --run                 continue into an assessment once the target is registered (default: False)
+
+examples:
+  ascend target add https://your-bot.example.com/chat
+  ascend target add ./request.curl --name 'Support Bot'
+  ascend target add ~/Downloads/session.har
+  ascend target add mybot --run          # existing config, then assess
+--- stderr

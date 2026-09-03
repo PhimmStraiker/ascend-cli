@@ -2,7 +2,7 @@
 
 *Generated from the CLI's argparse tree by `scripts/gen_command_map.py`. A test fails if this file is stale, so every flag here is a flag that exists.*
 
-20 command groups · 53 commands. Sections follow `ascend --help`.
+20 command groups · 54 commands. Sections follow `ascend --help`.
 
 ## Flags every command accepts
 
@@ -27,8 +27,6 @@
 *Not in the menu — compatibility aliases and reference output.*
 
 ## `ascend adapter`
-
-adapter configs & capabilities
 
 ### `ascend adapter build`
 
@@ -124,8 +122,6 @@ HARD GATE: run one prompt through a config against the live target
 > example: ascend adapter validate --config mybot --prompt 'hello' --expect 'Bot'
 
 ## `ascend app`
-
-manage Ascend applications
 
 ### `ascend app bind`
 
@@ -555,8 +551,6 @@ export findings (json/csv/sarif/markdown)
 
 ## `ascend keys`
 
-manage stored tc- bridge keys
-
 ### `ascend keys add`
 
 store a bridge key for an app
@@ -650,6 +644,7 @@ zero to a running assessment in one command (build -> validate -> register -> br
 | Flag | Value | Default | What it does |
 |---|---|---|---|
 | `--api` | `URL` | — | an HTTP API endpoint (or base URL) — one probe, no browser. The simple-contract one-liner. |
+| `--ws` | `URL` | — | a WebSocket endpoint (ws:// or wss://) — connects, works out the frame contract, no browser |
 | `--url` | `URL` | — | live page with a chat widget: capture the contract in a real browser |
 | `--curl` | `FILE` | — | a curl command in a file (or '-' for stdin) |
 | `--har` | `HAR` | — | HAR file exported from your own browser (no browser needed here) |
@@ -863,6 +858,7 @@ onboard a target from a URL, a cURL/HAR file, or a saved config
 | Flag | Value | Default | What it does |
 |---|---|---|---|
 | `--api` | `URL` | — | an HTTP API endpoint (or base URL) — one probe, no browser. The simple-contract one-liner. |
+| `--ws` | `URL` | — | a WebSocket endpoint (ws:// or wss://) — connects, works out the frame contract, no browser |
 | `--url` | `URL` | — | live page with a chat widget: capture the contract in a real browser |
 | `--curl` | `FILE` | — | a curl command in a file (or '-' for stdin) |
 | `--har` | `HAR` | — | HAR file exported from your own browser (no browser needed here) |
@@ -937,6 +933,11 @@ delete the application and drop its stored key
 everything bound to one target, in one place
 
 - **`target`** (required) — target name or aapp_ id
+
+
+### `ascend target types`
+
+the kinds of target this can speak to (adapter types)
 
 
 ## `ascend tenant`

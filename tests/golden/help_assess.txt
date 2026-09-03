@@ -1,0 +1,27 @@
+$ ascend assess --help
+--- exit 0
+--- stdout
+usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] assess
+       [-h] [--json] [--token TOKEN] [--base BASE] [--bridge-base BRIDGE_BASE]
+       {run,diff,results,watch,status,pause,resume,list} ...
+
+positional arguments:
+  {run,diff,results,watch,status,pause,resume,list}
+    run                 create->pause->resume->poll an assessment
+    diff                compare two assessments: new / resolved / regressed findings
+    results             assessment findings summary
+    watch               live view of a running assessment until it finishes
+    status              ==SUPPRESS==
+    pause               pause a running assessment (in-flight probes drain, see docs)
+    resume              resume a paused assessment
+    list                list assessments for an app (running assessments marked *)
+
+options:
+  -h, --help            show this help message and exit
+  --json                machine-readable JSON output (default: False)
+  --token TOKEN         Straiker PAT (s6r_pat_...) or JWT; else $STRAIKER_PAT (default: None)
+  --base BASE           v3 API base URL (default: https://api.prod.straiker.ai/api/v3)
+  --bridge-base BRIDGE_BASE
+                        Ascend lease-service base URL (where bridges fetch probes and post
+                        results) (default: https://ascendai-bridge.prod.straiker.ai)
+--- stderr
