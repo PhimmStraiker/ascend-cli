@@ -7146,6 +7146,142 @@ def _verdict(a, *, detail=False):
         return body
 
 
+def _flow_diagram(stream=None, *, color=None):
+    """The one block diagram, built once and shown on both entry points people hit first.
+
+    Three columns name WHERE THINGS RUN — the Straiker cloud, your machine, your target — and the
+    middle box is the CLI itself, sitting inside your machine. The previous version drew two boxes
+    ("YOUR MACHINE" / "STRAIKER CLOUD") with the target buried inside the left one as a leaf, which
+    said the target is part of your machine and left the adapter out of the picture entirely.
+
+    Inside the CLI, POSITION CARRIES MEANING, and that is the whole reason for the vertical strips:
+
+      * `bridge` is the LEFT strip, against the Straiker edge, because that is who it talks to —
+        it leases probes over WSS and posts the replies back.
+      * `adapter` is the RIGHT strip, against the target edge, because it speaks the target's own
+        protocol.
+
+    A reader sees where each piece sits in the flow without being told, and the thing prose has
+    repeatedly failed to land — that an adapter is built PER TARGET from the observed protocol —
+    is carried by the layout instead of by a sentence nobody reads.
+
+    Every row is assembled with `vpad` to a measured cell count, never with hand-counted spaces:
+    the strips make every row's width interdependent (left strip + gutter + command + right
+    strip), and `f"{s:11}"` counts escape BYTES, so a coloured row silently under-pads and the box
+    comes out ragged. That already happened once on the far simpler box this replaces.
+    """
+    stream = stream or sys.stdout
+    color = _ui.color_ok(stream) if color is None else color
+    g = _ui._glyphs(stream)
+    h, v, tl, tr, bl, br = g["h"], g["v"], g["tl"], g["tr"], g["bl"], g["br"]
+    uni = _ui.unicode_ok(stream)
+    lr = "◀─▶" if uni else "<->"
+    DIM, B, OFF = "\033[2m", "\033[1m", "\033[0m"
+
+    def c(s, code):
+        return f"{code}{s}{OFF}" if color else s
+
+    # `adapter` is 7 and `bridge` is 6, so the strips are unequal; the taller one sets the
+    # interior height and the shorter is padded. They must start and end on the same rows or the
+    # box reads crooked.
+    BRIDGE, ADAPTER = "bridge", "adapter"
+    ROWS = max(len(BRIDGE), len(ADAPTER))
+    bridge = list(BRIDGE) + [" "] * (ROWS - len(BRIDGE))
+    adapter = list(ADAPTER) + [" "] * (ROWS - len(ADAPTER))
+
+    cloud = ["Iris", "  makes the probes", "  scores the replies",
+             "", "findings", "  severity", "  controls"]
+    cmds = ["", c("target add", B), c("target check", DIM), c("assess run", B),
+            c(f"results {g['dot']} ci", DIM), "", ""]
+    target = ["your agent", "  a bot", "  an api", "  an agent", "", "", ""]
+
+    CW = max(_ui.vwidth(x) for x in cloud)              # cloud text field
+    MW = max(_ui.vwidth(x) for x in cmds)               # command field inside the CLI box
+    TW = max(_ui.vwidth(x) for x in target)             # target text field
+    TITLE = " ascend cli "
+    GUT = 8                                             # arrow gutters between the boxes
+
+    # ONE builder for every row of a box, so a body row and a border row cannot disagree about the
+    # interior width. The first draft assembled them separately and the CLI box came out two cells
+    # wider than its own border on every body row -- the exact failure the comment above warns
+    # about, reproduced immediately.
+    def side(text, w):                    # a plain box row: "| text   |"
+        return f"{v} {_ui.vpad(text, w)} {v}"
+
+    def cli(left, mid, right):            # a CLI box row: "| |b|  cmds   |a| |"
+        return f"{v} {left} {_ui.vpad(mid, MW)} {right} {v}"
+
+    SIDE_INNER = CW + 2                   # what side() occupies between the walls
+    CLI_INNER = 3 + MW + 3 + 4            # strip + field + strip + the four spaces in cli()
+    TGT_INNER = TW + 2
+    strip_top, strip_bot = f"{tl}{h}{tr}", f"{bl}{h}{br}"
+
+    def gutter(i, label):
+        """The transport label sits on the row the arrow is on; every edge is labelled."""
+        return _ui.vpad(c(lr, DIM) if i == 2 else (c(label, DIM) if i == 3 else ""),
+                        GUT, align="center")
+
+    out = []
+    # --- headings: each sits over the column it names -----------------------------------------
+    out.append("  " + _ui.vpad(c("straiker cloud", DIM), SIDE_INNER + 2 + GUT)
+               + _ui.vpad(c("your machine", DIM), CLI_INNER + 2 + GUT)
+               + c("your target", DIM))
+    # --- top borders; the CLI box carries its title ON the border, like the HTML zone titles ---
+    pad = CLI_INNER - _ui.vwidth(TITLE)
+    lead = max(1, pad // 2)
+    out.append("  " + tl + h * SIDE_INNER + tr + " " * GUT
+               + tl + h * lead + TITLE + h * (pad - lead) + tr + " " * GUT
+               + tl + h * TGT_INNER + tr)
+    # --- strip tops ----------------------------------------------------------------------------
+    out.append("  " + side("", CW) + " " * GUT + cli(strip_top, "", strip_top)
+               + " " * GUT + side("", TW))
+    # --- body ----------------------------------------------------------------------------------
+    for i in range(ROWS):
+        out.append("  " + side(cloud[i], CW) + gutter(i, "WSS")
+                   + cli(f"{v}{bridge[i]}{v}", cmds[i], f"{v}{adapter[i]}{v}")
+                   + gutter(i, "native") + side(target[i], TW))
+    # --- strip bottoms, then close --------------------------------------------------------------
+    out.append("  " + side("", CW) + " " * GUT + cli(strip_bot, "", strip_bot)
+               + " " * GUT + side("", TW))
+    out.append("  " + bl + h * SIDE_INNER + br + " " * GUT
+               + bl + h * CLI_INNER + br + " " * GUT
+               + bl + h * TGT_INNER + br)
+    return out
+
+
+def _flow_diagram_narrow(stream=None, *, color=None):
+    """The same picture stacked, for a terminal too narrow for three columns side by side.
+
+    The strips are dropped rather than compressed — a one-character column squeezed further is
+    noise — and `bridge` / `adapter` become labelled rows that still say which edge each faces.
+    """
+    stream = stream or sys.stdout
+    color = _ui.color_ok(stream) if color is None else color
+    g = _ui._glyphs(stream)
+    uni = _ui.unicode_ok(stream)
+    up, dn = ("▲", "▼") if uni else ("^", "v")
+    DIM, B, OFF = "\033[2m", "\033[1m", "\033[0m"
+
+    def c(s, code):
+        return f"{code}{s}{OFF}" if color else s
+    return [
+        "  " + c("straiker cloud", DIM) + c("   Iris makes the probes, scores the replies", DIM),
+        f"      {up}  {c('bridge', B)}  {c('leases probes over WSS, returns the replies', DIM)}",
+        "  " + c("your machine", DIM) + c("     ascend cli", DIM),
+        f"      {dn}  {c('adapter', B)} {c('speaks the target protocol — one per target', DIM)}",
+        "  " + c("your target", DIM) + c("      your agent: a bot, an api, an agent", DIM),
+    ]
+
+
+def _print_flow(stream=None):
+    """Pick the layout that fits. Measured, not guessed — the wide form is ~96 cells."""
+    stream = stream or sys.stdout
+    wide = _flow_diagram(stream)
+    fits = max((_ui.vwidth(l) for l in wide), default=0) <= _ui.term_width(stream)
+    for line in (wide if fits else _flow_diagram_narrow(stream)):
+        print(line, file=stream)
+
+
 def _launch_screen():
     """A branded home screen for a bare `ascend` on a TTY: wordmark, the flow, next steps.
     No network, so it is instant. Scripts, agents, pipes, and --json never see this."""
@@ -7168,44 +7304,16 @@ def _launch_screen():
     #
     # The box is built from DATA and padded with vpad, not hand-counted spaces. Hand-counting is
     # how the first version of this came out ragged, and it cannot survive colour at all.
-    g = _ui._glyphs(sys.stdout)
-    h, vb = g["h"], g["v"]
-    uni = _ui.unicode_ok(sys.stdout)
-    a_r, a_l, down, tick = ("──▶", "◀──", "│", "▼") if uni else ("-->", "<--", "|", "v")
-
-    # (left cell, middle connector, right cell) — colour is applied per cell, width is computed
-    rows = [
-        (c("ascend target add <thing>", B),      "",                  "the target, registered"),
-        (c("  a url · a curl · a har", DIM),     c(f"registers {a_r}", DIM),
-                                                 c("  its controls & size", DIM)),
-        (c("  detect · adapt · prove", DIM),     "",                  ""),
-        ("",                                     "",                  ""),
-        ("",                                     "",                  c("Iris", B)),
-        (c("ascend assess run", B),              "",                  c("  generates the attacks", DIM)),
-        (c("  the bridge starts itself", DIM),   c(f"{a_l} probes", DIM),
-                                                 c("  scores the replies", DIM)),
-        (f"       {c(down, DIM)}",               c(f"replies {a_r}", DIM),  ""),
-        (f"       {c(tick, DIM)}",               "",                  c("findings", B)),
-        (c("  YOUR AGENT", B),                   c(f"{a_l} results", DIM),
-                                                 c("  severity · controls", DIM)),
-    ]
-    LW = max(_ui.vwidth(r[0]) for r in rows) + 2
-    MW = max(_ui.vwidth(r[1]) for r in rows) + 2
-    RW = max(_ui.vwidth(r[2]) for r in rows) + 2
-
     print("  " + c("HOW IT WORKS", B) + c("   (every command also takes --json for agents)", DIM))
     print()
-    print("    " + _ui.vpad(c("YOUR MACHINE", DIM), LW + 2 + MW)
-          + c("STRAIKER CLOUD", DIM))
-    print(f"    {g['tl']}{h * LW}{g['tr']}{' ' * MW}{g['tl']}{h * RW}{g['br'] and g['tr']}")
-    for left, mid, right in rows:
-        print(f"    {vb} {_ui.vpad(left, LW - 2)} {vb}"
-              f"{_ui.vpad(mid, MW, align='center')}"
-              f"{vb} {_ui.vpad(right, RW - 2)} {vb}")
-    print(f"    {g['bl']}{h * LW}{g['br']}{' ' * MW}{g['bl']}{h * RW}{g['br']}")
+    _print_flow(sys.stdout)
     print()
-    print("    " + c("ascend results / ci", B)
-          + c("   read the findings  ·  gate a pipeline", DIM))
+    # The message the picture exists to land. Prose alone has failed at this repeatedly, which is
+    # why the adapter is drawn as a strip on the target-facing edge rather than described.
+    print("  " + c("one adapter per target, DERIVED not written", B)
+          + c(" — `target add` watches a url, a curl", DIM))
+    print("  " + c("or a har, builds the adapter, proves it against the live target, "
+                   "and stores it", DIM))
     print()
     print("  " + c("START HERE", B))
     print("    ascend doctor             " + c("# is your key good and the platform reachable?", DIM))
@@ -7290,6 +7398,21 @@ def main(argv=None):
             and not _wants_json() and "-h" not in raw and "--help" not in raw):
         _launch_screen()
         return
+    # Top-level `ascend --help` shows the same diagram ABOVE argparse's help: the two entry points
+    # people hit first should teach the same picture, and this is the one people reach for when
+    # they already know a command exists but not how the pieces fit.
+    #
+    # Printed here rather than in the parser's description/epilog on purpose:
+    # `scripts/gen_command_map.py` introspects the live parser, so anything placed there is
+    # committed into docs/COMMAND_MAP.md and docs/command-map.html and goes stale there forever.
+    # TTY-gated and never under --json, so `ascend --help | grep` and the golden corpus are
+    # byte-identical to before.
+    if (not [a for a in raw if not a.startswith("-")]
+            and ("-h" in raw or "--help" in raw)
+            and sys.stdout.isatty() and not _wants_json()):
+        print()
+        _print_flow(sys.stdout)
+        print()
     args = build_parser().parse_args(raw)
     _reapply_globals(args, raw)
     args.func(args)
