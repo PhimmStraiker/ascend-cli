@@ -785,6 +785,19 @@ def _understand_response(body: str, content_type: str, prompt: str
             # An envelope that says error=… but also carries prose: trust the flag.
             return "rest_json", None, None, {}, env
         best = max(candidates, key=lambda c: c[0])
+        # `max` picks ONE string, so a multi-block answer comes back as whichever block happens to
+        # score highest and the rest is silently discarded on every request. Generalize the index
+        # to a `*` when the siblings are parts of the same message. This IMPORTS the rule rather
+        # than restating it: probing and classification already derive the answer path separately,
+        # and every place those two have disagreed this release has produced a config that passed
+        # every gate and measured nothing.
+        from .classify import _generalize_block_index
+        rpath = _generalize_block_index(parsed, best[1]) if best[1] else best[1]
+        if rpath != best[1]:
+            from adapters.direct_api import _extract as _x
+            joined = _x(parsed, rpath)
+            if isinstance(joined, str) and joined.strip():
+                return "rest_json", rpath, joined, {}, ""
         return "rest_json", best[1], best[2], {}, ""
 
     # --- plain text ----------------------------------------------------------

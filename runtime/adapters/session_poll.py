@@ -94,7 +94,7 @@ class SessionPollAdapter(BotAdapter):
             return {**shared_headers, **(step.get("headers") or {})}
 
         # run blocking requests in a thread so we don't block the loop
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         # 0. ordered bootstrap: some vendors require a fixed call sequence (ping ->
         # connect -> open -> rulesets) before a conversation may be created at all.

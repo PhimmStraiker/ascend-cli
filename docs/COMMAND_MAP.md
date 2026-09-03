@@ -319,7 +319,7 @@ create->pause->resume->poll an assessment
 | `--app` *(repeatable)* | `APP` | — | app name or aapp_ id (repeatable for a fleet) |
 | `--all-bound` | — | — | every app with a stored bridge key (see `ascend keys list`) |
 | `--name` **(required)** | `NAME` | — | a label for this assessment run |
-| `--controls` | `CONTROLS` | — | validate these ids first (validated ONCE for the whole fleet) |
+| `--controls` | `CONTROLS` | — | scope the run to these control ids — applied to the app, because the platform has no per-run override |
 | `--no-wait` | — | — | return as soon as the run starts |
 | `--interval` | `INTERVAL` | `20` | seconds between status polls |
 | `--timeout` | `TIMEOUT` | `7200` | max seconds to wait for completion |
@@ -365,8 +365,6 @@ ascend assess watch --app 'My Bot' --assessment asmt_x --detail
 ## `ascend bridge`
 
 *Aliases: `relay`*
-
-manage the CLI's built-in bridge for `bridge`-type apps (usually auto-managed by `assess run`)
 
 ### `ascend bridge logs`
 
@@ -671,6 +669,7 @@ zero to a running assessment in one command (build -> validate -> register -> br
 | `--manual` | — | — | you drive the widget; we record |
 | `--timeout` | `TIMEOUT` | `60.0` | per-request timeout for validation |
 | `--dry-run` | — | — | stop after validating the config — do not register or run anything |
+| `--force` | — | — | register even if the target answers two different questions identically (normally refused: that config can only produce a false pass) |
 | `--wait` | — | — | block until the assessment completes, then print findings |
 | `--detail` | — | — | with --wait, show key findings per control |
 | `--interval` | `INTERVAL` | `20` | poll interval while waiting |
@@ -887,6 +886,7 @@ onboard a target from a URL, a cURL/HAR file, or a saved config
 | `--manual` | — | — | you drive the widget; we record |
 | `--timeout` | `TIMEOUT` | `60.0` | per-request timeout for validation |
 | `--dry-run` | — | — | stop after validating the config — do not register or run anything |
+| `--force` | — | — | register even if the target answers two different questions identically (normally refused: that config can only produce a false pass) |
 | `--wait` | — | — | block until the assessment completes, then print findings |
 | `--detail` | — | — | with --wait, show key findings per control |
 | `--interval` | `INTERVAL` | `20` | poll interval while waiting |

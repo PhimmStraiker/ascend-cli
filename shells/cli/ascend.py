@@ -448,8 +448,103 @@ def _resolve_all_controls(c, args, ctrl):
         _die("no --controls given and the control catalog came back empty — the platform "
              "requires an explicit control set.\n  list them:  ascend controls list",
              error_code="controls_unavailable")
-    _say(args, f"no --controls given — registering with all {len(ctrl)} catalog controls")
+    _say(args, f"no --controls given — registering with all {len(ctrl)} catalog controls "
+               f"(scope with --controls to keep the first run small)")
     return ctrl
+
+
+def _guard_constant_response(adapter, cfg, vres, args, V, *, cfg_name=None, cfg_path=None):
+    """Refuse a config that answers two different questions with the same string.
+
+    This is the false-pass gate. Before it, "proven against the live target" meant only that a
+    request succeeded and some string came back — which is true of a conversation title, an async
+    ack, a job id and a fixed error page. Targets in each of those shapes onboarded cleanly,
+    passed `target check`, and produced completed assessments reporting LOW risk without the model
+    ever being invoked. A report that says "no findings" because nothing was ever asked is worse
+    than no report, because it is acted on.
+
+    Two things happen here, and the cheap one happens first:
+
+    1. The derivation's own `_notes` are PRINTED. `response_path is not set: direct_api will fall
+       back to the deepest string in the reply, which is often an id/status rather than the
+       answer` was already being computed and written into the config file — a file nothing tells
+       the operator to open. The tool diagnosed itself and kept it private.
+    2. A second, unrelated question is asked. If the answer is byte-identical, the configured path
+       is reading a constant, and onboarding stops.
+
+    Stopping is the right default because there is no legitimate target that answers every
+    question identically -- such a target cannot be assessed at all, so registering it can only
+    produce a false pass. `--force` overrides, for the operator who knows the follow-up is
+    blocked (a strict one-shot session) and accepts the risk.
+    """
+    for n in (cfg.get("_notes") or []):
+        # Only the notes that bear on whether the ANSWER is real; the rest are provenance.
+        if any(k in str(n).lower() for k in ("response_path", "deepest string", "id/status",
+                                             "conversation_id", "fall back")):
+            _warn(str(n))
+    probe = V.prove_answer_varies(adapter, cfg, vres.get("response"),
+                                  timeout_s=getattr(args, "timeout", 60.0))
+    if not probe.get("checked") or probe.get("varies"):
+        return probe
+    first = str(vres.get("response"))[:120]
+    msg = (f"the target returned the SAME answer to two different questions: {first!r}\n"
+           f"  that is a constant -- a status, an id, a title or a fixed error -- not the model's "
+           f"reply, so every probe would score that one string\n"
+           f"  an assessment on this config completes and reports LOW risk having measured "
+           f"nothing. That is the one result worse than no result.\n"
+           f"  fix the answer field, then re-check:\n"
+           f"    ascend target types                      # what shape is this target?\n"
+           f"    ascend adapter build --api <url> --response-path <path>\n"
+           + (f"    {cfg_path}   # edit response_path here\n" if cfg_path else "")
+           + f"  a job that is ACKed and polled needs `session_poll`, not `direct_api`; a "
+             f"streaming target needs `sse_stream`.\n"
+           f"  if you know the follow-up question cannot be asked (a strict one-shot session), "
+           f"re-run with --force")
+    if getattr(args, "force", False):
+        _warn(msg.replace("\n", "\n  "))
+        return probe
+    _die(msg, error_code="constant_response")
+
+
+def _scope_run_controls(c, app_id, ctrl_ids, args):
+    """Write a `--controls` selection onto the app, because that is the ONLY thing the run reads.
+
+    `create_assessment` accepts exactly one field, `{"name"}` — the run inherits the APP's
+    controls, size and QPM (see the note on `AscendAPI.create_assessment`). So `assess run
+    --controls x` could never scope anything: it validated the ids against the catalog, printed
+    warnings, and then discarded them, and the run went ahead on whatever the app was registered
+    with.
+
+    That is silent and it is expensive. `target add` with no `--controls` registers the whole
+    catalog, so the very next `assess run --controls sys_prompt_leak` reads as "one control, a
+    handful of prompts" and measured 665 probes on this tenant — every one of them a real request
+    to the customer's live agent, against their rate limit. Nothing in the output said otherwise.
+
+    Scoping therefore has to PATCH the app before the run is created. That is a persistent change
+    to the app's control set, not a per-run override — the platform has no per-run override to
+    offer — so it is announced rather than done quietly, and it is visible afterwards in
+    `ascend target show`.
+    """
+    if not ctrl_ids:
+        return None
+    try:
+        before = ((c.get_app(app_id) or {}).get("control_ids") or None)
+    except Exception:
+        before = None
+    if before is not None and list(before) == list(ctrl_ids):
+        return None                      # already scoped this way; no call, no noise
+    try:
+        c.patch_app(app_id, {"control_type": "custom", "control_ids": list(ctrl_ids)})
+    except Exception as e:
+        # Refuse rather than run: a run that silently used the app's full set is the 665-probe
+        # surprise this function exists to prevent.
+        _die(f"could not scope the run to {len(ctrl_ids)} control(s) ({type(e).__name__}: {e}).\n"
+             f"  the platform has no per-run control override — the selection is a property of "
+             f"the app, so it must be written before the run starts\n"
+             f"  re-run without --controls to assess the app's registered set",
+             error_code="control_scope_failed")
+    was = f" (was {len(before)})" if before else ""
+    return f"scoped to {len(ctrl_ids)} control(s){was} — this is now the app's control set"
 
 
 def cmd_app_create(args):
@@ -858,9 +953,15 @@ def cmd_controls_validate(args):
              error_code="deprecated_control")
 
 
-def _assess_run_many(args, c, refs):
+def _assess_run_many(args, c, refs, scope_ids=None):
     """Start one assessment per app, concurrently. Always wait=False: a fleet is watched, not
-    babysat one run at a time (`ascend assess watch --all`)."""
+    babysat one run at a time (`ascend assess watch --all`).
+
+    `scope_ids` is applied per app for the same reason the single-app path applies it: the run
+    reads the APP's control set, so a fleet started with `--controls` and no scoping would fan a
+    full-catalog assessment out across every bound target at once — the 665-probe surprise
+    multiplied by the size of the fleet.
+    """
     from concurrent.futures import ThreadPoolExecutor
     resolved = []
     for ref in refs:
@@ -874,6 +975,8 @@ def _assess_run_many(args, c, refs):
         if not appid:
             return {"app": ref, "error": "could not resolve this app"}
         try:
+            # Scope BEFORE the bridge and the run: the control set is read at create time.
+            _scope_run_controls(c, appid, scope_ids, args)
             # Auto-lifecycle: ensure a bridge per bridge-type app before the run is scheduled.
             ensure = _ensure_bridge(c, appid, args=args)
             # AscendAPI.create_assessment already verifies against the server when the response
@@ -1047,18 +1150,26 @@ def cmd_assess_run(args):
         import creds as C
         refs = list(dict.fromkeys(refs + list(C.load_all())))
     # Validate the control set ONCE, not per app (each call refetches the whole catalog).
+    scope_ids = None
     if args.controls:
         v = c.validate_controls(args.controls.split(","))
         for w in v["warnings"]:
             print(f"warning: {w}", file=sys.stderr)
         if not v["valid"] and not args.force:
             _die("selected controls generate zero probes (use --force to run anyway)")
+        # The validated ids are what gets APPLIED. Before 1.1.2 they were validated and then
+        # dropped, so `--controls` narrowed nothing and the run used the app's whole registered
+        # set -- 62 controls and 665 probes where the operator asked for one control.
+        scope_ids = v["valid"] or (args.controls.split(",") if args.force else None)
 
     if len(refs) > 1:
-        return _assess_run_many(args, c, refs)
+        return _assess_run_many(args, c, refs, scope_ids=scope_ids)
 
     appid = _resolve_app(c, refs[0])
     args.app = refs[0]              # downstream messages expect a scalar
+    _scoped = _scope_run_controls(c, appid, scope_ids, args)
+    if _scoped:
+        print(f"  {_scoped}", file=sys.stderr)
     # Auto-lifecycle: a bridge-type app needs a live relay BEFORE probes are scheduled, or the very
     # first probes go unanswered (a false pass). Ensure it up front; it self-stops when the run ends.
     ensure = _ensure_bridge(c, appid, args=args)
@@ -2929,6 +3040,7 @@ def cmd_onboard(args):
         adapter = cfg["adapter"]
         _write_named_config(cfg, cfg_name, exact=True)   # same file; name already settled
     _ok(f"target replied: {str(vres.get('response'))[:80]!r}")
+    _guard_constant_response(adapter, cfg, vres, args, V, cfg_name=cfg_name, cfg_path=cfg_path)
 
     if args.dry_run:
         if getattr(args, "json", False):
@@ -5468,6 +5580,20 @@ def cmd_adapter_validate(args):
         _slow = platform_window_warning(res.get("duration_ms"))
     except Exception:
         _slow = None
+    # `target check` is sold as the gate you run before spending an assessment, so it has to catch
+    # the failure an assessment cannot: a config reading a constant instead of the answer. Three
+    # field targets passed this check with ok=True while scoring a title, an ack, and half an
+    # answer. One implementation, shared with `target add` -- the two must never disagree about
+    # whether a target is provable.
+    _const = None
+    if res.get("ok") and not res.get("error"):
+        _p = V.prove_answer_varies(atype, cfg, res.get("response"), timeout_s=args.timeout)
+        if _p.get("checked") and not _p.get("varies"):
+            _const = (f"the target gave the SAME answer to a second, unrelated question "
+                      f"({str(res.get('response'))[:60]!r}) — this config is reading a constant, "
+                      f"not the model's reply, so an assessment would score that string and "
+                      f"report a clean pass having measured nothing")
+            res = {**res, "ok": False, "constant_response": True}
     if args.json:
         _out({**res, "platform_window_warning": _slow} if _slow else res, args)
     else:
@@ -5479,6 +5605,9 @@ def cmd_adapter_validate(args):
             print(f"  response: {str(res['response'])[:200]}")
     if _slow:
         print(f"warning: {_slow}", file=sys.stderr)
+    if _const:
+        print(f"error: {_const}", file=sys.stderr)
+        sys.exit(EXIT_ERROR)
     # Distinguish a tool/target ERROR (unreachable, auth, bad adapter) from a
     # content MISMATCH (target answered, but --expect missed) so CI can branch.
     if res.get("error"):
@@ -5670,19 +5799,29 @@ EVERYDAY
 
   target types           the kinds of target this can speak to
 
+WHEN SOMETHING IS WRONG
+  doctor                 is the key good and the platform reachable?
+  status                 tenant, targets, live runs, and what is serving them
+  bridge ls              the NO-BRIDGE alarm: a live assessment nobody is answering. Unanswered
+                         probes are not findings, so that run finishes looking CLEAN having
+                         measured nothing. This is the one bridge command worth knowing.
+
 MORE
-  assess · bridge · chat · ci · controls · export · onboard · policy
+  assess · chat · ci · controls · export · onboard · policy
   reports · status · target · tenant · version
   Run `ascend <command> --help` for any of these — each has its own flags and examples.
 
 COMPATIBILITY
-  app · adapter · keys   the machinery underneath `target`. Still fully supported — nothing
+  app · adapter · keys · bridge
+                         the machinery underneath `target`. Still fully supported — nothing
                          you already script has changed. `target add` does all three in one
                          step: derives the adapter, registers the app, stores the bridge key.
                            adapter build     → target add --dry-run
                            adapter validate  → target check
                            adapter list      → target types
                            app create        → target add
+                         `assess run` starts and stops the bridge itself, so there is no
+                         separate relay to operate; `bridge ls` stays useful as the alarm above.
 
 Every command takes --json. `ascend target add --help` is the fastest way in.
 Full reference: docs/COMMAND_MAP.md  ·  building adapters: docs/BUILD_ADAPTER.md
@@ -5742,6 +5881,9 @@ def _add_onboard_args(s, *, require_source):
     s.add_argument("--timeout", type=float, default=60.0, help="per-request timeout for validation")
     s.add_argument("--dry-run", action="store_true",
                    help="stop after validating the config — do not register or run anything")
+    s.add_argument("--force", action="store_true",
+                   help="register even if the target answers two different questions identically "
+                        "(normally refused: that config can only produce a false pass)")
     s.add_argument("--wait", action="store_true", help="block until the assessment completes, then print findings")
     s.add_argument("--detail", action="store_true", help="with --wait, show key findings per control")
     s.add_argument("--interval", type=int, default=20, help="poll interval while waiting")
@@ -6019,7 +6161,8 @@ def build_parser():
     s.add_argument("--all-bound", action="store_true",
                    help="every app with a stored bridge key (see `ascend keys list`)")
     s.add_argument("--name", required=True, help="a label for this assessment run")
-    s.add_argument("--controls", help="validate these ids first (validated ONCE for the whole fleet)")
+    s.add_argument("--controls", help="scope the run to these control ids — applied to the app, "
+                                      "because the platform has no per-run override")
     s.add_argument("--no-wait", action="store_true", help="return as soon as the run starts"); s.add_argument("--interval", type=int, default=20, help="seconds between status polls")
     s.add_argument("--timeout", type=int, default=7200, help="max seconds to wait for completion")
     s.add_argument("--force", action="store_true", help="run even if the selected controls would generate zero probes")
@@ -6346,8 +6489,17 @@ def build_parser():
 
     # bridge (the fleet: one detached bridge per app / per bridge key)
     rp = sub.add_parser("bridge", aliases=["relay"], parents=[GLOBALS], formatter_class=_Fmt,
-                        help="manage the CLI's built-in bridge for `bridge`-type apps "
-                             "(usually auto-managed by `assess run`)"
+                        # Hidden from the top-level list: `assess run` starts and stops the
+                        # bridge itself, so it is machinery rather than a step. `bridge ls` is
+                        # still named under WHEN SOMETHING IS WRONG because it carries the
+                        # NO-BRIDGE alarm, and every verb keeps working.
+                        help=argparse.SUPPRESS,
+                        description="Manage the CLI's built-in bridge for bridge-type apps.\n\n"
+                                    "`assess run` starts and stops a bridge for you, so this is\n"
+                                    "rarely needed. The exception is `bridge ls`: it flags a live\n"
+                                    "assessment that nothing is answering, and unanswered probes\n"
+                                    "are not findings — that run finishes looking CLEAN having\n"
+                                    "measured nothing."
                         ).add_subparsers(dest="verb", required=True)
     s = rp.add_parser("start", parents=[GLOBALS], formatter_class=_Fmt,
                       help="start a detached bridge per app (key comes from the local store)",

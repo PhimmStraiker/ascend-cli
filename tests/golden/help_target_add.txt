@@ -9,7 +9,7 @@ usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] t
        [--api-key NAME:VALUE[:in=header|query]] [--header 'Name: value'] [--body-field key=value]
        [--prompt-hint PROMPT_HINT] [--insecure] [--size {small,medium,large}] [--qpm QPM]
        [--prompt PROMPT] [--settle SETTLE] [--headless] [--manual] [--timeout TIMEOUT] [--dry-run]
-       [--wait] [--detail] [--interval INTERVAL] [--timeout-assess TIMEOUT_ASSESS]
+       [--force] [--wait] [--detail] [--interval INTERVAL] [--timeout-assess TIMEOUT_ASSESS]
        [--assessment-name ASSESSMENT_NAME] [-v] [--run]
        [source]
 
@@ -76,6 +76,9 @@ options:
   --timeout TIMEOUT     per-request timeout for validation (default: 60.0)
   --dry-run             stop after validating the config — do not register or run anything
                         (default: False)
+  --force               register even if the target answers two different questions identically
+                        (normally refused: that config can only produce a false pass) (default:
+                        False)
   --wait                block until the assessment completes, then print findings (default: False)
   --detail              with --wait, show key findings per control (default: False)
   --interval INTERVAL   poll interval while waiting (default: 20)
