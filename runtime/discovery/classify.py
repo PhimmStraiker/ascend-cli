@@ -42,6 +42,49 @@ _SECRET_HEADERS = {
     "x-authentication", "authentication", "x-access-token", "cookie",
 }
 _CSRF_HEADERS = {"x-csrf-token", "x-xsrf-token", "csrf-token", "x-csrftoken"}
+
+# `_SECRET_HEADERS` above is a fixed list of nine names, and it drove BOTH "is this auth?" and
+# "is this safe to bake into the config?". So a custom-named credential -- X-Tenant-Key,
+# X-Subscription-Key, X-Nonce, X-Session-Token -- was neither recognised as auth NOR dropped, and
+# landed in the config on disk in cleartext beside `auth: none`. This module's own docstring
+# promises the opposite: secrets "carry an `env:` `value_ref` placeholder instead, and record
+# only the header". Recognition has to be open-ended, because the whole point is that the name
+# is one we have not seen before.
+_SECRETISH_NAME = re.compile(
+    r"(api[-_]?key|access[-_]?key|secret|token|signature|^x-sig|hmac|nonce|"
+    r"credential|password|passwd|pwd|bearer|session[-_]?(id|key|token)|"
+    r"subscription[-_]?key|tenant[-_]?key|client[-_]?(id|secret))", re.I)
+# Headers that routinely carry long opaque values and are NOT credentials. Without this an
+# entropy rule would strip the very headers a target needs to answer at all.
+_NEVER_SECRET = {
+    "user-agent", "accept", "accept-language", "accept-encoding", "content-type",
+    "content-length", "referer", "origin", "host", "connection", "cache-control",
+    "sec-fetch-mode", "sec-fetch-site", "sec-fetch-dest", "sec-ch-ua", "sec-ch-ua-platform",
+    "sec-ch-ua-mobile", "pragma", "dnt", "te", "upgrade-insecure-requests", "priority",
+    "x-requested-with", "traceparent", "x-request-id", "x-correlation-id", "x-trace-id",
+}
+_OPAQUE_VALUE = re.compile(r"^[A-Za-z0-9_.\-=+/]{20,}$")
+
+
+def _looks_secret_header(name_lower: str, value: str) -> bool:
+    """Would baking this header into a config on disk leak a credential?
+
+    Name first, because a name is deliberate and a value is circumstantial. The entropy rule is
+    the backstop for a name we cannot anticipate, and it is scoped to `x-*` so an ordinary
+    long-but-public header (a User-Agent, a trace id) is not stripped from a config that needs it.
+    """
+    if name_lower in _NEVER_SECRET:
+        return False
+    if name_lower in _SECRET_HEADERS or name_lower in _CSRF_HEADERS:
+        return True
+    if _SECRETISH_NAME.search(name_lower):
+        return True
+    v = (value or "").strip()
+    if name_lower.startswith("x-") and _OPAQUE_VALUE.match(v):
+        # long, opaque, and on a non-standard header: treat as a credential rather than risk it
+        classes = sum(bool(re.search(p, v)) for p in (r"[a-z]", r"[A-Z0-9]", r"[_.\-=+/]"))
+        return classes >= 2
+    return False
 _ID_FIELDS = (
     "id", "sessionId", "session_id", "conversationId", "conversation_id",
     "threadId", "thread_id", "chatId", "chat_id", "ticketId", "ticket_id",
@@ -535,6 +578,9 @@ def _http_params(req: Dict[str, Any], resp: Dict[str, Any], stream: Optional[str
         "headers": _nonsecret_headers(req["headers"]),
         "body": _body_template(req),
     }
+    held = dropped_secret_headers(req["headers"])
+    if held:
+        params["withheld_headers"] = held
     if stream:
         # Derive the field mapping from the captured body rather than emitting a bare
         # {"format": "sse"}. Without text_path/token_types the adapter collects no frames and
@@ -1181,6 +1227,11 @@ def compose(classified: Dict[str, Any]) -> Dict[str, Any]:
     # Non-secret request headers.
     if tparams.get("headers"):
         config.setdefault("headers", {}).update(tparams["headers"])
+    # Record the NAMES of any credential-shaped headers that were withheld, so the CLI can tell
+    # the operator what to re-supply. Names only -- the values are exactly what must not persist.
+    _held = tparams.get("withheld_headers")
+    if _held:
+        config["_withheld_headers"] = _held
 
     # Warmup preset support.
     if session.get("value") == "warmup":
@@ -1460,9 +1511,24 @@ def _nonsecret_headers(headers: Dict[str, str]) -> Dict[str, str]:
     for k, v in headers.items():
         if k in drop or k.startswith(":"):     # ':authority' etc. — HTTP/2 internals
             continue
+        if _looks_secret_header(k, v):
+            # A credential under a name we did not anticipate. Dropping it is the whole promise
+            # of this function; `dropped_secret_headers()` tells the operator what to re-supply.
+            continue
         # Preserve a canonical-ish casing for a couple of common headers.
         keep[_canonical_header(k)] = v
     return keep
+
+
+def dropped_secret_headers(headers: Dict[str, str]) -> List[str]:
+    """Names (only) of headers withheld from a config because they look like credentials.
+
+    Silently dropping a header the target requires just moves the confusion: the config then 401s
+    for no visible reason. The names are safe to print; the values never are.
+    """
+    return sorted(_canonical_header(k) for k, v in headers.items()
+                  if not k.startswith(":") and k not in _NEVER_SECRET
+                  and _looks_secret_header(k, v))
 
 
 def _canonical_header(name_lower: str) -> str:

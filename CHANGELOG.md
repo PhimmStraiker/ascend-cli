@@ -7,6 +7,25 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ## [Unreleased]
 
+### Security
+- **A credential under an unanticipated header name was written into the config in cleartext.**
+  `classify.py`'s docstring promises secrets "carry an `env:` `value_ref` placeholder instead,
+  and record only the header". It did not hold. `_SECRET_HEADERS` is a fixed list of nine names,
+  and that one list answered both "is this auth?" and "is this safe to bake into a config?" — so
+  a custom-named credential (`X-Tenant-Key`, `X-Subscription-Key`, `X-Nonce`, `X-Session-Token`)
+  was neither recognised as auth nor dropped, and landed on disk beside `auth: none`. It
+  *validated green* precisely because the credential had been copied, so nothing signalled a
+  problem. Same shape as the two 1.1.1 leaks: the secret escaped through the path least likely to
+  be suspected of holding one.
+
+  Recognition is open-ended now, since the whole point is a name nobody listed in advance: a
+  broad name vocabulary first, then an entropy backstop scoped to `x-*` headers. The scope
+  matters — a `User-Agent`, a `traceparent` and a request id are all long and opaque and none are
+  credentials, and over-dropping is its own outage because the config then 401s missing a header
+  the target required. Withheld header **names** are reported so they can be re-supplied with
+  `--header` / `--bearer` / `--api-key`; the values are never recorded.
+
+
 ### Changed
 - **`target` is now the primary noun; `app`, `adapter` and `keys` are the machinery underneath
   it.** An adapter is *how the CLI speaks one target's protocol* — a property of a target, not a
