@@ -47,6 +47,45 @@ All notable changes to the Ascend CLI. Newest first. Format follows
   that noun at all.
 
 ### Fixed
+- **A GraphQL target produced a FALSE PASS: the real prompt was frozen and every probe re-asked
+  the captured question.** The worst outcome the tool can produce, because nothing looks wrong.
+  A GraphQL body is `{"query": "<document>", "variables": {"input": {"message": "<question>"}}}`.
+  `query` is in `_PROMPT_FIELDS` (plenty of REST bots do call their field that) and
+  `_request_has_prompt` returned the first top-level field-name match — so it returned the
+  GraphQL *operation*, templated that to `{{PROMPT}}`, and left the real question in `variables`
+  as a literal. `target add` then reported `validated: true` with a genuine on-topic answer, and
+  re-deriving with a completely different `--prompt` produced the same answer to the capture-time
+  question. An entire assessment would have scored replies to one stale question.
+
+  Two independent guards now, because either can be absent: when `--prompt` supplied ground
+  truth, an exact match anywhere in the body beats field-name order outright; and a `query` value
+  that looks like a GraphQL document is skipped. A prompt nested below the top level (GraphQL
+  `variables`, DTO wrappers) is now found too, and the `_longest_string` fallback no longer hands
+  back the document that was just skipped — which is how the first version of this fix undid
+  itself.
+
+- **A CSRF-gated chat page could not be onboarded, because the page was thrown away.** Two
+  defects stacked. `_worth_recording` keeps every POST but keeps a GET only if its URL matches a
+  hardcoded "chatty" word list — and the page being captured is served from `/`, which matches
+  none of them. So the one response that bootstraps everything (the CSRF token in a `<meta>` tag,
+  the session cookie, inline config) was discarded before classification saw it; that function's
+  own docstring makes this exact argument for POSTs and left GETs subject to it. Second,
+  origin-scanning only walked JSON string leaves, so an HTML page could not yield the token even
+  when captured. Auth then composed `bootstrap_url: ""`, which the auth layer refuses outright.
+
+  The document is now always kept, and a token is found in a `<meta>` tag, a hidden input, or an
+  inline script. The emitted regex is keyed on the attribute NAME, never the token value — the
+  value rotates every session, so a value-anchored regex would work exactly once and then fail as
+  a mysterious auth error — and it uses a lookahead so either attribute order re-extracts. When
+  the origin genuinely is not in the capture, the config now says what is missing instead of
+  emitting an empty `bootstrap_url` that fails like a tool bug.
+
+### Known
+- `_headers_to_dict` lowercases header names at normalization and the original spelling is lost,
+  so `_orig_header_name` returns a canonicalized guess (`X-CSRF-Token` → `X-Csrf-Token`). Header
+  names are case-insensitive per RFC 7230, so this is harmless for CSRF — but the same path turns
+  `SOAPAction` into `Soapaction`, which strict SOAP stacks and some gateways reject.
+
 - **A WebSocket target can now be onboarded from its URL.** `websocket_direct` shipped as an
   adapter, with an example config and its own tests — but nothing could *derive* one. `probe.py`
   spoke only HTTP, and `classify.py` reached `websocket_direct` solely from a HAR that already

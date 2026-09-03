@@ -229,6 +229,9 @@ def _har_started_ms(entry: Dict[str, Any]) -> Optional[float]:
 
 
 _REPLY_TEXT: Dict[str, Any] = {"v": None}
+# The prompt the operator actually sent during the capture. Ground truth beats every
+# heuristic, and its absence is what let a GraphQL body freeze the real prompt (below).
+_PROMPT_SENT: Dict[str, Any] = {"v": None}
 
 
 def _evidence(evidence: Dict[str, Any]) -> Dict[str, Any]:
@@ -251,6 +254,7 @@ def _evidence(evidence: Dict[str, Any]) -> Dict[str, Any]:
     # carry the capture ground-truth through — the classifiers use it to pick the
     # request that actually carried our prompt (beats every heuristic).
     _REPLY_TEXT["v"] = evidence.get("reply_text")
+    _PROMPT_SENT["v"] = evidence.get("prompt_sent")
     return {"pairs": norm, "ws_messages": evidence.get("ws_messages", []),
             "prompt_sent": evidence.get("prompt_sent"),
             "reply_text": evidence.get("reply_text")}
@@ -300,16 +304,80 @@ def _pick_chat_index(pairs: List[Dict[str, Any]], known_prompt: Optional[str] = 
     return best_idx
 
 
+# A GraphQL document, not a question. `query` is in _PROMPT_FIELDS because plenty of REST bots
+# call their field that, but in a GraphQL body it holds the OPERATION.
+_GQL_DOC = re.compile(r"^\s*(?:query|mutation|subscription)\b|^\s*\{[^\"]*\{", re.S)
+
+
+def _looks_like_graphql_doc(value: str) -> bool:
+    return bool(value) and "{" in value and bool(_GQL_DOC.match(value))
+
+
+def _find_exact(obj: Any, needle: str) -> bool:
+    """Is `needle` present verbatim as a string leaf anywhere in this body?"""
+    if isinstance(obj, str):
+        return obj == needle
+    if isinstance(obj, dict):
+        return any(_find_exact(v, needle) for v in obj.values())
+    if isinstance(obj, list):
+        return any(_find_exact(v, needle) for v in obj)
+    return False
+
+
+def _nested_prompt_field(obj: Any, depth: int = 0) -> Optional[str]:
+    """Find a prompt-named string field below the top level (GraphQL `variables`, DTO wrappers)."""
+    if depth > 6 or not isinstance(obj, (dict, list)):
+        return None
+    if isinstance(obj, dict):
+        for f in _PROMPT_FIELDS:
+            v = obj.get(f)
+            if isinstance(v, str) and v.strip() and not _looks_like_graphql_doc(v):
+                return v
+        for v in obj.values():
+            got = _nested_prompt_field(v, depth + 1)
+            if got is not None:
+                return got
+        return None
+    for v in obj:
+        got = _nested_prompt_field(v, depth + 1)
+        if got is not None:
+            return got
+    return None
+
+
 def _request_has_prompt(req: Dict[str, Any]) -> Optional[str]:
-    """Return the prompt-like string in a request body, if any."""
+    """Return the prompt-like string in a request body, if any.
+
+    Ground truth first. When the operator told us what they typed, an exact match anywhere in
+    the body beats field-name order outright -- and that ordering caused the worst possible
+    failure on a GraphQL target. The body is
+    `{"query": "<graphql document>", "variables": {"input": {"message": "<real prompt>"}}}`,
+    `query` is in _PROMPT_FIELDS, so the DOCUMENT was returned as the prompt, templated to
+    {{PROMPT}}, and the real question was frozen as a literal in `variables`. The config then
+    validated green while every probe re-asked the capture-time question -- a false pass, which
+    is worse than a failure because nothing looks wrong.
+    """
     body = req.get("json")
+    known = (_PROMPT_SENT.get("v") or "").strip()
+    if known and isinstance(body, (dict, list)) and _find_exact(body, known):
+        return known
     if isinstance(body, dict):
         for f in _PROMPT_FIELDS:
-            if isinstance(body.get(f), str):
-                return body[f]
-        # deepest / longest string fallback
+            v = body.get(f)
+            if isinstance(v, str):
+                if f == "query" and _looks_like_graphql_doc(v):
+                    continue      # the operation, not the question
+                return v
+        # Nothing at the top level. A GraphQL body carries the question one level down, in
+        # `variables`, so look for a prompt-named field anywhere before falling back.
+        nested = _nested_prompt_field(body)
+        if nested is not None:
+            return nested
+        # Deepest / longest string fallback -- but never a GraphQL document. Skipping it above
+        # and then handing it back here was the actual bug: the guard fired and the fallback
+        # undid it, so the document still became {{PROMPT}}.
         longest = _longest_string(body)
-        if longest and len(longest) >= 3:
+        if longest and len(longest) >= 3 and not _looks_like_graphql_doc(longest):
             return longest
     elif isinstance(body, str) and body.strip():
         return body
@@ -732,10 +800,33 @@ def classify_auth(ev: Dict[str, Any], chat_idx: Optional[int]) -> Dict[str, Any]
                         "params": {"bootstrap_url": _strip_query(ourl),
                                    "extract": {"path": ofield} if ofield else {"regex": "TOKEN=([A-Za-z0-9_-]+)"},
                                    "into_header": _orig_header_name(pairs[chat_idx], h)}}
+            # The token usually lives in the PAGE, not in a JSON response -- a <meta> tag, a
+            # hidden input, or an inline JS assignment. `_collect_prior_values` only walks JSON
+            # string leaves, so an HTML-borne token was invisible to it and this fell through to
+            # the branch below, which emitted bootstrap_url:"" -- a config the auth layer refuses
+            # outright ("csrf auth requires 'bootstrap_url'"). The auth layer has always been
+            # able to regex a token out of an HTML bootstrap body; only the finding was missing.
+            html = _html_token_origin(pairs, chat_idx, headers[h])
+            if html is not None:
+                hurl, hregex, hwhere = html
+                return {"value": "csrf", "confidence": 0.75,
+                        "evidence": f"'{h}' echoes the {hwhere} token in GET {_strip_query(hurl)}",
+                        "params": {"bootstrap_url": _strip_query(hurl),
+                                   "extract": {"regex": hregex},
+                                   "into_header": _orig_header_name(pairs[chat_idx], h)}}
+            # Origin genuinely not in the capture. Emitting a csrf block with an empty
+            # bootstrap_url guarantees a hard failure at validate time and reads like a capture
+            # problem, so say what is actually missing instead.
             return {"value": "csrf", "confidence": 0.5,
                     "evidence": f"CSRF-style header '{h}' present (origin not in capture)",
                     "params": {"bootstrap_url": "", "extract": {},
-                               "into_header": _orig_header_name(pairs[chat_idx], h)}}
+                               "into_header": _orig_header_name(pairs[chat_idx], h),
+                               "_incomplete": (
+                                   f"The request sends '{h}', but nothing in this capture shows "
+                                   f"where that token comes from. Set bootstrap_url to the page "
+                                   f"or endpoint that issues it and extract.regex/path to pull it "
+                                   f"out -- or re-capture starting from the first page load, "
+                                   f"which is usually what is missing.")}}
 
     # 3) API-key style headers.
     for name_lower, value in headers.items():
@@ -1510,6 +1601,66 @@ def _iter_string_leaves(obj: Any, prefix: str = ""):
             yield from _iter_string_leaves(v, f"{prefix}{i}.")
     elif isinstance(obj, str):
         yield (prefix.rstrip("."), obj)
+
+
+# Where a CSRF token actually hides in a rendered page. A meta tag is the most common by a
+# wide margin; a hidden form input is the classic server-rendered form; the inline-JS
+# assignment covers SPA bootstraps that print the token into a script block.
+_HTML_TOKEN_PATTERNS = (
+    ("meta tag",
+     r"""<meta[^>]+?name=["']([\w:.-]*(?:csrf|xsrf)[\w:.-]*)["'][^>]+?content=["']([^"']+)["']"""),
+    ("meta tag",   # attribute order is not guaranteed
+     r"""<meta[^>]+?content=["']([^"']+)["'][^>]+?name=["']([\w:.-]*(?:csrf|xsrf)[\w:.-]*)["']"""),
+    ("hidden input",
+     r"""<input[^>]+?name=["']([\w:._-]*(?:csrf|xsrf|authenticity)[\w:._-]*)["'][^>]+?value=["']([^"']+)["']"""),
+    ("hidden input",   # attribute order is not guaranteed here either
+     r"""<input[^>]+?value=["']([^"']+)["'][^>]+?name=["']([\w:._-]*(?:csrf|xsrf|authenticity)[\w:._-]*)["']"""),
+    ("inline script",
+     r"""["']([\w.]*(?:csrf|xsrf)[\w.]*[Tt]oken)["']\s*[:=]\s*["']([^"']+)["']"""),
+)
+
+
+def _html_token_origin(pairs: List[Dict[str, Any]], chat_idx: int,
+                       needle: str) -> Optional[Tuple[str, str, str]]:
+    """Find `needle` in a prior page body and return (url, re-extraction regex, where).
+
+    The regex is keyed on the ATTRIBUTE NAME observed, never on the token value -- the value
+    rotates every session, so anchoring on it would produce a config that worked exactly once
+    and then failed as a mysterious auth error.
+
+    It is also built with a lookahead rather than a fixed attribute order. HTML attribute order
+    is not guaranteed, and the first cut emitted `name=... content=...` after matching a tag
+    written `content=... name=...`, so the generated regex could not re-extract the very token
+    it had just found. A lookahead matches either order and still exposes exactly one capture
+    group, which is what the auth layer's `m.group(1)` expects.
+    """
+    if not needle or len(needle) < 8:
+        return None
+    for i in range(chat_idx):
+        body = pairs[i]["response"].get("raw_body") or ""
+        if not body or len(body) > 4_000_000:
+            continue
+        for where, pat in _HTML_TOKEN_PATTERNS:
+            for m in re.finditer(pat, body, re.I):
+                a, b = m.group(1), m.group(2)
+                # whichever group IS the token is the value; the other names it
+                if a == needle:
+                    name = b
+                elif b == needle:
+                    name = a
+                else:
+                    continue
+                esc = re.escape(name)
+                if where == "meta tag":
+                    rx = (r'<meta(?=[^>]*name=["\']' + esc
+                          + r'["\'])[^>]*content=["\']([^"\']+)["\']')
+                elif where == "hidden input":
+                    rx = (r'<input(?=[^>]*name=["\']' + esc
+                          + r'["\'])[^>]*value=["\']([^"\']+)["\']')
+                else:
+                    rx = r'["\']' + esc + r'["\']\s*[:=]\s*["\']([^"\']+)["\']'
+                return pairs[i]["request"]["url"], rx, where
+    return None
 
 
 def _reuse_origin(needle: str, prior: List[Tuple[int, str, str, str]],
