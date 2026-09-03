@@ -1643,6 +1643,20 @@ def _ws_done_marker(frames: List[Any]) -> Optional[Dict[str, str]]:
     return None
 
 
+def _ws_unreachable(exc: Exception) -> bool:
+    """Did we fail to get a socket at all, as opposed to failing to get an ANSWER?
+
+    The distinction decides whether trying another frame shape can possibly help.
+    """
+    if isinstance(exc, (ConnectionRefusedError, TimeoutError, asyncio.TimeoutError, OSError)):
+        return True
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(k in text for k in (
+        "refused", "unreachable", "timed out", "timeout", "name or service not known",
+        "nodename nor servname", "no route to host", "getaddrinfo", "connect call failed",
+        "invalid handshake", "server rejected", "403", "404", "certificate"))
+
+
 def probe_ws(url: str, *, prompt: str, headers: Optional[Dict[str, str]] = None,
              timeout_s: float = 30.0, idle_ms: int = 1500,
              subprotocols: Optional[List[str]] = None) -> Dict[str, Any]:
@@ -1694,6 +1708,12 @@ def probe_ws(url: str, *, prompt: str, headers: Optional[Dict[str, str]] = None,
             got = asyncio.run(_attempt(template))
         except Exception as e:                            # noqa: BLE001 - reported, not raised
             errors.append(f"{type(e).__name__}: {e}")
+            # Trying the next frame shape only makes sense if we got a socket at all. A refused
+            # or unroutable endpoint fails identically for all eight candidates, so retrying
+            # multiplies the wait by eight for no information -- ~24s of dead time before the
+            # operator is told the URL is simply wrong, and the same cost in the test suite.
+            if _ws_unreachable(e):
+                break
             continue
         frames = got["frames"]
         if not frames:
