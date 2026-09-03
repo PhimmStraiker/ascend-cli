@@ -7242,7 +7242,7 @@ def _flow_diagram(stream=None, *, color=None):
                + " " * GUT + side("", TW))
     # --- body ----------------------------------------------------------------------------------
     for i in range(ROWS):
-        out.append("  " + side(cloud[i], CW) + gutter(i, "WSS")
+        out.append("  " + side(cloud[i], CW) + gutter(i, "https")
                    + cli(f"{v}{bridge[i]}{v}", cmds[i], f"{v}{adapter[i]}{v}")
                    + gutter(i, "native") + side(target[i], TW))
     # --- strip bottoms, then close --------------------------------------------------------------
@@ -7271,7 +7271,7 @@ def _flow_diagram_narrow(stream=None, *, color=None):
         return f"{code}{s}{OFF}" if color else s
     return [
         "  " + c("straiker cloud", DIM) + c("   Iris makes the probes, scores the replies", DIM),
-        f"      {up}  {c('bridge', B)}  {c('leases probes over WSS, returns the replies', DIM)}",
+        f"      {up}  {c('bridge', B)}  {c('leases probes over https, returns the replies', DIM)}",
         "  " + c("your machine", DIM) + c("     ascend cli", DIM),
         f"      {dn}  {c('adapter', B)} {c('speaks the target protocol — one per target', DIM)}",
         "  " + c("your target", DIM) + c("      your agent: a bot, an api, an agent", DIM),

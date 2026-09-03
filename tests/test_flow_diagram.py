@@ -109,8 +109,25 @@ class TestPositionCarriesTheMeaning:
 
     def test_every_edge_carries_a_transport(self, plain):
         joined = "\n".join(plain)
-        assert "WSS" in joined, "the straiker edge is unlabelled"
+        assert "https" in joined, "the straiker edge is unlabelled"
         assert "native" in joined, "the target edge is unlabelled"
+
+    def test_the_straiker_edge_is_not_labelled_as_a_socket(self, plain):
+        """The first draft said WSS. It is wrong, and it would have shipped to three places.
+
+        `runtime/lease_client.py` long-polls `/v2/lease` and POSTs `/v2/result` with urllib
+        against an https base URL — there is no socket on this edge. The project DOES depend on
+        `websockets`, which is what makes the mistake easy: that dependency belongs to the
+        websocket ADAPTER and the discovery probe, both of which live on the target edge.
+
+        A diagram is believed more readily than prose, and this one is printed in the terminal,
+        embedded in the docs, and recorded in the tour video — so a wrong label here is a wrong
+        claim in three places at once, and the docs page already said "plain HTTPS" beside it.
+        """
+        joined = "\n".join(plain).lower()
+        assert "wss" not in joined, (
+            "the bridge edge is labelled as a websocket; it is an https long-poll "
+            "(see runtime/lease_client.py — urllib, /v2/lease and /v2/result)")
 
     def test_the_strips_start_and_end_on_the_same_rows(self, plain):
         """Unequal strips (bridge is 6, adapter is 7) make the box read crooked."""
@@ -126,7 +143,12 @@ class TestItDegradesInsteadOfWrapping:
 
     def test_the_narrow_form_still_says_which_edge_each_gut_faces(self):
         joined = "\n".join(ascend._flow_diagram_narrow(sys.stdout, color=False))
-        assert "bridge" in joined and "adapter" in joined and "WSS" in joined
+        assert "bridge" in joined and "adapter" in joined and "https" in joined
+
+    def test_the_narrow_form_is_not_labelled_as_a_socket_either(self):
+        """Both layouts state the same transport, or one of them is lying."""
+        assert "wss" not in "\n".join(
+            ascend._flow_diagram_narrow(sys.stdout, color=False)).lower()
 
     def test_the_chooser_measures_rather_than_assuming(self):
         m = re.search(r"^def _print_flow\(.*?(?=^def )", SRC, re.S | re.M)
