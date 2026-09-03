@@ -5,7 +5,12 @@ import pytest
 from adapters.session_poll import SessionPollAdapter, _render
 
 
-def run_async(coro): return asyncio.get_event_loop().run_until_complete(coro)
+def run_async(coro):
+    # asyncio.run(), not get_event_loop(): once ANY earlier test in the session has called
+    # asyncio.run(), the thread's stored loop is closed and unset, and get_event_loop()
+    # raises "no current event loop". These files passed alone and failed in the full run --
+    # order-dependent red that is indistinguishable from a real regression.
+    return asyncio.run(coro)
 
 
 class _Resp:

@@ -307,6 +307,53 @@ first. Change **one** layer's value/params to its evidence-supported alternate
 add a `warmup`, add L3 `reauth_on_401`), then re-validate. Repeat until green. Do
 not stack speculative changes — one variable at a time keeps the signal clean.
 
+### 5b. When it CANNOT be derived: write the adapter as code
+
+Derivation is deterministic composition from evidence. Some contracts cannot be expressed
+that way at all, and iterating layers on those is wasted effort. **Stop deriving and write
+the adapter** the moment you see any of these:
+
+| Symptom | Why no config can express it |
+|---|---|
+| A signature or HMAC over body + timestamp | the value must be COMPUTED per request, not replayed |
+| A nonce fetched per request | same — one-shot, cannot be a static value |
+| A rotating conversation id (new id each turn) | the config would pin the id captured once |
+| A reply assembled from several fields, or content blocks | there is no single `response_path` |
+| SOAP / XML / protobuf / gRPC-Web framing | the readers parse JSON, SSE, NDJSON or text |
+| A job you must poll to completion (`status: done`) | no shipped adapter models submit-then-poll-status |
+| Two unrelated credentials, or an ordered multi-step handshake | one auth block cannot hold it |
+| `transport` stays low-confidence after two evidence-supported alternates | the shape is not one of the known ones |
+
+The contract is **one function**:
+
+```python
+def send_prompt(prompt: str) -> str:
+    # anything: signed requests, a multi-step handshake, streaming reassembly,
+    # an async poll, driving a browser. Return the agent's WORDS.
+```
+
+Do it in three commands:
+
+```bash
+ascend target add --scaffold ./my_adapter.py --api https://the-target/chat   # writes a stub
+# edit send_prompt() until it returns the agent's reply
+ascend target add --module ./my_adapter.py --name '<target>'                 # proves + registers
+```
+
+`--scaffold` seeds the stub with the target URL when you pass `--api`/`--url`. The module is
+run by the bridge exactly like a built-in adapter, in a worker thread, and it passes the SAME
+hard gate — nothing registers unless it answered the live target. Raise `timeout_ms` in the
+pointer config if the target is slow; a custom adapter may take as long as it needs.
+
+**Return the agent's words and nothing else.** A status line, a progress frame or a JSON
+envelope returned from `send_prompt` becomes what the scorer reads as the agent's answer —
+that is how a run comes back clean having measured nothing. See
+`configs/example-custom_module.py` for a worked example (bootstrap token, message call,
+nested reply extraction) and `docs/ADAPTER_AUTHORING.md` for the full contract.
+
+A custom adapter is a first-class outcome, not a failure. Shipping a guessed config is the
+failure.
+
 ### 6. Confirm and hand off
 ```
 ascend adapter show <config>      # inspect the final composition

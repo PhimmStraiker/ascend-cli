@@ -27,6 +27,12 @@ internal/*
 /*.json
 !pyproject.toml
 *.har
+# ...except the sanitized fixtures the test suite needs. The blanket rule above is right --
+# a real HAR carries credentials -- but it silently swallowed tests/fixtures/*.har, so two
+# tests shipped referencing files that were never committed. They passed on the machine that
+# created them and failed for everyone else. These are recorded from a local demo agent with
+# the host and ids normalized; test_fixtures_are_tracked.py asserts they stay credential-free.
+!tests/fixtures/*.har
 evidence*.json
 *.egg-info/
 .eggs/

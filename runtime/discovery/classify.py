@@ -1573,7 +1573,16 @@ def _paths_to_strings(obj: Any, prefix: str = "") -> List[Tuple[str, str]]:
 def _guess_response_path(resp_json: Any, reply_text: Optional[str] = None) -> str:
     """Dot-path to the answer text in a JSON response body.
 
-    GROUND TRUTH FIRST: if the capture read the bot's reply off the page, the correct
+    Every rule below selects ONE string, so each of them can land on a single block of a
+    multi-block answer. The generalization is applied HERE, at the one exit, rather than at each
+    `return` — the first attempt patched only the last branch and the onboarding flow, which
+    reaches an earlier one, still derived `content.1.text` against a live target.
+    """
+    return _generalize_block_index(resp_json, _guess_response_path_raw(resp_json, reply_text))
+
+
+def _guess_response_path_raw(resp_json: Any, reply_text: Optional[str] = None) -> str:
+    """GROUND TRUTH FIRST: if the capture read the bot's reply off the page, the correct
     path is the one whose value matches it. Otherwise fall back to well-known keys, then
     to the longest string ANYWHERE in the body (not just at the top level — answers are
     usually nested, e.g. data.answer, while short status flags sit on top).
@@ -1607,6 +1616,44 @@ def _guess_response_path(resp_json: Any, reply_text: Optional[str] = None) -> st
     if real:
         return max(real, key=lambda pv: len(pv[1]))[0]
     return "response"
+
+
+def _generalize_block_index(resp_json: Any, path: str) -> str:
+    """Turn ``content.1.text`` into ``content.*.text`` when the siblings hold text too.
+
+    Every rule above picks ONE string, which is wrong for the shape where the answer arrives as
+    several content blocks — the Anthropic/Bedrock messages shape, and common enough that it turns
+    up in ordinary gateway responses. "Longest string anywhere" then selects whichever block
+    happens to be longest and the rest of the answer is discarded on every request.
+
+    Measured on a two-block target: the deriver chose ``content.1.text`` and both the onboarding
+    reply and `target check`'s "verified answer" began mid-sentence. Nothing flagged it, because
+    every gate the tool had was satisfied — a string was returned. The cost is silent and total:
+    block 0 leads the message, so a leaked system prompt is exactly what gets thrown away, and the
+    assessment reports LOW risk.
+
+    The constant-response guard cannot catch this one: a fragment of a real answer still VARIES
+    between questions. It has to be fixed where the path is chosen.
+
+    Only an index whose siblings actually carry a string at the same leaf is generalized, so
+    ``choices.0.message.content`` — where the siblings are alternative completions rather than
+    parts of one message — is left exactly as it is.
+    """
+    parts = path.split(".")
+    for i, part in enumerate(parts):
+        if not part.isdigit():
+            continue
+        parent = _dot(resp_json, ".".join(parts[:i])) if i else resp_json
+        if not isinstance(parent, list) or len(parent) < 2:
+            continue
+        suffix = ".".join(parts[i + 1:])
+        vals = [(_dot(item, suffix) if suffix else item) for item in parent]
+        texts = [v for v in vals if isinstance(v, str) and v.strip()]
+        # Every element must carry text: a list of alternatives has one filled and the rest empty
+        # or absent, while the parts of one message are all present.
+        if len(texts) == len(parent):
+            return ".".join(parts[:i] + ["*"] + parts[i + 1:])
+    return path
 
 
 def _first_id(obj: Any) -> Optional[str]:
