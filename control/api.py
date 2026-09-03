@@ -471,6 +471,33 @@ class AscendAPI:
             return row
         return None
 
+    def list_assessments(self, app_id: str) -> List[Dict[str, Any]]:
+        """Every assessment on an app, newest first when the API supplies a timestamp."""
+        payload = self._req("GET", f"/ascend/applications/{app_id}/assessments")
+        rows = payload if isinstance(payload, list) else (
+            payload.get("data") or payload.get("assessments") or payload.get("items") or [])
+        rows = [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+        rows.sort(key=lambda r: str(r.get("created_at") or r.get("started_at") or ""), reverse=True)
+        return rows
+
+    def latest_assessment(self, app_id: str, *, finished_only: bool = True) -> Optional[Dict[str, Any]]:
+        """The most recent assessment on an app — what `--app` alone has to mean.
+
+        `ascend ci --app <name>` took no assessment id and passed `None` straight into the URL, so
+        the documented CI invocation requested `/assessments/None` and 404'd on every app it was
+        pointed at. The advice printed alongside it ("check the app id/name") named the one thing
+        that HAD resolved.
+
+        A gate reads a FINISHED run by default: a run still in progress has partial counts, and
+        gating on those either passes a build early or fails it for findings that are not in yet.
+        """
+        rows = self.list_assessments(app_id)
+        if finished_only:
+            done = [r for r in rows if str(r.get("status", "")).lower() in TERMINAL_STATUSES]
+            if done:
+                return done[0]
+        return rows[0] if rows else None
+
     def get_assessment(self, app_id: str, aid: str) -> Any:
         return self._req("GET", f"/ascend/applications/{app_id}/assessments/{aid}")
 
