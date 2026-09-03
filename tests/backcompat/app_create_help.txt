@@ -1,0 +1,95 @@
+$ ascend app create --help
+--- exit 0
+--- stdout
+usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] app create
+       [-h] [--json] [--token TOKEN] [--base BASE] [--bridge-base BRIDGE_BASE]
+       [--type {bridge,api,gcp,bedrock}] [--url URL] [--target-api-key KEY]
+       [--service-account JSON|@FILE] [--bedrock-auth {assume-role,access-key}] [--region REGION]
+       [--role-arn ROLE_ARN] [--external-id EXTERNAL_ID] [--role-session-name ROLE_SESSION_NAME]
+       [--access-key-id ACCESS_KEY_ID] [--secret-access-key SECRET_ACCESS_KEY]
+       [--session-token SESSION_TOKEN] --name NAME [--system-prompt SYSTEM_PROMPT]
+       [--purpose PURPOSE] [--controls CONTROLS] [--size {small,medium,large}] [--qpm N]
+       [--config CONFIG] [--category-severity CAT=SEV] [--input-guardrail TYPE=VALUE]
+       [--strategy A,B] [--strategy-type {recommended,custom}] [--if-not-exists] [--force]
+
+Create an Ascend application. The platform supports four target types; one of them is served by the CLI's built-in bridge:
+  bridge   Ascend hands prompts to the CLI's bridge; `assess run` auto-manages it (key shown ONCE)
+  api      Ascend calls your HTTP target directly    (no bridge)
+  gcp      Vertex AI / Agent Engine target           (no bridge)
+  bedrock  AWS Bedrock target                        (no bridge)
+Required fields differ per type and are checked locally before the request, so a missing one is named rather than returned as a 422.
+
+options:
+  -h, --help            show this help message and exit
+  --json                machine-readable JSON output (default: False)
+  --token TOKEN         Straiker PAT (s6r_pat_...) or JWT; else $STRAIKER_PAT (default: None)
+  --base BASE           v3 API base URL (default: https://api.prod.straiker.ai/api/v3)
+  --bridge-base BRIDGE_BASE
+                        Ascend lease-service base URL (where bridges fetch probes and post
+                        results) (default: https://ascendai-bridge.prod.straiker.ai)
+  --type {bridge,api,gcp,bedrock}
+                        target type (default: bridge — the type served by the CLI's built-in
+                        bridge) (default: bridge)
+  --url URL             target endpoint (api/gcp/bedrock) (default: None)
+  --target-api-key KEY  API key Ascend should present to the target (--type api) (default: None)
+  --service-account JSON|@FILE
+                        GCP service-account JSON, or @path to it (--type gcp) (default: None)
+  --bedrock-auth {assume-role,access-key}
+                        Bedrock authentication method (--type bedrock) (default: None)
+  --region REGION       AWS region (--type bedrock) (default: None)
+  --role-arn ROLE_ARN   role to assume (--type bedrock, assume-role) (default: None)
+  --external-id EXTERNAL_ID
+                        external id for the assume-role trust policy (default: None)
+  --role-session-name ROLE_SESSION_NAME
+                        session name for the assumed role (default: None)
+  --access-key-id ACCESS_KEY_ID
+                        AWS access key id (--type bedrock, access-key) (default: None)
+  --secret-access-key SECRET_ACCESS_KEY
+                        AWS secret access key (default: None)
+  --session-token SESSION_TOKEN
+                        AWS session token (default: None)
+  --name NAME           application name shown in Ascend (default: None)
+  --system-prompt SYSTEM_PROMPT
+                        what the target is — the scorer compares responses against this to detect
+                        a system-prompt leak (default: the app name) (default: None)
+  --purpose PURPOSE     business purpose, for assessment context (default: None)
+  --controls CONTROLS   comma-separated control ids (validated before the create) (default: None)
+  --size {small,medium,large}
+                        assessment size — how many probes a run generates (default: small)
+  --qpm N               max queries per minute against the target (default: 30)
+  --config CONFIG       adapter config to bind (and, for --type api, to take the
+                        url/templates/headers from) (default: None)
+  --category-severity CAT=SEV
+                        per-category severity, repeatable: data_leak=high. Platform enum is
+                        default|low|medium|high ('critical' is clamped to 'high') (default: None)
+  --input-guardrail TYPE=VALUE
+                        how the target signals a guardrail block, so a block is not scored as an
+                        answer: http_status_code=403 or response_pattern='I can|t help' (pipe-
+                        separate several values) (default: None)
+  --strategy A,B        comma-separated attack strategies (e.g. single_turn,multi_turn); implies
+                        --strategy-type custom (default: None)
+  --strategy-type {recommended,custom}
+                        attack strategy selection (default: recommended) (default: None)
+  --if-not-exists       reuse an app with this name instead of creating a duplicate (safe retry)
+                        (default: False)
+  --force               create the app even if its controls generate zero probes (an app pinned to
+                        an unknown control scores clean without ever being tested) (default:
+                        False)
+
+examples:
+  ascend app create --name 'My Bot' --controls sys_prompt_leak
+      a bridge app (the default) — `ascend assess run` starts the relay for you
+
+  ascend app create --type api --name 'Public Bot' --config mybot \
+      --target-api-key $KEY
+      Ascend calls the target itself; url/templates/headers come from the config
+
+  ascend app create --type gcp --name 'Vertex Agent' \
+      --url https://…/agents/x:streamQuery --service-account @sa.json
+
+  ascend app create --type bedrock --name 'Bedrock Agent' \
+      --url arn:aws:bedrock:… --bedrock-auth assume-role \
+      --role-arn arn:aws:iam::…:role/x --region us-east-1
+
+  ascend app create --name 'My Bot' --category-severity data_leak=high \
+      --input-guardrail http_status_code=403

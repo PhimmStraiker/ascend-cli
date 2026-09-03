@@ -1,0 +1,22 @@
+$ ascend keys --help
+--- exit 0
+--- stdout
+usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] keys
+       [-h] [--json] [--token TOKEN] [--base BASE] [--bridge-base BRIDGE_BASE]
+       {list,prune,add,rm} ...
+
+positional arguments:
+  {list,prune,add,rm}
+    list                list stored keys (masked)
+    prune               drop keys whose app no longer exists
+    add                 store a bridge key for an app
+    rm                  remove a stored key (optionally the Ascend app with it)
+
+options:
+  -h, --help            show this help message and exit
+  --json                machine-readable JSON output (default: False)
+  --token TOKEN         Straiker PAT (s6r_pat_...) or JWT; else $STRAIKER_PAT (default: None)
+  --base BASE           v3 API base URL (default: https://api.prod.straiker.ai/api/v3)
+  --bridge-base BRIDGE_BASE
+                        Ascend lease-service base URL (where bridges fetch probes and post
+                        results) (default: https://ascendai-bridge.prod.straiker.ai)
