@@ -1,0 +1,31 @@
+$ ascend app --help
+--- exit 0
+--- stdout
+usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] app
+       [-h] [--json] [--token TOKEN] [--base BASE] [--bridge-base BRIDGE_BASE]
+       {list,get,resolve,create,update,bind,delete} ...
+
+Manage Ascend applications directly.
+
+This is the machinery underneath `target` and is still fully
+supported. `ascend target add` creates the application, derives
+the adapter and stores the bridge key in one step.
+
+positional arguments:
+  {list,get,resolve,create,update,bind,delete}
+    list                list applications (add --with-runs for the assessment table)
+    get                 get an application (by id or name)
+    resolve             ==SUPPRESS==
+    create              create an application (any of the four platform types)
+    update              change a live app's settings in place (no delete/recreate)
+    bind                record which Ascend app a config was registered as
+    delete              delete an application (also stops its bridge + drops its stored key)
+
+options:
+  -h, --help            show this help message and exit
+  --json                machine-readable JSON output (default: False)
+  --token TOKEN         Straiker PAT (s6r_pat_...) or JWT; else $STRAIKER_PAT (default: None)
+  --base BASE           v3 API base URL (default: https://api.prod.straiker.ai/api/v3)
+  --bridge-base BRIDGE_BASE
+                        Ascend lease-service base URL (where bridges fetch probes and post
+                        results) (default: https://ascendai-bridge.prod.straiker.ai)

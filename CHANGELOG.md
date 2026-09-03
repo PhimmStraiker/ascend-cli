@@ -5,7 +5,165 @@ All notable changes to the Ascend CLI. Newest first. Format follows
 
 ---
 
-## [Unreleased]
+## [1.1.2] — 2026-09-03
+
+### Security
+- **A credential under an unanticipated header name was written into the config in cleartext.**
+  `classify.py`'s docstring promises secrets "carry an `env:` `value_ref` placeholder instead,
+  and record only the header". It did not hold. `_SECRET_HEADERS` is a fixed list of nine names,
+  and that one list answered both "is this auth?" and "is this safe to bake into a config?" — so
+  a custom-named credential (`X-Tenant-Key`, `X-Subscription-Key`, `X-Nonce`, `X-Session-Token`)
+  was neither recognised as auth nor dropped, and landed on disk beside `auth: none`. It
+  *validated green* precisely because the credential had been copied, so nothing signalled a
+  problem. Same shape as the two 1.1.1 leaks: the secret escaped through the path least likely to
+  be suspected of holding one.
+
+  Recognition is open-ended now, since the whole point is a name nobody listed in advance: a
+  broad name vocabulary first, then an entropy backstop scoped to `x-*` headers. The scope
+  matters — a `User-Agent`, a `traceparent` and a request id are all long and opaque and none are
+  credentials, and over-dropping is its own outage because the config then 401s missing a header
+  the target required. Withheld header **names** are reported so they can be re-supplied with
+  `--header` / `--bearer` / `--api-key`; the values are never recorded.
+
+
+### Changed
+- **`target` is now the primary noun; `app`, `adapter` and `keys` are the machinery underneath
+  it.** An adapter is *how the CLI speaks one target's protocol* — a property of a target, not a
+  peer object to manage and keep in sync. Having both at the top level meant `adapter build` vs
+  `target add` was a coin flip between two commands with different side effects (one registers the
+  app, one does not), and it is the single thing about this CLI that has needed re-explaining most.
+  `app`, `adapter` and `keys` are now hidden from the top-level command list and each carries a
+  description saying what `target` verb does the same job.
+
+  **Nothing you already script has changed.** Every pre-1.1 form still resolves with the same
+  stdout and the same exit code — `adapter build`, `adapter validate`, `app create`, `keys add`,
+  `relay ls`, all of it. This is enforced by a new gate rather than promised: 33 legacy invocation
+  forms are frozen in `tests/backcompat/` and checked by `scripts/back_compat.py` and
+  `tests/test_back_compat.py`. The only new behaviour is a one-line pointer on **stderr** naming
+  the current verb, and it is suppressed entirely under `--json`, so a pipe, a script or an agent
+  sees byte-identical output on both streams.
+
+  The mapping, also printed under `COMPATIBILITY` in `ascend --help`:
+
+  | still works | current way |
+  |---|---|
+  | `adapter build` | `target add --dry-run` (`target add` also registers it) |
+  | `adapter validate` | `target check` |
+  | `adapter show` | `target show` |
+  | `adapter configs` | `target list` |
+  | `adapter list` | `target types` |
+  | `app create` | `target add` |
+  | `app list` / `app get` / `app delete` | `target list` / `target show` / `target rm` |
+  | `keys add` / `keys list` | `target add` / `target list` |
+
+- Three `--help` screens gained explanatory prose (`adapter`, `app`, `keys`) describing what they
+  are relative to `target`. Additive only — 20 inserted lines, nothing removed, and no verb, flag
+  or exit code touched.
+
+### Added
+- **`ascend target types`** — the kinds of target the CLI can speak to (the adapter-type registry).
+  This was previously reachable only as `adapter list`, which was the last remaining reason to use
+  that noun at all.
+
+### Fixed
+- **A GraphQL target produced a FALSE PASS: the real prompt was frozen and every probe re-asked
+  the captured question.** The worst outcome the tool can produce, because nothing looks wrong.
+  A GraphQL body is `{"query": "<document>", "variables": {"input": {"message": "<question>"}}}`.
+  `query` is in `_PROMPT_FIELDS` (plenty of REST bots do call their field that) and
+  `_request_has_prompt` returned the first top-level field-name match — so it returned the
+  GraphQL *operation*, templated that to `{{PROMPT}}`, and left the real question in `variables`
+  as a literal. `target add` then reported `validated: true` with a genuine on-topic answer, and
+  re-deriving with a completely different `--prompt` produced the same answer to the capture-time
+  question. An entire assessment would have scored replies to one stale question.
+
+  Two independent guards now, because either can be absent: when `--prompt` supplied ground
+  truth, an exact match anywhere in the body beats field-name order outright; and a `query` value
+  that looks like a GraphQL document is skipped. A prompt nested below the top level (GraphQL
+  `variables`, DTO wrappers) is now found too, and the `_longest_string` fallback no longer hands
+  back the document that was just skipped — which is how the first version of this fix undid
+  itself.
+
+- **A CSRF-gated chat page could not be onboarded, because the page was thrown away.** Two
+  defects stacked. `_worth_recording` keeps every POST but keeps a GET only if its URL matches a
+  hardcoded "chatty" word list — and the page being captured is served from `/`, which matches
+  none of them. So the one response that bootstraps everything (the CSRF token in a `<meta>` tag,
+  the session cookie, inline config) was discarded before classification saw it; that function's
+  own docstring makes this exact argument for POSTs and left GETs subject to it. Second,
+  origin-scanning only walked JSON string leaves, so an HTML page could not yield the token even
+  when captured. Auth then composed `bootstrap_url: ""`, which the auth layer refuses outright.
+
+  The document is now always kept, and a token is found in a `<meta>` tag, a hidden input, or an
+  inline script. The emitted regex is keyed on the attribute NAME, never the token value — the
+  value rotates every session, so a value-anchored regex would work exactly once and then fail as
+  a mysterious auth error — and it uses a lookahead so either attribute order re-extracts. When
+  the origin genuinely is not in the capture, the config now says what is missing instead of
+  emitting an empty `bootstrap_url` that fails like a tool bug.
+
+### Known
+- `_headers_to_dict` lowercases header names at normalization and the original spelling is lost,
+  so `_orig_header_name` returns a canonicalized guess (`X-CSRF-Token` → `X-Csrf-Token`). Header
+  names are case-insensitive per RFC 7230, so this is harmless for CSRF — but the same path turns
+  `SOAPAction` into `Soapaction`, which strict SOAP stacks and some gateways reject.
+
+- **A WebSocket target can now be onboarded from its URL.** `websocket_direct` shipped as an
+  adapter, with an example config and its own tests — but nothing could *derive* one. `probe.py`
+  spoke only HTTP, and `classify.py` reached `websocket_direct` solely from a HAR that already
+  contained a WebSocket entry. Measured against a real socket agent:
+  `ascend target add ws://host/chat` exited 3 with "is not a URL, a file, or a known config",
+  and `--url wss://host/` was worse — it drove a real browser at a socket and then reported
+  "the capture never delivered the prompt". So a customer with a WebSocket bot and no HAR export
+  had no path at all, for an adapter that was already written and working.
+
+  A socket is perfectly probeable: connect, send a frame, read one back. `ascend target add`
+  now accepts `ws://` and `wss://` (and there is an explicit `--ws` flag), tries the frame
+  shapes that actually occur in the wild, and derives `send_template`, `response_path`,
+  `aggregate` and a terminal-frame `done_when`. It reuses the same `score_answer` as the HTTP
+  path, so "which field is the reply" is decided identically everywhere. Stopping on a terminal
+  frame rather than waiting out the idle window matters across a few thousand probes: it is the
+  difference between an assessment finishing and timing out.
+
+- **A plain-text bot could not be onboarded at all, and its stream terminator became the answer.**
+  Two defects found by pointing the CLI at a real chunked `text/plain` agent.
+
+  For a non-JSON body `_guess_response_path` still returns its `"response"` fallback, and both
+  `_http_params` and `compose` wrote that key unconditionally. `direct_api` then saw a
+  response_path, demanded JSON, and failed with "expected JSON for response_path 'response' but
+  got non-JSON". With the key **absent** the same adapter treats the raw body as the answer,
+  which `test_direct_api_non_json_response_no_path_is_text` has asserted since v1.0 — so
+  discovery was the only thing standing between a text/plain target and a working config, and it
+  was inventing the obstacle. Fixed in both places; fixing one left the other to re-add the key.
+
+  Separately, a chunked text agent closes its body with a marker (`<<<END>>>`, `[DONE]`,
+  `<EOS>`). With no JSON envelope to separate transport from speech, that marker is simply the
+  last characters of the answer and the scorer reads it as something the agent said — quietly, on
+  every turn, which is worse than failing loudly once. Same class as SSE progress chatter
+  arriving as the reply. Discovery now records a `stop_marker` when it observes one and
+  `direct_api` strips it. Strictly opt-in, and the detector is deliberately narrow: the final
+  line must be short, whitespace-free and either bracket-wrapped or a known terminator word, so a
+  target whose answer genuinely ends in a short word cannot lose it.
+
+- **`ASCEND_FORCE_COLOR=0` forced colour ON, and `ASCEND_PLAIN=0` turned it off.** Every non-empty
+  string is truthy in Python, so both switches did the opposite of what `=0` plainly means. The
+  damaging case is a pipe: someone sets `ASCEND_FORCE_COLOR=0` intending "off" and gets ANSI
+  escapes written into a log or a file. `ASCEND_PLAIN` is worse in principle — it is the
+  "something is corrupting my terminal, make it stop" hatch, the one switch that must never
+  invert. Both now accept `0`, `false`, `no`, `off` and empty as off.
+  `NO_COLOR` is deliberately unchanged: its spec is presence-based, so `NO_COLOR=0` correctly
+  disables colour, and "fixing" it for consistency would break a documented convention.
+- **The spinner padded and erased by escape bytes instead of visible columns.** `Progress._write`
+  measured `len(line)`, but `_line()` wraps the elapsed clock in dim/reset codes — so bytes and
+  cells diverge by 8 exactly when the clock appears at the 3-second mark, which is the moment the
+  padding has to be right, because the frame before it is narrower. Left remnants of the previous
+  frame on screen and over-erased on the way out. Same defect already fixed in `bar()` and
+  `_watch_many`; all three now measure cells.
+- **`ascend version --json` printed bare text.** It was wired straight to `print(VERSION)` and was
+  the only command that ignored `--json`, so an agent that explicitly asked for JSON got `1.1.1`
+  and a parse error. Both `ascend version --json` and `ascend --version --json` now emit
+  `{"version": "..."}` and are asserted to agree. The human form is still exactly `1.1.1`.
+
+  All three were invisible to the suite for the same reason: nothing ran the CLI on a TTY or asked
+  what a switch does when set to a falsy value, so the entire opt-out path was unexecuted. Each
+  fix is mutation-checked — the fix is reverted, the new test is confirmed to fail, then restored.
 
 ## [1.1.1] — 2026-09-02
 
