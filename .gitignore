@@ -46,3 +46,6 @@ demo/out/
 *.gif
 *.mov
 demo/*.mov
+
+# live-matrix scratch: recorded HARs from a local forge run
+.matrix/
