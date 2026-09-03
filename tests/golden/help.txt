@@ -41,19 +41,29 @@ EVERYDAY
 
   target types           the kinds of target this can speak to
 
+WHEN SOMETHING IS WRONG
+  doctor                 is the key good and the platform reachable?
+  status                 tenant, targets, live runs, and what is serving them
+  bridge ls              the NO-BRIDGE alarm: a live assessment nobody is answering. Unanswered
+                         probes are not findings, so that run finishes looking CLEAN having
+                         measured nothing. This is the one bridge command worth knowing.
+
 MORE
-  assess · bridge · chat · ci · controls · export · onboard · policy
+  assess · chat · ci · controls · export · onboard · policy
   reports · status · target · tenant · version
   Run `ascend <command> --help` for any of these — each has its own flags and examples.
 
 COMPATIBILITY
-  app · adapter · keys   the machinery underneath `target`. Still fully supported — nothing
+  app · adapter · keys · bridge
+                         the machinery underneath `target`. Still fully supported — nothing
                          you already script has changed. `target add` does all three in one
                          step: derives the adapter, registers the app, stores the bridge key.
                            adapter build     → target add --dry-run
                            adapter validate  → target check
                            adapter list      → target types
                            app create        → target add
+                         `assess run` starts and stops the bridge itself, so there is no
+                         separate relay to operate; `bridge ls` stays useful as the alarm above.
 
 Every command takes --json. `ascend target add --help` is the fastest way in.
 Full reference: docs/COMMAND_MAP.md  ·  building adapters: docs/BUILD_ADAPTER.md

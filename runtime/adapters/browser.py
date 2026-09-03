@@ -288,8 +288,8 @@ class BrowserAdapter(BotAdapter):
         # already know the frame's URL from discovery, so match on it across ALL frames.
         needle = iframe_cfg.get("url_contains")
         if needle:
-            deadline = asyncio.get_event_loop().time() + 20
-            while asyncio.get_event_loop().time() < deadline:
+            deadline = asyncio.get_running_loop().time() + 20
+            while asyncio.get_running_loop().time() < deadline:
                 for fr in page.frames:
                     if needle in (fr.url or ""):
                         logger.info(f"Browser: switched to iframe by url ~ {needle!r}")
