@@ -37,6 +37,12 @@ change is genuinely intended, say so in the commit message and the changelog, th
 **Golden output (13 cases).** `ascend --help | grep` appears in customer runbooks. This is why the
 launch-screen diagram is TTY-gated: piped output must be byte-identical.
 
+Both corpora are **pinned to Python 3.12**, the interpreter that recorded them, and skip elsewhere.
+argparse's own wording is version-dependent — 3.10 renamed `optional arguments:` to `options:` — so
+a corpus recorded on 3.12 reports a diff on 3.9 that this project did not cause. Two spurious
+failures a contributor cannot tell from a real regression is worse than no check. Re-record on 3.12
+if you ever need to move the pin; the rest of the suite still runs on every version in the matrix.
+
 **Command map.** `docs/COMMAND_MAP.md` and `docs/command-map.html` are *generated* from the live
 argparse tree. Never hand-edit them; regenerate and commit. This is also why the block diagram is
 printed from `main()` and not from a parser `description`/`epilog` — anything placed there gets
