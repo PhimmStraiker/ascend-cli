@@ -149,7 +149,9 @@ class TestTheCommandNoLongerSendsNone:
         m = re.search(r"^def cmd_ci\(args\):(.*?)(?=^def )", SRC, re.S | re.M)
         assert m, "cmd_ci not found"
         body = m.group(1)
-        assert "latest_assessment" in body, (
+        # The resolution moved into the shared `_resolve_assessment` when `export` turned out to
+        # have the same defect; either spelling proves cmd_ci resolves rather than passing None.
+        assert ("_resolve_assessment" in body or "latest_assessment" in body), (
             "cmd_ci fetches an assessment without resolving one — with --app alone it will put "
             "the literal string 'None' in the URL and 404 on every app")
 
@@ -163,8 +165,11 @@ class TestTheCommandNoLongerSendsNone:
         assert "--file" in m.group(1), "the no-app error should name the flag that gates a saved result"
 
     def test_an_app_with_no_runs_says_so(self):
-        m = re.search(r"^def cmd_ci\(args\):(.*?)(?=^def )", SRC, re.S | re.M)
-        assert "no assessments yet" in m.group(1)
+        """Raised by the shared resolver now — `export` turned out to have the same defect, so
+        the rule moved out of cmd_ci. See tests/test_assessment_resolution.py."""
+        m = re.search(r"^def _resolve_assessment\(.*?(?=^def )", SRC, re.S | re.M)
+        assert m, "_resolve_assessment not found"
+        assert "no assessments yet" in m.group(0)
 
 
 class TestTheFloorIsWiredIn:

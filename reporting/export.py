@@ -118,7 +118,18 @@ def to_json(a: Dict[str, Any]) -> str:
 
 # --- CSV ---------------------------------------------------------------------
 def to_csv(a: Dict[str, Any]) -> str:
-    """One row per failed control; keyfindings joined with ' | '."""
+    """One row per failed control; keyfindings joined with ' | '.
+
+    Failures only, deliberately, and NOT changed lightly: `wc -l` on this file is a findings
+    count in someone's pipeline, so adding passed rows would silently inflate it.
+
+    The cost is that a clean assessment exports a header and nothing else -- 63 bytes, exit 0,
+    which from the outside is hard to tell from a broken export. `to_markdown` handles the same
+    case by saying "No failed controls" out loud; CSV has nowhere to put that sentence. If this
+    should become a full control table (the `status` column only carries information once passed
+    rows exist), that is a format change worth making deliberately, with the row-count impact
+    called out, rather than as a side effect of a bug fix.
+    """
     buf = io.StringIO()
     cols = ["control_id", "category", "severity", "status", "failed", "total", "keyfindings"]
     writer = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
@@ -226,7 +237,11 @@ def to_markdown(a: Dict[str, Any]) -> str:
     lines.append("# Ascend Assessment Findings")
     lines.append("")
     lines.append(f"- **Status:** {a.get('status', 'unknown')}")
-    _t, _f = a.get("total"), a.get("failed")
+    try:
+        import api as _api
+        _f, _t = _api.probe_counts(a)
+    except Exception:                      # export must work on a saved file with no client
+        _t, _f = a.get("total"), a.get("failed")
     _pct = f"{100 * (_f or 0) / _t:.0f}%" if _t else "n/a"
     lines.append(f"- **Fail rate:** {_pct} ({_f if _f is not None else '?'}/"
                  f"{_t if _t is not None else '?'} probes)")
