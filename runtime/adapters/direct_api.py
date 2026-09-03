@@ -13,6 +13,11 @@ Config keys:
   body          - Request body template with {{PROMPT}} placeholder
   response_path - Dot-notation path to extract response (e.g. "choices.0.message.content")
   timeout_ms    - Request timeout in milliseconds (optional; otherwise derived from the platform's per-probe window)
+  stop_marker   - Streaming terminator to strip off a plain-text reply ("<<<END>>>", "[DONE]",
+                  "<EOS>"); a string or a list. Opt-in: without it nothing is removed, so a
+                  target with no terminator can never lose real text. Discovery sets this when
+                  it observes one, because the marker is transport and the scorer would
+                  otherwise read it as the agent's words on every turn.
 """
 
 import json
@@ -28,6 +33,29 @@ from .base import BotAdapter, utf8_text, tls_kwargs, tls_min_adapter, resolve_ti
 from .websocket_direct import _json_escape
 
 logger = logging.getLogger(__name__)
+
+
+def _strip_stop(text: str, config: Dict[str, Any]) -> str:
+    """Remove a streaming terminator from a plain-text reply.
+
+    A chunked text/plain agent closes its body with a marker -- `<<<END>>>`, `[DONE]`, `<EOS>`.
+    That marker is transport, not speech, but with no JSON envelope to separate them it lands at
+    the end of the answer and the scorer reads it as the agent's words. Exactly the same class of
+    defect as SSE progress chatter arriving as the reply, and it corrupts EVERY turn against such
+    a target rather than failing loudly once.
+
+    Opt-in: only a `stop_marker` that discovery actually observed (or an operator set) is
+    removed, so this cannot eat real text from a target that has no terminator. A list is
+    accepted because some servers alternate markers.
+    """
+    marker = config.get("stop_marker")
+    out = (text or "").strip()
+    if not marker:
+        return out
+    for m in ([marker] if isinstance(marker, str) else list(marker)):
+        if m and out.endswith(m):
+            out = out[: -len(m)].rstrip()
+    return out
 
 
 class DirectAPIAdapter(BotAdapter):
@@ -108,7 +136,8 @@ class DirectAPIAdapter(BotAdapter):
             if extract_path:
                 return self._fail(f"expected JSON for response_path '{extract_path}' but got non-JSON",
                                   start, raw=utf8_text(resp)[:500])
-            return self._ok(utf8_text(resp).strip(), start, adapter="direct_api", format="text")
+            return self._ok(_strip_stop(utf8_text(resp), config), start,
+                            adapter="direct_api", format="text")
 
         _path = extract_path or "response"
         response_text = _extract(data, _path)
