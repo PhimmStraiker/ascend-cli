@@ -46,6 +46,30 @@ All notable changes to the Ascend CLI. Newest first. Format follows
   This was previously reachable only as `adapter list`, which was the last remaining reason to use
   that noun at all.
 
+### Fixed
+- **`ASCEND_FORCE_COLOR=0` forced colour ON, and `ASCEND_PLAIN=0` turned it off.** Every non-empty
+  string is truthy in Python, so both switches did the opposite of what `=0` plainly means. The
+  damaging case is a pipe: someone sets `ASCEND_FORCE_COLOR=0` intending "off" and gets ANSI
+  escapes written into a log or a file. `ASCEND_PLAIN` is worse in principle — it is the
+  "something is corrupting my terminal, make it stop" hatch, the one switch that must never
+  invert. Both now accept `0`, `false`, `no`, `off` and empty as off.
+  `NO_COLOR` is deliberately unchanged: its spec is presence-based, so `NO_COLOR=0` correctly
+  disables colour, and "fixing" it for consistency would break a documented convention.
+- **The spinner padded and erased by escape bytes instead of visible columns.** `Progress._write`
+  measured `len(line)`, but `_line()` wraps the elapsed clock in dim/reset codes — so bytes and
+  cells diverge by 8 exactly when the clock appears at the 3-second mark, which is the moment the
+  padding has to be right, because the frame before it is narrower. Left remnants of the previous
+  frame on screen and over-erased on the way out. Same defect already fixed in `bar()` and
+  `_watch_many`; all three now measure cells.
+- **`ascend version --json` printed bare text.** It was wired straight to `print(VERSION)` and was
+  the only command that ignored `--json`, so an agent that explicitly asked for JSON got `1.1.1`
+  and a parse error. Both `ascend version --json` and `ascend --version --json` now emit
+  `{"version": "..."}` and are asserted to agree. The human form is still exactly `1.1.1`.
+
+  All three were invisible to the suite for the same reason: nothing ran the CLI on a TTY or asked
+  what a switch does when set to a falsy value, so the entire opt-out path was unexecuted. Each
+  fix is mutation-checked — the fix is reverted, the new test is confirmed to fail, then restored.
+
 ## [1.1.1] — 2026-09-02
 
 ### Security

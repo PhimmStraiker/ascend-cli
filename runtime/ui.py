@@ -44,6 +44,25 @@ _SEV_COLOR = {
 }
 
 
+def _env_flag(name: str) -> bool:
+    """Is one of OUR OWN switches on? `=0`, `=false`, `=no` and `=off` all mean off.
+
+    `os.environ.get(name)` is the obvious spelling and it is wrong for a switch, because every
+    non-empty string is truthy in Python: `ASCEND_FORCE_COLOR=0` turned colour ON and
+    `ASCEND_PLAIN=0` turned colour OFF. Someone reaching for `=0` means "off" in both cases, and
+    `ASCEND_PLAIN` is the "something is corrupting my terminal, make it stop" hatch -- the one
+    switch that must not do the opposite of what it says.
+
+    NO_COLOR is deliberately NOT routed through here. Its spec (no-color.org) is presence-based:
+    any non-empty value disables colour, so `NO_COLOR=0` correctly means no colour. Honouring
+    `=0` there would break a documented convention rather than fix a bug.
+    """
+    v = os.environ.get(name)
+    if v is None:
+        return False
+    return v.strip().lower() not in ("", "0", "false", "no", "off")
+
+
 def color_ok(stream=None) -> bool:
     """True when it is safe to emit ANSI: a real TTY, and the user has not opted out.
 
@@ -52,11 +71,11 @@ def color_ok(stream=None) -> bool:
     "make my terminal stop" hatch would silence the new renderers and leave the old ones
     still painting.
     """
-    if os.environ.get("ASCEND_PLAIN"):
+    if _env_flag("ASCEND_PLAIN"):
         return False
-    if os.environ.get("NO_COLOR"):
+    if os.environ.get("NO_COLOR"):        # presence-based by spec; see _env_flag
         return False
-    if os.environ.get("ASCEND_FORCE_COLOR"):
+    if _env_flag("ASCEND_FORCE_COLOR"):
         return True
     s = stream or sys.stdout
     try:
@@ -214,11 +233,16 @@ class Progress:
             self._stop.wait(self.interval)
 
     def _write(self, line: str) -> None:
+        # vwidth, not len: _line() embeds _DIM/_OFF around the elapsed clock, so len() counts
+        # escape BYTES. The two disagree by 8 the moment the clock appears at the 3s mark, which
+        # is exactly when the padding has to be right -- the frame before it is narrower. Same
+        # bug class as bar() and _watch_many, and the reason both of those now pad by cells.
         try:
-            pad = max(0, self._width - len(line))
+            cells = vwidth(line)
+            pad = max(0, self._width - cells)
             self.stream.write("\r" + line + " " * pad)
             self.stream.flush()
-            self._width = len(line)
+            self._width = cells
         except Exception:
             self.enabled = False
 
@@ -354,7 +378,7 @@ def color_depth(stream=None) -> int:
       ASCEND_PLAIN > NO_COLOR > --json (stdout only) > TERM=dumb > ASCEND_COLOR_DEPTH > detection
     """
     try:
-        if os.environ.get("ASCEND_PLAIN"):
+        if _env_flag("ASCEND_PLAIN"):
             return 0
         s = stream if stream is not None else sys.stdout
         # `--json` silences stdout only. Progress and notes live on stderr and stay readable.

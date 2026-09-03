@@ -6358,7 +6358,8 @@ def build_parser():
                    help="update this install if a newer release is published "
                         "(git pull for a clone; prints the command for pipx/binary)")
     s.set_defaults(func=cmd_doctor)
-    sub.add_parser("version", parents=[GLOBALS], formatter_class=_Fmt, help="print version").set_defaults(func=lambda a: print(VERSION))
+    sub.add_parser("version", parents=[GLOBALS], formatter_class=_Fmt, help="print version"
+                   ).set_defaults(func=lambda a: _out({"version": VERSION}, a, human=VERSION))
     return p
 
 
@@ -6924,7 +6925,12 @@ def _legacy_pointer(raw):
 def main(argv=None):
     raw = list(sys.argv[1:] if argv is None else argv)
     if "--version" in raw and not [a for a in raw if not a.startswith("-")]:
-        print(VERSION)
+        # `--version` is handled before the parser exists, so it has to honour --json itself.
+        # `ascend version` goes through _out(); these two must not disagree.
+        if _wants_json():
+            print(json.dumps({"version": VERSION}, indent=2))
+        else:
+            print(VERSION)
         return
     _legacy_pointer(raw)
     # Bare `ascend` on a terminal -> the launch home screen. Non-TTY / piped / --json fall through
