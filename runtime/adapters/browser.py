@@ -19,15 +19,18 @@ Config keys:
   response         - wait_strategy, container_selector, text_selector, timeout_ms, etc.
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-
-from playwright.async_api import async_playwright, Page, Frame, ElementHandle
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from .base import BotAdapter
+
+if TYPE_CHECKING:  # type hints only — the runtime import is lazy (see send_prompt)
+    from playwright.async_api import Page, Frame, ElementHandle
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +72,7 @@ class BrowserAdapter(BotAdapter):
 
         await self._cleanup()
 
+        from playwright.async_api import async_playwright  # lazy: only needed for this adapter
         self._playwright = await async_playwright().start()
         cdp = config.get("cdp_url") or config.get("cdp")
         if cdp:
@@ -151,6 +155,12 @@ class BrowserAdapter(BotAdapter):
         if not url and not cdp:
             return self._fail("No url configured (or attach a warmed browser with "
                               "cdp_url + use_current_page)", start)
+        try:
+            import playwright.async_api  # noqa: F401  lazy: only needed for this adapter
+        except ImportError:
+            return self._fail(
+                "The 'playwright' package is required for the browser adapter "
+                "(pip install playwright && playwright install chromium).", start)
 
         try:
             await self._ensure_session(config)
