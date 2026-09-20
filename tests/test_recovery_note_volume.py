@@ -41,6 +41,8 @@ def _run_with_drop_after_create(state_status):
     def fake_req(method, path, **kw):
         if method == "POST" and path.endswith("/assessments"):
             return {"id": "asmt_live", "status": "created"}
+        if method == "GET" and path.endswith("/assessments"):
+            return {"data": []}          # the pre-create lookup: nothing unfinished on this app
         calls["n"] += 1
         if calls["n"] == 1:
             raise Dropped("Remote end closed connection without response")

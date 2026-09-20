@@ -204,9 +204,12 @@ def test_run_calls_create_pause_resume_poll_in_order(monkeypatch):
                         lambda app, aid: order.append(("resume", aid)))
     monkeypatch.setattr(client, "poll_assessment",
                         lambda app, aid, **kw: order.append("poll") or {"status": "completed"})
+    monkeypatch.setattr(client, "live_assessment", lambda app: None)
+    monkeypatch.setattr(client, "get_assessment", lambda app, aid: {"status": "running"})
 
-    result = client.run("aapp_1", "run-1")
-    assert result == {"status": "completed"}
+    result = client.run("aapp_1", "run-1", settle=0)
+    assert result["status"] == "completed"
+    assert result["assessment_id"] == "asmt_1" and result["started"] is True
     assert order == ["create", ("pause", "asmt_1"), ("resume", "asmt_1"), "poll"]
 
 
@@ -218,7 +221,9 @@ def test_run_no_wait_skips_poll(monkeypatch):
     monkeypatch.setattr(client, "resume", lambda a, aid: order.append("resume"))
     monkeypatch.setattr(client, "poll_assessment",
                         lambda *a, **k: order.append("poll"))
-    out = client.run("aapp_1", "r", wait=False)
+    monkeypatch.setattr(client, "live_assessment", lambda app: None)
+    monkeypatch.setattr(client, "get_assessment", lambda app, aid: {"status": "running"})
+    out = client.run("aapp_1", "r", wait=False, settle=0)
     assert out["assessment_id"] == "asmt_9"
     assert out["status"] == "running"
     assert "poll" not in order
@@ -268,8 +273,10 @@ def test_run_tolerates_409_on_pause(monkeypatch):
     monkeypatch.setattr(client, "pause", pause)
     monkeypatch.setattr(client, "resume", lambda a, aid: order.append("resume"))
     monkeypatch.setattr(client, "poll_assessment", lambda *a, **k: {"status": "completed"})
+    monkeypatch.setattr(client, "live_assessment", lambda app: None)
+    monkeypatch.setattr(client, "get_assessment", lambda app, aid: {"status": "running"})
     out = client.run("aapp_1", "r")
-    assert out == {"status": "completed"}
+    assert out["status"] == "completed" and out["started"] is True
     assert order == ["resume"]  # proceeded past the tolerated 409
 
 

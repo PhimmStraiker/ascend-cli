@@ -11,7 +11,62 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **`target add` goes direct first, and a bridge only when it has to.** Registration always created
+  a bridge app, even for a public JSON endpoint the platform could call itself — so every target
+  needed a local process kept alive for the whole run. It now registers a direct (`api`) app when
+  the endpoint is publicly routable, speaks plain request/response JSON and uses static auth, and
+  falls back to a bridge for a private address, a streaming or socket protocol, or a login
+  handshake (`oauth2`, `csrf`, `derived_multihop`). The reason is printed and returned as
+  `transport` / `transport_reason`. `--via auto|api|bridge` overrides; `--via api` on a target
+  that cannot go direct fails rather than quietly bridging.
+- **`target add` is idempotent.** A name that already exists is adopted instead of refused: a
+  direct app has its contract refreshed in place (so a fixed header or rotated key is an update,
+  not a twin), a bridge app has its key fetched as `--app` always did. The result carries
+  `reused: true`. A second application for the same target takes a different `--name`.
+- **`assess run` proves the run started.** `--no-wait` used to print a hard-coded `running`.
+  Measured against prod: a run whose target refuses the platform's calls answers `running` to the
+  resume and is back at `paused` 10-20 seconds later, with no reason recorded. The command now
+  watches a 45-second settle window and reports the status the platform actually holds, with
+  `started`, `auto_paused` and — when it did not start — a `diagnosis` made by replaying the
+  app's own contract against the target. Exit code is non-zero when the run did not start.
+- **`assess run` picks up an unfinished assessment instead of creating another** (`--new` forces a
+  fresh one). Assessments cannot be deleted, so a retry used to leave a permanent orphan.
+- **`target inspect <url>`** — read-only look at a target before touching it: whether it publishes
+  its own contract, what it needs from the operator, whether one address serves several agents,
+  whether the platform can reach it, and what is already registered for that host.
+- **Published-contract profiles** (`runtime/discovery/profiles.py`). A target that states its own
+  contract is read rather than probed: a bare probe finds *a* body the target accepts, which is
+  not the body its own client sends. `--workspace` selects an agent on a multi-agent host;
+  `--no-profile` falls back to probing.
+- **`ASCEND_TARGET_AUTH_FILE`** — target credentials handed over in a 0600 JSON file
+  (`headers` / `body_fields` / `query`) instead of on a command line, where every process on the
+  machine can read them. A file other users can read is refused. Explicit flags still win.
+
+### Fixed
+
+- **`app create --type api --config <name>` never worked with a derived config.** It read `url`
+  while `target add` writes `endpoint`; added a second top-level `{{PROMPT}}` beside an already
+  templated body; and flattened a nested answer path into one dotted key that matches nothing in
+  a real response, so every probe's answer would have been read as empty. The answer path is now
+  expanded into the nested mirror the platform expects (`choices.0.message.content` →
+  `{"choices":[{"message":{"content":"{{RESPONSE}}"}}]}`), and `app create` and `target add`
+  share one contract builder.
+- **`api` apps are created with the `api_key` the platform requires.** Without it the create is
+  rejected with "the request was rejected by the upstream service", naming no field. It is lifted
+  from the bearer, a key header or a body field — and left in the request as well, because the
+  platform does not inject it.
+- **Templates and headers are always sent in the wire shape.** A patch carrying object templates
+  or a header dict was answered "request body is not valid JSON". Every create and patch is now
+  normalised (templates as JSON strings, headers as `{name, value}` rows) in one place.
+- **Waiting on a paused run no longer hangs for the whole timeout.** Three consecutive `paused`
+  polls return the run marked `stalled`.
+- **A finished run the platform still calls `running` is treated as finished.** The platform
+  accepts a resume on a completed assessment and then reports it `running` indefinitely with
+  `completed_at` set; judged by `completed_at` and progress, not by the status string alone.
+- `list_apps` asks for a full page, so a name lookup cannot miss an application on a tenant past
+  the default page size.
 
 ## [1.1.4] — 2026-09-07
 

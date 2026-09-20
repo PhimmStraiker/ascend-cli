@@ -132,6 +132,8 @@ class TestRunPropagatesRecovery:
         created = {"id": "asmt_live", "assessment_id": "asmt_live", "recovered": True,
                    "recovery_note": "the response was lost (Dropped), but the server did create it"}
         with mock.patch.object(api.AscendAPI, "create_assessment", return_value=created), \
+             mock.patch.object(api.AscendAPI, "live_assessment", return_value=None), \
+             mock.patch.object(api.AscendAPI, "get_assessment", return_value={"status": "running"}), \
              mock.patch.object(api.AscendAPI, "_safe_transition"):
             out = c.run("aapp_x", "run 1", wait=False)
         assert out["assessment_id"] == "asmt_live"
@@ -142,6 +144,8 @@ class TestRunPropagatesRecovery:
         c = _client()
         with mock.patch.object(api.AscendAPI, "create_assessment",
                                return_value={"id": "asmt_new"}), \
+             mock.patch.object(api.AscendAPI, "live_assessment", return_value=None), \
+             mock.patch.object(api.AscendAPI, "get_assessment", return_value={"status": "running"}), \
              mock.patch.object(api.AscendAPI, "_safe_transition"):
             out = c.run("aapp_x", "run 1", wait=False)
         assert "recovered" not in out
@@ -170,6 +174,8 @@ class TestFailureAfterCreate:
         def fake_req(method, path, **kw):
             if method == "POST" and path.endswith("/assessments"):
                 return {"id": "asmt_live", "status": "created"}
+            if method == "GET" and path.endswith("/assessments"):
+                return {"data": []}      # the pre-create lookup: nothing unfinished on this app
             calls["n"] += 1
             if calls["n"] == 1:
                 raise Dropped("Remote end closed connection without response")

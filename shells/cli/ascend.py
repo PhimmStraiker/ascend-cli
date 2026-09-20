@@ -442,9 +442,9 @@ def _parse_kv_pairs(items, what):
 
 
 def _spec_from_config(args, api):
-    """Borrow url/templates/headers from a mapped adapter config.
+    """Borrow url/templates/headers/api_key from a proven adapter config.
 
-    `ascend adapter build` already produces exactly the fields an `api` app needs, so an operator who has
+    `target add` already produces exactly the fields an `api` app needs, so an operator who has
     validated an adapter should not have to retype them.
     """
     if not getattr(args, "config", None):
@@ -454,25 +454,196 @@ def _spec_from_config(args, api):
         cfg = json.loads(Path(path).read_text())
     except Exception:
         return {}
-    out = {}
-    if cfg.get("url"):
-        out["url"] = cfg["url"]
-    if cfg.get("headers"):
-        out["headers"] = dict(cfg["headers"])
-    body = cfg.get("body") or cfg.get("request_body")
-    if isinstance(body, dict):
-        # The mapped body carries a literal probe prompt; Ascend needs the placeholder.
-        field = cfg.get("prompt_field") or "prompt"
-        out["request_template"] = {**{k: v for k, v in body.items() if k != field},
-                                   field: "{{PROMPT}}"}
-    if cfg.get("response_path"):
-        out["response_template"] = {cfg["response_path"]: "{{RESPONSE}}"}
-    # Carried out so cmd_app_create can refuse an app type that cannot honour it. This function
-    # borrowed url/headers/body/response_path and silently dropped `auth`, so an OAuth2 or CSRF
-    # target registered with `--type api` got an app carrying only static headers -- the platform
-    # then called the target directly and 401'd on every probe, with nothing having warned.
+    out = _api_contract(cfg)
+    # Carried out so cmd_app_create can refuse an app type that cannot honour it. An OAuth2 or
+    # CSRF target registered with `--type api` got an app carrying only static headers -- the
+    # platform then called the target directly and 401'd on every probe, with nothing having warned.
     out["_auth_type"] = (cfg.get("auth") or {}).get("type")
     return out
+
+
+# Auth kinds resolved locally by runtime/layers/auth.py. The platform cannot run them.
+DYNAMIC_AUTH_KINDS = ("oauth2", "csrf", "derived_multihop")
+_PRIVATE_SUFFIXES = (".local", ".internal", ".lan", ".home", ".corp", ".localhost", ".test")
+
+
+def _is_public_host(url: str) -> bool:
+    """Whether Straiker's cloud could plausibly reach this address.
+
+    Every resolved address must be globally routable. A name that does not resolve from here is
+    treated as private: the failure mode of guessing "public" is a run that pauses itself with no
+    explanation, while guessing "private" costs only a relay.
+    """
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+    host = (urlparse(url if "//" in str(url) else f"//{url}").hostname or "").lower()
+    if not host or host == "localhost" or host.endswith(_PRIVATE_SUFFIXES):
+        return False
+    try:
+        return ipaddress.ip_address(host).is_global
+    except ValueError:
+        pass
+    if "." not in host:
+        return False
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return False
+    addrs = {i[4][0].split("%")[0] for i in infos}
+    return bool(addrs) and all(ipaddress.ip_address(a).is_global for a in addrs)
+
+
+def _choose_transport(args, adapter, cfg):
+    """api or bridge, and the reason in words. Direct first; a bridge only when it has to be.
+
+    A bridge is a process somebody must keep alive for the whole run, on a machine that must stay
+    awake, and when it is not answering the run scores as if nothing was wrong. So it is the last
+    resort: used when the platform cannot reach the target, cannot speak its protocol, or the
+    operator asked for it by name.
+    """
+    want = (getattr(args, "via", None) or "auto").lower()
+    endpoint = cfg.get("endpoint") or cfg.get("url") or ""
+    speaks = (adapter or "direct_api") in ("direct_api", "api")
+    public = _is_public_host(endpoint)
+    # A direct app carries static headers and one api_key and nothing else. A target that logs in
+    # with a handshake needs the local auth layer to run it, which only a bridge goes through.
+    handshake = (cfg.get("auth") or {}).get("type")
+    static_auth = handshake not in DYNAMIC_AUTH_KINDS
+    if want == "bridge":
+        return "bridge", "requested with --via bridge"
+    if speaks and public and static_auth:
+        return "api", "the platform can reach this endpoint and speak its contract itself"
+    why = (f"the '{adapter}' adapter is not something the platform can speak natively"
+           if not speaks else
+           f"it authenticates with a {handshake!r} handshake, which only a local relay can run"
+           if not static_auth else
+           f"{endpoint or 'this target'} is not reachable from Straiker's cloud")
+    if want == "api":
+        _die(f"--via api is not possible here: {why}", error_code="direct_not_possible",
+             hint="omit --via to let a bridge carry it")
+    return "bridge", why
+
+
+def _lift_api_key(cfg) -> str:
+    """The credential the platform's required `api_key` field should carry.
+
+    `api` applications are rejected without one (a bare 400 naming no field), so it is lifted from
+    wherever the proven contract already holds it. The header or body field stays where it is:
+    measured, the platform does not inject `api_key` into the request on its own.
+    """
+    headers = {str(k).lower(): str(v) for k, v in (cfg.get("headers") or {}).items()}
+    auth = headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    for h in ("x-api-key", "api-key", "apikey", "x-auth-token"):
+        if headers.get(h):
+            return headers[h]
+    body = cfg.get("body") or cfg.get("request_body") or {}
+    if isinstance(body, dict):
+        for k in ("apiKey", "api_key", "apikey", "key", "token"):
+            if isinstance(body.get(k), str) and body[k] and "{{" not in body[k]:
+                return body[k]
+    return "none"
+
+
+def _api_contract(cfg):
+    """A proven adapter config as the fields a direct (`api`) application is made of."""
+    out = {}
+    url = cfg.get("url") or cfg.get("endpoint")
+    if url:
+        out["url"] = url
+    headers = dict(cfg.get("headers") or {})
+    headers.setdefault("Content-Type", "application/json")
+    out["headers"] = headers
+    body = cfg.get("body") or cfg.get("request_body")
+    if isinstance(body, dict):
+        if "{{PROMPT}}" in json.dumps(body):
+            out["request_template"] = body
+        else:
+            field = cfg.get("prompt_field") or "prompt"
+            out["request_template"] = {**{k: v for k, v in body.items() if k != field},
+                                       field: "{{PROMPT}}"}
+    if cfg.get("response_path"):
+        out["response_template"] = _response_template_from_path(cfg["response_path"])
+    out["api_key"] = _lift_api_key(cfg)
+    return out
+
+
+def _profile_for(args):
+    """The published-contract profile for this target, looked up once per invocation."""
+    if getattr(args, "no_profile", False):
+        return None
+    if not hasattr(args, "_profile_cache"):
+        try:
+            from runtime.discovery import profiles as P
+            args._profile_cache = P.detect(args.api, verify=not getattr(args, "insecure", False))
+        except Exception:
+            args._profile_cache = None
+    return args._profile_cache
+
+
+def _slug(text: str) -> str:
+    return re.sub(r"-+", "-", re.sub(r"[^a-z0-9]+", "-", str(text).lower())).strip("-") or "target"
+
+
+def cmd_target_inspect(args):
+    """Look at a target before touching it: what it is, what it needs, what can be aimed at.
+
+    Read-only, registers nothing, sends no prompt. It answers the questions a person settles by
+    opening the page — is this a known application, does it want a key, does one address serve
+    several agents — so they are answered before a contract is guessed instead of after.
+    """
+    from runtime.discovery import profiles as P
+    url = args.source
+    verify = not getattr(args, "insecure", False)
+    prof = P.detect(url, verify=verify)
+    auth_headers, _q = _target_auth(args)
+    if prof:
+        out = prof.inspect(P.origin_of(url), auth_headers or {}, verify=verify)
+        out["published_contract"] = True
+    else:
+        out = {"profile": None, "published_contract": False, "origin": P.origin_of(url),
+               "note": ("This target does not publish a contract. Onboard it from evidence: a HAR "
+                        "or cURL of its real client is best, a browser capture next, a bare "
+                        "endpoint probe last.")}
+    out["reachable_from_cloud"] = _is_public_host(url)
+    out["transport"] = ("api" if out["reachable_from_cloud"] else "bridge")
+    try:
+        c = _client(args)
+        hits = [a for a in c._rows(c.list_apps())
+                if P.origin_of(str(a.get("url") or "")) == P.origin_of(url)]
+        out["already_registered"] = [{"app_id": a.get("id"), "name": a.get("name"),
+                                      "type": _type_label(a.get("api_type"))} for a in hits]
+    except Exception:
+        out["already_registered"] = None
+    human = [f"{out.get('label') or 'unrecognised target'}  {out['origin']}",
+             f"  transport   {out['transport']}"
+             f" ({'reachable from Straiker' if out['reachable_from_cloud'] else 'private — needs a relay'})"]
+    for n in out.get("needs") or []:
+        human.append(f"  needs       {n['name']} ({n['kind']}) — {n['why']}")
+    for w in out.get("workspaces") or []:
+        human.append(f"  workspace   {w['slug']:32} {w.get('name') or ''}")
+    for a in out.get("already_registered") or []:
+        human.append(f"  registered  {a['app_id']}  {a['name']}")
+    if out.get("note"):
+        human.append(f"  {out['note']}")
+    _out(out, args, human="\n".join(human))
+
+
+def _response_template_from_path(path: str):
+    """Expand a dotted answer path into the nested mirror the platform expects.
+
+    `choices.0.message.content` becomes `{"choices": [{"message": {"content": "{{RESPONSE}}"}}]}`.
+    A flat `{"choices.0.message.content": …}` key matches nothing in a real response, so the
+    platform extracts an empty answer from every probe and the run scores clean having read
+    nothing. Numeric segments are list positions; only index 0 can be mirrored, which is what a
+    single-answer chat response is.
+    """
+    node = "{{RESPONSE}}"
+    for seg in reversed([s for s in re.split(r"[.\[\]]+", str(path)) if s != ""]):
+        node = [node] if seg.isdigit() else {seg: node}
+    return node
 
 
 def _resolve_all_controls(c, args, ctrl):
@@ -654,7 +825,7 @@ def cmd_app_create(args):
     at = "thin" if at_cli == "bridge" else at_cli
     borrowed = _spec_from_config(args, api) if at in ("api", "thin") else {}
     _auth_kind = borrowed.pop("_auth_type", None)
-    if at == "api" and _auth_kind in ("oauth2", "csrf", "derived_multihop"):
+    if at == "api" and _auth_kind in DYNAMIC_AUTH_KINDS:
         # An `api` app is called by the PLATFORM directly. Its wire schema carries static headers
         # and one api_key and nothing else (control/api.py REQUIRED_BY_TYPE) -- no token endpoint,
         # no bootstrap, no login chain. The dynamic auth kinds are resolved by the local bridge in
@@ -708,7 +879,7 @@ def cmd_app_create(args):
                            or ("custom" if getattr(args, "strategy", None) else None)),
             strategies=([x.strip() for x in args.strategy.split(",")] if getattr(args, "strategy", None) else None),
             url=getattr(args, "url", None) or borrowed.get("url"),
-            api_key=getattr(args, "target_api_key", None),
+            api_key=getattr(args, "target_api_key", None) or borrowed.get("api_key"),
             request_template=borrowed.get("request_template"),
             response_template=borrowed.get("response_template"),
             headers=borrowed.get("headers"),
@@ -1777,7 +1948,7 @@ def cmd_assess_run(args):
         bridge_gone = None
         try:
             with tw:
-                res = c.run(appid, args.name, wait=True,
+                res = c.run(appid, args.name, wait=True, new=getattr(args, "new", False),
                             interval=feed_interval, timeout=args.timeout, on_tick=_supervised_tick)
         except _BridgeUnavailable as e:
             bridge_gone = e
@@ -1815,15 +1986,23 @@ def cmd_assess_run(args):
                   f"    ascend assess resume --app {args.app!r} --assessment {aid}", file=sys.stderr)
             sys.exit(EXIT_ERROR)
     else:
-        res = c.run(appid, args.name, wait=False,
+        res = c.run(appid, args.name, wait=False, new=getattr(args, "new", False),
                     interval=args.interval, timeout=args.timeout, on_tick=None)
         # --no-wait leaves the relay serving with nobody watching it, so bind it to this run: that
         # is what lets it stop itself correctly when THIS assessment finishes (and only then).
         if isinstance(res, dict):
             _bind_assessment(appid, res.get("assessment_id"))
-    if isinstance(res, dict) and res.get("assessment_id"):
-        _say(args, f"assessment started  ({res['assessment_id']})", done=True)
     import api
+    not_started = isinstance(res, dict) and res.get("started") is False
+    if not_started:
+        res = {**res, "diagnosis": _diagnose_not_started(c, appid, res)}
+    elif isinstance(res, dict) and res.get("stalled"):
+        res = {**res, "diagnosis": ("the run went back to paused on its own part-way through, "
+                                    "which is the target refusing or failing the platform's calls; "
+                                    "fix the target, then `ascend assess resume`")}
+    elif isinstance(res, dict) and res.get("assessment_id"):
+        verb = "picked up the unfinished run" if res.get("reused_assessment") else "assessment started"
+        _say(args, f"{verb}  ({res['assessment_id']})", done=True)
     # --no-wait returns {app_id, assessment_id, status}; summarizing that prints a phantom
     # "risk ? score ? probes ?/?" header. Only summarize a real assessment payload.
     human = (_verdict(res, detail=getattr(args, "detail", False))
@@ -1837,6 +2016,10 @@ def cmd_assess_run(args):
         else:
             print("  (create response dropped; the assessment exists and is running, "
                   "not re-created)", file=sys.stderr)
+    if not_started:
+        human = (f"assessment {res.get('assessment_id')} did NOT start — it is "
+                 f"'{res.get('status')}' on the platform\n  {res['diagnosis']}\n"
+                 f"  it will be picked up again by the next `ascend assess run` (no duplicate)")
     if human is None and isinstance(res, dict) and res.get("assessment_id"):
         human = (f"assessment {res['assessment_id']} started\n"
                  f"  watch:    ascend assess watch --app {args.app} --assessment {res['assessment_id']}\n"
@@ -1856,8 +2039,49 @@ def cmd_assess_run(args):
         sys.exit(EXIT_ERROR)
     # Bridge-type app but no relay could be ensured: the run exists but will score a FALSE PASS
     # until a bridge answers it. Exit non-zero so a pipeline notices — the run was created either way.
-    if ensure.get("skip") or ensure.get("error"):
+    if ensure.get("skip") or ensure.get("error") or not_started:
         sys.exit(EXIT_ERROR)
+
+
+def _diagnose_not_started(c, appid, res) -> str:
+    """Why a run fell back to paused, tested rather than guessed.
+
+    The platform records no reason, so reproduce its call from here: send the app's own contract
+    one benign prompt. A direct app whose target rejects that is the whole explanation.
+    """
+    try:
+        app = c.get_app(appid) or {}
+    except Exception:
+        app = {}
+    if api.needs_bridge(app):
+        return ("this is a bridge app, and the platform pauses a run nothing is answering. Check "
+                "`ascend bridge ls` — a relay must be alive with lease counters moving.")
+    url = app.get("url")
+    if not url:
+        return "the application has no url, so the platform has nothing to call"
+    try:
+        import requests
+        body = app.get("request_template") or "{}"
+        body = body if isinstance(body, str) else json.dumps(body)
+        body = body.replace("{{PROMPT}}", "Hello, what can you help me with?").replace(
+            "{{USER_NAME}}", "ascend")
+        hdrs = {h.get("name"): h.get("value") for h in (app.get("headers") or [])
+                if isinstance(h, dict) and h.get("name")}
+        masked = [k for k, v in hdrs.items() if v and set(str(v)) <= set("*•")]
+        if masked:
+            return (f"the stored value of header(s) {', '.join(masked)} is masked on read, so it "
+                    f"cannot be replayed from here; re-run `ascend target add` with the credential "
+                    f"to refresh the contract")
+        r = requests.post(url, data=body.encode(), headers=hdrs, timeout=45)
+        if r.status_code >= 400:
+            return (f"the target answers the app's own contract with HTTP {r.status_code} "
+                    f"({r.text[:140]!r}) — the platform got the same and paused the run. Fix the "
+                    f"credential or body with `ascend target add` (it updates this app in place).")
+        return (f"the target accepts the contract from here (HTTP {r.status_code}), so the refusal "
+                f"is specific to the platform's side — an allow-list, a WAF, or a rate limit on "
+                f"Straiker's egress. The run can be resumed once that is cleared.")
+    except Exception as exc:
+        return f"could not replay the contract from here ({type(exc).__name__}: {str(exc)[:120]})"
 
 
 def _tick(status, prog, a):
@@ -2610,6 +2834,27 @@ def _kv_headers(pairs):
     return out
 
 
+def _auth_file() -> dict:
+    """Target credentials handed over out of band, as {"headers": {}, "body_fields": {}, "query": {}}.
+
+    A flag puts a secret in argv, and argv is readable by every process on the machine for as
+    long as the command runs. A harness that holds credentials for the operator names a 0600 file
+    in ASCEND_TARGET_AUTH_FILE instead. A file anyone else can read is refused rather than used.
+    """
+    path = os.environ.get("ASCEND_TARGET_AUTH_FILE")
+    if not path:
+        return {}
+    p = Path(os.path.expanduser(path))
+    try:
+        if p.stat().st_mode & 0o077:
+            _die(f"{p} is readable by other users — refusing to take credentials from it",
+                 hint=f"chmod 600 {p}")
+        data = json.loads(p.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        _die(f"could not read ASCEND_TARGET_AUTH_FILE: {exc}")
+    return data if isinstance(data, dict) else {}
+
+
 def _target_auth(args):
     """Fold the target-auth flags (--bearer/--api-key/--basic/--cookie/--token-file/--header)
     into (headers, query_params) for the probe.
@@ -2633,7 +2878,9 @@ def _target_auth(args):
                 _die(f"{what}: {e}")
         return raw, None
 
-    headers, query = {}, {}
+    # Credentials a harness handed over out of band come first; an explicit flag still wins.
+    handed = _auth_file()
+    headers, query = dict(handed.get("headers") or {}), dict(handed.get("query") or {})
     for k, v in _kv_headers(getattr(args, "header", None)).items():
         v2, ref = val(v, f"--header {k!r}")
         headers[k] = v2
@@ -2902,7 +3149,7 @@ def _body_fields(args):
     than a header, so a header-only auth story cannot reach them at all. `key:=raw` passes a
     JSON literal (true / 7 / {"a":1}) instead of a string.
     """
-    out = {}
+    out = dict(_auth_file().get("body_fields") or {})
     for item in getattr(args, "body_field", None) or []:
         if ":=" in item:
             k, v = item.split(":=", 1)
@@ -3985,6 +4232,31 @@ def cmd_onboard(args):
         _step(1, total, f"using existing config '{args.config}'")
         cfg = _load_named_config(args.config)
         cfg_path = resolve_config_path(args.config) or cfg_path
+    elif getattr(args, "api", None) and _profile_for(args):
+        # The target states its own contract. Read it, rather than infer a lesser one by probing.
+        from runtime.discovery import profiles as P
+        prof = _profile_for(args)
+        _step(1, total, f"{prof.label} host — reading the contract it publishes")
+        auth_headers, _q = _target_auth(args)
+        try:
+            cfg, facts = prof.build(P.origin_of(args.api), workspace=getattr(args, "workspace", None),
+                                    headers=auth_headers or {}, body_fields=_body_fields(args) or {},
+                                    bearer=getattr(args, "bearer", None),
+                                    verify=not getattr(args, "insecure", False))
+        except ValueError as exc:
+            _die(str(exc), error_code="target_needs_input",
+                 hint=f"ascend target inspect {args.api}")
+        _ok(f"workspace {facts['workspace']} · {len(facts['tools'])} tools · answer at message")
+        # What the target says about itself beats anything typed from memory.
+        if not args.name and not chosen:
+            args.name = facts["name"]
+        if not args.system_prompt and facts.get("system_prompt"):
+            args.system_prompt = facts["system_prompt"]
+        if not getattr(args, "purpose", None) and facts.get("purpose"):
+            args.purpose = facts["purpose"]
+        name = args.name or name
+        cfg_name = _slug(args.name) if not chosen else cfg_name
+        cfg_path, cfg_name = _write_named_config(cfg, cfg_name, exact=True)
     elif getattr(args, "api", None):
         # the simple-contract one-liner: one probe, no browser, no adapter to author
         _step(1, total, f"probing {args.api}")
@@ -4144,7 +4416,18 @@ def cmd_onboard(args):
     # Without this, `target add` with no --controls sent control_type "all" and the platform
     # refused with a bare "the request was rejected by the upstream service" -- 100% of the time,
     # on the default invocation of the command 1.1.2 makes primary.
+    app_name = args.name or name
     existing_ref = getattr(args, "app", None)
+    reused = False
+    if not existing_ref:
+        # The same target registers ONCE. Re-running the command — or an agent retrying it — must
+        # land on the application that is already there, with its history, rather than be refused
+        # or mint a twin. A second application for the same target takes a different --name.
+        found = c.find_app_by_name(app_name)
+        if found:
+            existing_ref, reused = found.get("id"), True
+    via, via_why = _choose_transport(args, adapter, cfg)
+    tc = None
     if existing_ref:
         # Adopt an application that already exists in the Console instead of creating a second
         # one. This is the common shape of a stalled engagement: the app was configured in the
@@ -4153,27 +4436,43 @@ def cmd_onboard(args):
         # fresh app here would strand all of that configuration on an app nobody assesses.
         app_id = existing_ref if str(existing_ref).startswith("aapp_") else _resolve_app(c, existing_ref)
         app = c.get_app(app_id) or {}
-        tc = app.get("thin_api_key")
-        _ok(f"adopting existing app {app_id} ({app.get('name') or existing_ref})")
-        if (app.get("api_type") or "").lower() not in ("thin", "bridge", ""):
-            _warn(f"this app is type '{app.get('api_type')}', which Ascend calls directly — it "
-                  f"does not use a bridge, so nothing here needs to serve it")
-        if not tc:
-            # The key is normally returned on GET. When it is not, the local store is the only
-            # other place it can come from, since the platform shows it once at creation.
-            try:
-                import creds as C
-                tc = C.key_for(app_id)
-            except Exception:
-                tc = None
-        if not tc:
-            _die(f"no bridge key available for {app_id}.\n"
-                 f"  store the one you were given:  ascend keys add --app {app_id} --key tc-…\n"
-                 f"  then re-run this command",
-                 error_code="no_bridge_key")
-        if controls or args.system_prompt:
-            _ok("note: --controls / --system-prompt are ignored when adopting an existing app; "
-                "change them with `ascend app update`")
+        _ok(f"{'already registered — reusing' if reused else 'adopting existing app'} "
+            f"{app_id} ({app.get('name') or existing_ref})")
+        is_bridge = api.needs_bridge(app)
+        if not is_bridge:
+            via = "api"
+            # A direct app IS its contract, so re-wiring the same target refreshes it in place.
+            # That is what makes a fixed header or a rotated key an update rather than a fork.
+            patch = _api_contract(cfg)
+            if controls:
+                patch.update({"control_type": "custom", "control_ids": controls})
+            if args.system_prompt:
+                patch["system_prompt"] = args.system_prompt
+            if getattr(args, "size", None):
+                patch["assessment_size"] = args.size
+            if getattr(args, "qpm", None):
+                patch["max_queries_per_minute"] = args.qpm
+            app = {**app, **(c.patch_app(app_id, patch) or {})}
+            _ok("contract refreshed on the existing app")
+        else:
+            via = "bridge"
+            tc = app.get("thin_api_key")
+            if not tc:
+                # The key is normally returned on GET. When it is not, the local store is the only
+                # other place it can come from, since the platform shows it once at creation.
+                try:
+                    import creds as C
+                    tc = C.key_for(app_id)
+                except Exception:
+                    tc = None
+            if not tc:
+                _die(f"no bridge key available for {app_id}.\n"
+                     f"  store the one you were given:  ascend keys add --app {app_id} --key tc-…\n"
+                     f"  then re-run this command",
+                     error_code="no_bridge_key")
+            if controls or args.system_prompt:
+                _ok("note: --controls / --system-prompt are ignored when adopting an existing app; "
+                    "change them with `ascend app update`")
     else:
         # Resolved HERE, not before the branch above. Only the create path sends a control set;
         # the adopt path ignores --controls entirely (it says so, two lines up). Resolving first
@@ -4181,23 +4480,42 @@ def cmd_onboard(args):
         # printed "no --controls given — registering with all 62 catalog controls" while
         # registering nothing at all. Reported by @ryan-straiker in #36.
         controls = _resolve_all_controls(c, args, controls)
-        _refuse_duplicate_app_name(c, args.name or name, cfg_name)
-        app = c.create_app(api.build_thin_spec(
-            name=args.name or name, system_prompt=args.system_prompt or name,
-            control_ids=controls, assessment_size=args.size, qpm=args.qpm))
-        app_id, tc = app.get("id"), app.get("thin_api_key")
+        _refuse_duplicate_app_name(c, app_name, cfg_name)
+        if via == "api":
+            _ok(f"direct — {via_why}")
+            spec = api.build_api_spec(
+                name=app_name, system_prompt=args.system_prompt or name,
+                control_ids=controls, assessment_size=args.size, qpm=args.qpm,
+                **{k: v for k, v in _api_contract(cfg).items()
+                   if k in ("url", "request_template", "response_template", "headers", "api_key")})
+            spec["business_purpose"] = (getattr(args, "purpose", None) or args.system_prompt
+                                        or name)[:500]
+            app = c.create_app(spec)
+            app_id = app.get("id")
+        else:
+            _ok(f"bridge — {via_why}")
+            app = c.create_app(api.build_thin_spec(
+                name=app_name, system_prompt=args.system_prompt or name,
+                control_ids=controls, assessment_size=args.size, qpm=args.qpm))
+            app_id, tc = app.get("id"), app.get("thin_api_key")
         _ok(f"app {app_id}")
-    _require_thin_key(tc, app_id)      # shown once; without it the bridge can never serve this app
-    try:
-        import creds as C
-        # Record the FULL binding (app + config + adapter + key) so `bridge start --app X` can
-        # launch this bridge later with nothing pasted by hand.
-        C.save(app_id, tc, app_name=(app.get("name") or args.name or name),
-               config=cfg_name, adapter=adapter)
-        _ok(f"bridge key stored for {app_id} (0600, {C.store_path()}) — shown only once by the API")
-        _bind_config(cfg_name, app_id, app.get("name") or args.name or name)
-    except Exception as e:
-        _ok(f"could not save the bridge key ({e}); copy it now: {tc}")
+    if via == "bridge":
+        _require_thin_key(tc, app_id)  # shown once; without it the bridge can never serve this app
+        try:
+            import creds as C
+            # Record the FULL binding (app + config + adapter + key) so `bridge start --app X` can
+            # launch this bridge later with nothing pasted by hand.
+            C.save(app_id, tc, app_name=(app.get("name") or app_name),
+                   config=cfg_name, adapter=adapter)
+            _ok(f"bridge key stored for {app_id} (0600, {C.store_path()}) — shown only once by the API")
+            _bind_config(cfg_name, app_id, app.get("name") or app_name)
+        except Exception as e:
+            _ok(f"could not save the bridge key ({e}); copy it now: {tc}")
+    else:
+        try:
+            _bind_config(cfg_name, app_id, app.get("name") or app_name)
+        except Exception:
+            pass
 
     # `target add` stops here. The target exists, its adapter is proven against the live endpoint,
     # and its key is stored — which is everything needed to run it later. Whether to spend an
@@ -4205,7 +4523,9 @@ def cmd_onboard(args):
     if getattr(args, "stop_after_register", False):
         label = app.get("name") or args.name or name
         _out({"target": label, "app_id": app_id, "config": cfg_name, "adapter": adapter,
-              "validated": True, "key_stored": True}, args,
+              "validated": True, "transport": via, "transport_reason": via_why,
+              "reused": reused, "needs_bridge": via == "bridge",
+              "key_stored": via == "bridge"}, args,
              human=(f"\ntarget '{label}' is ready\n"
                     f"  app       {app_id}\n"
                     f"  adapter   {adapter}   (config '{cfg_name}', proven against the live target)\n"
@@ -4213,6 +4533,11 @@ def cmd_onboard(args):
                     f"  talk to it ascend chat '{label}'\n"
                     f"  re-check  ascend target check '{label}'"))
         return
+
+    if via == "api":
+        # Nothing to serve locally — the platform calls the target itself.
+        args.app, args.name = [app_id], getattr(args, "assessment_name", None) or f"{app_name} · first run"
+        return cmd_assess_run(args)
 
     # 4. bridge ----------------------------------------------------------------
     # A DURABLE relay -- the same supervised process `assess run` uses -- not a daemon thread
@@ -7560,7 +7885,8 @@ def build_parser():
     s.add_argument("--name", required=True, help="a label for this assessment run")
     s.add_argument("--controls", help="scope the run to these control ids — applied to the app, "
                                       "because the platform has no per-run override")
-    s.add_argument("--no-wait", action="store_true", help="return as soon as the run starts"); s.add_argument("--interval", type=int, default=20, help="seconds between status polls")
+    s.add_argument("--new", action="store_true", help="create a fresh assessment even if one on this app has not finished (default: pick the unfinished one up — assessments cannot be deleted)")
+    s.add_argument("--no-wait", action="store_true", help="return once the run is CONFIRMED started (about 45s), not when it finishes"); s.add_argument("--interval", type=int, default=20, help="seconds between status polls")
     s.add_argument("--timeout", type=int, default=7200, help="max seconds to wait for completion")
     s.add_argument("--force", action="store_true", help="run even if the selected controls would generate zero probes")
     s.add_argument("--with-recon", action="store_true",
@@ -7784,7 +8110,26 @@ def build_parser():
     _add_onboard_args(s, require_source=False)
     s.add_argument("--run", action="store_true",
                    help="continue into an assessment once the target is registered")
+    # New in the idempotent/direct-first flow. Deliberately NOT on the legacy `onboard` form,
+    # whose help text customers script against.
+    s.add_argument("--via", choices=["auto", "api", "bridge"], default="auto",
+                   help="how probes reach the target. auto (default): direct when the platform can "
+                        "reach the endpoint and speak its contract, a bridge only when it cannot. "
+                        "api: direct or fail. bridge: force a local relay.")
+    s.add_argument("--workspace", metavar="SLUG",
+                   help="which agent to target, on a host that serves several (see `target inspect`)")
+    s.add_argument("--no-profile", action="store_true",
+                   help="ignore a contract the target publishes and probe the endpoint instead")
+    s.add_argument("--purpose", help="one line on what the agent is for (business purpose)")
     s.set_defaults(func=cmd_target_add)
+
+    s = tg.add_parser("inspect", parents=[GLOBALS], formatter_class=_Fmt,
+                      help="look at a target first: what it is, what it needs, what is already registered")
+    s.add_argument("source", help="the target URL")
+    s.add_argument("--header", action="append", metavar="'Name: value'")
+    s.add_argument("--bearer", metavar="TOKEN")
+    s.add_argument("--insecure", action="store_true")
+    s.set_defaults(func=cmd_target_inspect)
 
     s = tg.add_parser("list", parents=[GLOBALS], formatter_class=_Fmt,
                       help="every target: its adapter, whether it is registered, whether it is serving")
