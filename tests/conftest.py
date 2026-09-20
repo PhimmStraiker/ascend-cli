@@ -356,3 +356,16 @@ import os as _os
 for _k in ("STRAIKER_PAT", "STRAIKER_TOKEN", "STRAIKER_DEMOPLATFORM_KEY",
            "STRAIKER_NEW_DISCOVER_PLATFORM_KEY", "STRAIKER_BRIDGE_API_KEY"):
     _os.environ.pop(_k, None)
+
+
+@pytest.fixture(autouse=True)
+def _no_settle_window(monkeypatch):
+    """`run()` watches a just-resumed assessment for 45 real seconds to prove it held. Against a
+    fake that is 45 seconds of sleeping per test, so the window is closed here; the tests that are
+    ABOUT the window set it themselves."""
+    try:
+        import api
+    except ImportError:
+        return
+    monkeypatch.setattr(api, "SETTLE_SECONDS", 0, raising=False)
+    monkeypatch.setattr(api, "SETTLE_EVERY", 0, raising=False)

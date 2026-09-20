@@ -87,6 +87,31 @@ POLL_MAX_CONSECUTIVE_ERRORS = 5
 TERMINAL_STATUSES = frozenset(
     {"completed", "complete", "done", "failed", "error", "cancelled", "canceled"})
 
+
+
+# How long a just-resumed run is watched before it is called started. Measured: a run the target
+# refuses falls back to paused within 10-20 seconds.
+SETTLE_SECONDS = 45
+SETTLE_EVERY = 5
+
+
+def is_finished(a: Any) -> bool:
+    """Whether an assessment is over, judged by evidence rather than by its status string alone.
+
+    Measured: the platform accepts a resume on a completed run and then reports it `running`
+    indefinitely, at progress 1 with `completed_at` set. Trusting the status there means polling a
+    finished run forever, or "picking up" one that has nothing left to do.
+    """
+    if not isinstance(a, dict):
+        return False
+    if str(a.get("status", "")).lower() in TERMINAL_STATUSES:
+        return True
+    try:
+        return bool(a.get("completed_at")) and float(a.get("progress") or 0) >= 1.0
+    except (TypeError, ValueError):
+        return False
+
+
 # Re-exchange this long before the JWT's own `exp`. Measured TTL is ~10 minutes.
 _JWT_REFRESH_SKEW_S = 60.0
 # Used only when a token carries no decodable `exp` (opaque token / shape change):
@@ -377,7 +402,46 @@ class AscendAPI:
                 "agentic": agentic, "warnings": warnings}
 
     def list_apps(self) -> Any:
-        return self._req("GET", "/ascend/applications")
+        return self._req("GET", "/ascend/applications?limit=100")
+
+    @staticmethod
+    def _rows(payload: Any) -> List[Dict[str, Any]]:
+        rows = payload if isinstance(payload, list) else (
+            (payload or {}).get("data") or (payload or {}).get("applications")
+            or (payload or {}).get("assessments") or (payload or {}).get("items") or [])
+        return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+
+    def find_app_by_name(self, name: Optional[str]) -> Optional[Dict[str, Any]]:
+        """The application already registered under this name, if any.
+
+        Registration is keyed on the name because that is the only identity the platform gives an
+        application that survives a re-wire. Exact match, case- and whitespace-insensitive. When
+        several share the name (older duplicates), the one with history wins, so adopting never
+        strands the runs an operator already paid for.
+        """
+        want = " ".join(str(name or "").split()).lower()
+        if not want:
+            return None
+        same = [a for a in self._rows(self.list_apps())
+                if " ".join(str(a.get("name") or "").split()).lower() == want]
+        if len(same) <= 1:
+            return same[0] if same else None
+        def history(a: Dict[str, Any]) -> int:
+            try:
+                return len(self._rows(self._req("GET", f"/ascend/applications/{a['id']}/assessments")))
+            except Exception:
+                return 0
+        return max(same, key=lambda a: (history(a), str(a.get("created_at") or "")))
+
+    def live_assessment(self, app_id: str) -> Optional[Dict[str, Any]]:
+        """The newest assessment on this app that has not finished, if any.
+
+        Assessments cannot be deleted. One that was created and never ran stays in the Console
+        forever, so a second attempt must pick the first one up rather than leave it behind.
+        """
+        rows = [r for r in self._rows(self._req("GET", f"/ascend/applications/{app_id}/assessments"))
+                if not is_finished(r)]
+        return max(rows, key=lambda r: str(r.get("created_at") or "")) if rows else None
 
     def get_app(self, app_id: str) -> Any:
         return self._req("GET", f"/ascend/applications/{app_id}")
@@ -556,6 +620,7 @@ class AscendAPI:
         # not the rare one. A poll tolerates a few consecutive transport errors before giving up.
         consecutive_errors = 0
         last = None
+        paused_polls = 0
         while time.time() < deadline:
             try:
                 a = self.get_assessment(app_id, aid)
@@ -572,56 +637,74 @@ class AscendAPI:
             prog = a.get("progress")
             if on_tick:
                 on_tick(status, prog, a)
-            if status in terminal:
+            if status in terminal or is_finished(a):
                 return a
+            # Nobody is going to resume it while this call blocks, so waiting out the timeout on a
+            # paused run is a two-hour hang that ends in the same answer.
+            paused_polls = paused_polls + 1 if status == "paused" else 0
+            if paused_polls >= 3:
+                return {**a, "stalled": True}
             time.sleep(min(interval, max(1, deadline - time.time())))
         raise AscendAPIError(f"poll timeout after {timeout}s; last status={last and last.get('status')}")
 
     # ---- high-level orchestration -------------------------------------------
     def run(self, app_id: str, name: str, *, wait: bool = True,
-            interval: int = 20, timeout: int = 7200, on_tick=None) -> Any:
-        """Create an assessment on an existing app, resume it, and (optionally) poll.
+            interval: int = 20, timeout: int = 7200, on_tick=None,
+            new: bool = False, settle: Optional[int] = None) -> Any:
+        """Start an assessment on an existing app, PROVE it started, and (optionally) poll.
 
-        When ``wait`` is True this returns ONLY a terminal payload or raises. It used to return a
-        non-terminal row after a transport error mid-poll, which the CLI then reported as a
-        finished run.
+        Reuses an unfinished assessment on the app instead of creating another (pass new=True to
+        force one): assessments cannot be deleted, so a second attempt must pick the first one up.
+        The status returned is the one the platform holds after a settle window — never an assumed
+        one. `started: False` with `auto_paused: True` means the platform took the run back to
+        paused on its own, which in practice is the target refusing its calls.
+
+        When ``wait`` is True this returns ONLY a terminal payload, a run that did not start, or
+        raises. It used to return a non-terminal row after a transport error mid-poll, which the
+        CLI then reported as a finished run.
         """
         t0 = time.time()
         def terminal_now():
             return TERMINAL_STATUSES
-        a = self.create_assessment(app_id, name)
-        aid = a.get("id") or a.get("assessment_id")
+        # Not wrapped: if this lookup fails, nothing has been created yet, and that is the safe
+        # place to fail. Creating "anyway" is how an unfinished run gets a twin that can never be
+        # deleted. (GETs are retried by the session, so an error here is not a blip.)
+        reused = None if new else self.live_assessment(app_id)
+        if reused:
+            a, aid = reused, reused.get("id")
+        else:
+            a = self.create_assessment(app_id, name)
+            aid = a.get("id") or a.get("assessment_id")
         if not aid:
             raise AscendAPIError(f"assessment create returned no id: {json.dumps(a)[:300]}")
-        # Carried through so the caller can say the run exists DESPITE the transport error, rather
-        # than reporting a failure the operator would retry into a duplicate.
         recovered = bool(a.get("recovered"))
         recovery_note = a.get("recovery_note")
         # Everything past this point acts on an assessment that DEMONSTRABLY EXISTS. A transport
         # error here must never be reported as "could not start the assessment": the run is on the
-        # platform burning the target's rate limit, and an operator told it failed will retry and
-        # start a second one. Observed live — a dropped connection during the poll reported
-        # "could not reach the API" for a run that was already at 45%.
-        #
-        # So: on any failure after the create, ask the platform what state the run is ACTUALLY in
-        # and report that.
+        # platform, and an operator told it failed will retry and start a second one.
         try:
             # Lifecycle (changed 2026-07): a new assessment is `created`, and resume on
             # `created` -> 409 invalid_assessment_state. Correct sequence is
             # create -> pause -> resume. Both transitions are 409-tolerant so a run that
             # is already in the desired state proceeds instead of aborting.
-            self._safe_transition(self.pause, app_id, aid, want="paused")
-            self._safe_transition(self.resume, app_id, aid, want="running")
-            if not wait:
-                out = {"app_id": app_id, "assessment_id": aid, "status": "running"}
-                if recovered:
-                    out.update({"recovered": True, "recovery_note": recovery_note,
-                                "recovery_needs_action": False})
+            if str(a.get("status", "")).lower() != "running":
+                self._safe_transition(self.pause, app_id, aid, want="paused")
+                self._safe_transition(self.resume, app_id, aid, want="running")
+            state = self.confirm_started(app_id, aid, settle=settle)
+            out = {**state, "app_id": app_id, "assessment_id": aid,
+                   "reused_assessment": bool(reused)}
+            if recovered:
+                out.update({"recovered": True, "recovery_note": recovery_note,
+                            "recovery_needs_action": False})
+            if not state.get("started") or not wait:
                 return out
             res = self.poll_assessment(app_id, aid, interval=interval, timeout=timeout,
                                        on_tick=on_tick)
-            if recovered and isinstance(res, dict):
-                res = {**res, "recovered": True, "recovery_note": recovery_note}
+            if isinstance(res, dict):
+                res = {**res, "assessment_id": aid, "started": True,
+                       "reused_assessment": bool(reused)}
+                if recovered:
+                    res.update({"recovered": True, "recovery_note": recovery_note})
             return res
         except Exception as exc:
             state = self._state_of(app_id, aid)
@@ -639,6 +722,7 @@ class AscendAPI:
                 if needs_action:
                     note += ". It is NOT running — resume it with `ascend assess resume`."
                 return {**state, "app_id": app_id, "assessment_id": aid,
+                        "started": status == "running",
                         "recovered": True, "recovery_note": note,
                         "recovery_needs_action": needs_action}
             # The caller asked to WAIT. Returning a non-terminal row here is how `assess run`
@@ -656,6 +740,31 @@ class AscendAPI:
                                        on_tick=on_tick)
             return {**res, "recovered": True,
                     "recovery_note": note + "; polling resumed and the run was followed to the end"}
+
+    def confirm_started(self, app_id: str, aid: str, *, settle: Optional[int] = None,
+                        every: Optional[int] = None) -> Dict[str, Any]:
+        """Watch a just-resumed run long enough to know whether it held.
+
+        Measured: a run whose target rejects the platform's calls answers `running` to the resume
+        and is back at `paused` 10-20 seconds later, with no reason recorded anywhere. Progress is
+        no use as a signal — a small run reports none at all until it completes. So the only
+        honest test is time: still `running` (or finished) after the settle window.
+        """
+        settle = SETTLE_SECONDS if settle is None else settle
+        every = SETTLE_EVERY if every is None else every
+        deadline = time.time() + settle
+        seen: List[str] = []
+        status = ""
+        while True:
+            state = self._state_of(app_id, aid) or {}
+            status = str(state.get("status", "")).lower()
+            seen.append(status)
+            if is_finished(state) or time.time() >= deadline:
+                break
+            time.sleep(max(every, 0.01))
+        held = status == "running" or is_finished(state)
+        return {"status": status or "unknown", "started": held,
+                "auto_paused": (not held) and "running" in seen and status == "paused"}
 
     def _state_of(self, app_id: str, aid: str):
         """Best-effort read of an assessment's real state. None if we cannot tell."""
@@ -939,7 +1048,17 @@ def _clean_templates(spec: Dict[str, Any]) -> Dict[str, Any]:
         return spec
     s = json.dumps(spec)
     s = s.replace("{{ PROMPT }}", "{{PROMPT}}").replace("{{ RESPONSE }}", "{{RESPONSE}}")
-    return json.loads(s)
+    out = json.loads(s)
+    # The wire shape, enforced where every create and patch passes through: templates are JSON
+    # STRINGS and headers are an ARRAY of {name, value}. Sent as objects the platform answers
+    # "request body is not valid JSON" — about a body that is perfectly valid JSON — so a caller
+    # that built the natural shape could not tell what it had done wrong.
+    for k in ("request_template", "response_template"):
+        if k in out and not isinstance(out[k], str):
+            out[k] = json.dumps(out[k])
+    if isinstance(out.get("headers"), dict):
+        out["headers"] = [{"name": n, "value": v} for n, v in out["headers"].items()]
+    return out
 
 
 _UUIDish = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)

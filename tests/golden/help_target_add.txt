@@ -15,7 +15,8 @@ usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] t
        [--size {small,medium,large}] [--qpm QPM] [--prompt PROMPT] [--settle SETTLE] [--headless]
        [--manual] [--timeout TIMEOUT] [--dry-run] [--force] [--wait] [--detail]
        [--interval INTERVAL] [--timeout-assess TIMEOUT_ASSESS] [--assessment-name ASSESSMENT_NAME]
-       [-v] [--run]
+       [-v] [--run] [--via {auto,api,bridge}] [--workspace SLUG] [--no-profile]
+       [--purpose PURPOSE]
        [source]
 
 positional arguments:
@@ -130,6 +131,15 @@ options:
                         assessment name (default: '<app> run 1') (default: None)
   -v, --verbose         debug logging for the bridge (default: False)
   --run                 continue into an assessment once the target is registered (default: False)
+  --via {auto,api,bridge}
+                        how probes reach the target. auto (default): direct when the platform can
+                        reach the endpoint and speak its contract, a bridge only when it cannot.
+                        api: direct or fail. bridge: force a local relay. (default: auto)
+  --workspace SLUG      which agent to target, on a host that serves several (see `target
+                        inspect`) (default: None)
+  --no-profile          ignore a contract the target publishes and probe the endpoint instead
+                        (default: False)
+  --purpose PURPOSE     one line on what the agent is for (business purpose) (default: None)
 
 examples:
   ascend target add https://your-bot.example.com/chat
