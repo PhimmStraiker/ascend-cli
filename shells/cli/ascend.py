@@ -2049,6 +2049,7 @@ def _diagnose_not_started(c, appid, res) -> str:
     The platform records no reason, so reproduce its call from here: send the app's own contract
     one benign prompt. A direct app whose target rejects that is the whole explanation.
     """
+    import api
     try:
         app = c.get_app(appid) or {}
     except Exception:
