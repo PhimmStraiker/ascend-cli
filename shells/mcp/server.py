@@ -320,6 +320,14 @@ def build_argv(name: str, arguments: dict[str, Any] | None) -> list[str]:
         elif kind == "flag":
             if val:
                 argv.append(pspec["flag"])
+        elif kind == "repeat":
+            # A flag argparse collects with action="append" — `--app a --app b`. Several CLI
+            # options are repeatable (a fleet of targets, several headers), and without this an
+            # agent could only ever drive one at a time: a list arrived here as its repr and was
+            # passed through as a single nonsense value.
+            for item in (val if isinstance(val, (list, tuple)) else [val]):
+                if item not in (None, ""):
+                    argv += [pspec["flag"], str(item)]
         else:  # option
             argv += [pspec["flag"], str(val)]
     return argv
