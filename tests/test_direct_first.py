@@ -364,3 +364,70 @@ class TestPublishedContract:
             headers={"x-demo-key": "p", "Authorization": "Bearer sk_b"}, body_fields={})
         assert cfg["body"]["apiKey"] == "sk_b"
         assert "Authorization" not in cfg["headers"]
+
+
+# ------------------------------------------------------------------ surviving a platform fault
+class TestSupervisedRun:
+    """Measured on prod 2026-09-20: a run against a target answering 55 of 55 calls in ~1.5s was
+    paused by the platform after 92s, 91s, 81s and 71s, advancing a few probes each time. The
+    operator cannot configure that away, so `assess run` can put the run back — bounded, and
+    never silently.
+
+    `resumes` counts only SUPERVISION resumes. `run()` also resumes once at the start to get the
+    assessment going, which is not the same thing and must not be reported as a platform pause.
+    """
+
+    def _client(self, script):
+        c = api.AscendAPI(token="s6r_pat_x")
+        seq = iter(script)
+        c.get_assessment = lambda a, aid: next(seq)
+        c.create_assessment = lambda a, n: {"id": "asmt_1"}
+        c.live_assessment = lambda a: None
+        c.pause = lambda a, aid: None
+        c.resumed = []
+        c.resume = lambda a, aid: c.resumed.append(aid)
+        return c
+
+    def test_a_platform_pause_is_resumed_and_the_run_finishes(self, monkeypatch):
+        monkeypatch.setattr(api.time, "sleep", lambda s: None)
+        script = ([{"status": "running"}] * 3 + [{"status": "paused"}] * 3
+                  + [{"status": "running"}] * 2 + [{"status": "complete", "total": 9}] * 3)
+        c = self._client(script)
+        out = c.run("aapp_1", "r", wait=True, settle=0, interval=1, resume_on_pause=3)
+        assert out["status"] == "complete"
+        assert out["resumes"] == 1
+        assert len(c.resumed) == 2, "one to start it, one to revive it"
+
+    def test_a_clean_run_still_carries_the_count(self, monkeypatch):
+        monkeypatch.setattr(api.time, "sleep", lambda s: None)
+        c = self._client([{"status": "running"}] * 3 + [{"status": "complete", "total": 4}] * 3)
+        out = c.run("aapp_1", "r", wait=True, settle=0, interval=1, resume_on_pause=3)
+        assert out["resumes"] == 0
+
+    def test_supervision_is_bounded(self, monkeypatch):
+        monkeypatch.setattr(api.time, "sleep", lambda s: None)
+        c = self._client([{"status": "running"}] * 2 + [{"status": "paused"}] * 400)
+        out = c.run("aapp_1", "r", wait=True, settle=0, interval=1, resume_on_pause=2)
+        assert out["stalled"] is True
+        assert out["resumes"] == 2, "it must give up, not resume forever"
+
+    def test_off_by_default(self, monkeypatch):
+        monkeypatch.setattr(api.time, "sleep", lambda s: None)
+        c = self._client([{"status": "running"}] * 2 + [{"status": "paused"}] * 40)
+        out = c.run("aapp_1", "r", wait=True, settle=0, interval=1)
+        assert out["stalled"] is True
+        assert len(c.resumed) == 1, "only the resume that started it"
+
+    def test_a_finished_run_is_never_resumed(self, monkeypatch):
+        monkeypatch.setattr(api.time, "sleep", lambda s: None)
+        # The platform accepts a resume on a completed run and then reports it running forever.
+        done = {"status": "paused", "progress": 1, "completed_at": "2026-09-20T06:00:00Z"}
+        c = self._client([{"status": "running"}] * 2 + [done] * 10)
+        out = c.run("aapp_1", "r", wait=True, settle=0, interval=1, resume_on_pause=3)
+        assert out["resumes"] == 0 and len(c.resumed) == 1
+
+    def test_the_command_reports_the_count_and_diagnoses_a_stall(self):
+        body = SRC[SRC.index("def cmd_assess_run("):SRC.index("def _diagnose_not_started(")]
+        assert 'res.get("resumes")' in body and "paused this run" in body
+        assert body.count("_diagnose_not_started(c, appid, res)") == 2, (
+            "a run that stalled mid-flight deserves the same tested diagnosis as one that never started")

@@ -604,7 +604,7 @@ class AscendAPI:
         return self._req("POST", f"/ascend/applications/{app_id}/assessments/{aid}/pause")
 
     def poll_assessment(self, app_id: str, aid: str, *, interval: int = 20,
-                        timeout: int = 7200, on_tick=None) -> Any:
+                        timeout: int = 7200, on_tick=None, on_pause=None) -> Any:
         """Poll until the assessment reaches a terminal status or timeout.
 
         Terminal statuses seen: completed / complete / failed / cancelled.
@@ -643,6 +643,13 @@ class AscendAPI:
             # paused run is a two-hour hang that ends in the same answer.
             paused_polls = paused_polls + 1 if status == "paused" else 0
             if paused_polls >= 3:
+                # …unless the caller is supervising it. Measured on prod: the platform pauses a
+                # run against a perfectly healthy target roughly every 90 seconds, and each
+                # resume advances it. Supervision is what lets such a run finish; it is never
+                # silent, because the count is returned and printed.
+                if on_pause and on_pause(a):
+                    paused_polls = 0
+                    continue
                 return {**a, "stalled": True}
             time.sleep(min(interval, max(1, deadline - time.time())))
         raise AscendAPIError(f"poll timeout after {timeout}s; last status={last and last.get('status')}")
@@ -650,7 +657,8 @@ class AscendAPI:
     # ---- high-level orchestration -------------------------------------------
     def run(self, app_id: str, name: str, *, wait: bool = True,
             interval: int = 20, timeout: int = 7200, on_tick=None,
-            new: bool = False, settle: Optional[int] = None) -> Any:
+            new: bool = False, settle: Optional[int] = None,
+            resume_on_pause: int = 0) -> Any:
         """Start an assessment on an existing app, PROVE it started, and (optionally) poll.
 
         Reuses an unfinished assessment on the app instead of creating another (pass new=True to
@@ -698,11 +706,29 @@ class AscendAPI:
                             "recovery_needs_action": False})
             if not state.get("started") or not wait:
                 return out
+            resumes = {"n": 0}
+
+            def _supervise(_state: Dict[str, Any]) -> bool:
+                """Put a platform-paused run back on its feet, up to the caller's limit.
+
+                Only reached for a run that is genuinely unfinished: `poll_assessment` returns on
+                a finished one before it asks. `resume_on_pause=0` makes this a no-op, which is
+                the default.
+                """
+                if resumes["n"] >= resume_on_pause:
+                    return False
+                resumes["n"] += 1
+                try:
+                    self.resume(app_id, aid)
+                except AscendAPIError:
+                    return False
+                return True
+
             res = self.poll_assessment(app_id, aid, interval=interval, timeout=timeout,
-                                       on_tick=on_tick)
+                                       on_tick=on_tick, on_pause=_supervise)
             if isinstance(res, dict):
                 res = {**res, "assessment_id": aid, "started": True,
-                       "reused_assessment": bool(reused)}
+                       "reused_assessment": bool(reused), "resumes": resumes["n"]}
                 if recovered:
                     res.update({"recovered": True, "recovery_note": recovery_note})
             return res
