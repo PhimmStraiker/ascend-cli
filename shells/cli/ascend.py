@@ -1949,6 +1949,7 @@ def cmd_assess_run(args):
         try:
             with tw:
                 res = c.run(appid, args.name, wait=True, new=getattr(args, "new", False),
+                            resume_on_pause=getattr(args, "resume_on_pause", 0),
                             interval=feed_interval, timeout=args.timeout, on_tick=_supervised_tick)
         except _BridgeUnavailable as e:
             bridge_gone = e
@@ -1997,12 +1998,15 @@ def cmd_assess_run(args):
     if not_started:
         res = {**res, "diagnosis": _diagnose_not_started(c, appid, res)}
     elif isinstance(res, dict) and res.get("stalled"):
-        res = {**res, "diagnosis": ("the run went back to paused on its own part-way through, "
-                                    "which is the target refusing or failing the platform's calls; "
-                                    "fix the target, then `ascend assess resume`")}
+        res = {**res, "diagnosis": _diagnose_not_started(c, appid, res)}
     elif isinstance(res, dict) and res.get("assessment_id"):
         verb = "picked up the unfinished run" if res.get("reused_assessment") else "assessment started"
         _say(args, f"{verb}  ({res['assessment_id']})", done=True)
+    if isinstance(res, dict) and res.get("resumes"):
+        # Never silent: supervision compensates for a platform fault, and hiding that would turn
+        # a reportable bug into folklore.
+        print(f"  note: the platform paused this run {res['resumes']}x while it was running; "
+              f"it was resumed each time.", file=sys.stderr)
     # --no-wait returns {app_id, assessment_id, status}; summarizing that prints a phantom
     # "risk ? score ? probes ?/?" header. Only summarize a real assessment payload.
     human = (_verdict(res, detail=getattr(args, "detail", False))
@@ -7886,6 +7890,10 @@ def build_parser():
     s.add_argument("--name", required=True, help="a label for this assessment run")
     s.add_argument("--controls", help="scope the run to these control ids — applied to the app, "
                                       "because the platform has no per-run override")
+    s.add_argument("--resume-on-pause", type=int, default=0, metavar="N",
+                   help="while waiting, put the run back on its feet up to N times if the PLATFORM "
+                        "pauses it (measured: a run against a healthy target is paused roughly every "
+                        "90s). The count is always reported. 0 disables.")
     s.add_argument("--new", action="store_true", help="create a fresh assessment even if one on this app has not finished (default: pick the unfinished one up — assessments cannot be deleted)")
     s.add_argument("--no-wait", action="store_true", help="return once the run is CONFIRMED started (about 45s), not when it finishes"); s.add_argument("--interval", type=int, default=20, help="seconds between status polls")
     s.add_argument("--timeout", type=int, default=7200, help="max seconds to wait for completion")

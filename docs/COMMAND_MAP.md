@@ -325,6 +325,7 @@ create->pause->resume->poll an assessment
 | `--all-bound` | — | — | every app with a stored bridge key (see `ascend keys list`) |
 | `--name` **(required)** | `NAME` | — | a label for this assessment run |
 | `--controls` | `CONTROLS` | — | scope the run to these control ids — applied to the app, because the platform has no per-run override |
+| `--resume-on-pause` | `N` | `0` | while waiting, put the run back on its feet up to N times if the PLATFORM pauses it (measured: a run against a healthy target is paused roughly every 90s). The count is always reported. 0 disables. |
 | `--new` | — | — | create a fresh assessment even if one on this app has not finished (default: pick the unfinished one up — assessments cannot be deleted) |
 | `--no-wait` | — | — | return once the run is CONFIRMED started (about 45s), not when it finishes |
 | `--interval` | `INTERVAL` | `20` | seconds between status polls |
