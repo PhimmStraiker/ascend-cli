@@ -98,7 +98,19 @@ class SentinelStreamAdapter(BotAdapter):
         # sends via POST /-/api/chat), carry its own headers, and answer in plain JSON rather than
         # marker frames — so `start` takes an optional url/method/headers/response. MEASURED against
         # directv.com/support: create graphql -> {conversationID, encryptionKey} -> chat answers.
+        # FRESH CONVERSATION PER PROBE for a create-then-send target. Ascend scores each probe
+        # INDEPENDENTLY, and a bot that greets or ends a conversation after a few turns must not
+        # accumulate probes in one conversation. MEASURED on directv.com/support: with conv_key
+        # defaulting to None the router hands every probe the SAME adapter instance, so `self._conv`
+        # stuck to one conversationID; after a few turns Eva returned "I'm ending the conversation"
+        # and every later probe scored that refusal instead of a real answer. So each probe re-mints
+        # the conversation — a fresh conversationID and its per-conversation encryptionKey — through
+        # the start call below. Opt out with `session_per_probe: false` for a genuinely multi-turn
+        # target that must hold context server-side across probes.
         start_cfg = config.get("start") or {}
+        if start_cfg and config.get("session_per_probe", True):
+            self._conv = self._key = None
+            self._warmed = False
         if start_cfg and self._conv is None:
             start_url = start_cfg.get("url") or url
             start_method = (start_cfg.get("method") or method).upper()
