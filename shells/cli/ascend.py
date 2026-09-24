@@ -594,8 +594,13 @@ def _persist_capture(evidence, url: str, explicit: str = "") -> str:
         if explicit:
             path = Path(explicit).expanduser()
         else:
+            # The per-credential STATE HOME (beside scans and relays), never the config dir. When
+            # the CLI runs from a checkout, config_dir() IS the repo's ./configs, so writing there
+            # dropped captured HAR traffic inside the source tree. Captures are private runtime
+            # state, so they live under ASCEND_HOME/captures like everything else the run produces.
+            import tenant as _tn  # noqa: PLC0415
             host = _slug(url.split("//", 1)[-1].split("/", 1)[0] or "capture")
-            path = Path(config_dir()) / "captures" / f"{host}-{time.strftime('%Y%m%d-%H%M%S')}.evidence.json"
+            path = _tn.ASCEND_HOME / "captures" / f"{host}-{time.strftime('%Y%m%d-%H%M%S')}.evidence.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         _write_private(str(path), json.dumps(evidence, indent=2, default=str))
         return str(path)
