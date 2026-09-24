@@ -4406,6 +4406,12 @@ def cmd_onboard(args):
         # Re-written only when something actually changed, so the no-login path stays byte-identical
         # and `--config <existing>` is not rewritten for nothing.
         cfg_path, cfg_name = _write_named_config(cfg, cfg_name, exact=True, quiet=True)
+    if getattr(args, "warmup", None):
+        # The OPERATOR (or the agent, having reasoned from a test) says this bot greets on turn one.
+        # A generic knob on the derived config; the adapter sends it once per conversation.
+        cfg["warmup"] = args.warmup
+        if cfg_path:
+            cfg_path, cfg_name = _write_named_config(cfg, cfg_name, exact=True, quiet=True)
     adapter = args.adapter or cfg.get("adapter")
     if not adapter:
         _die("could not determine the adapter type; set 'adapter' in the config or pass --adapter")
@@ -7574,8 +7580,21 @@ def _add_onboard_args(s, *, require_source):
                    help="name the adapter config (default: derived from the URL, e.g. "
                         "'myhost-com'). Use this and you always know what to pass to --config.")
     s.add_argument("--system-prompt", help="what the target is, for the assessment context")
+    s.add_argument("--warmup", metavar="MSG",
+                   help="a throwaway first message to send before each scored probe — for a bot "
+                        "that returns a fixed greeting to the FIRST turn of a conversation and only "
+                        "answers from the second turn on. Set it after a test probe shows a "
+                        "constant greeting; it is applied to the derived config's `warmup`.")
     s.add_argument("--controls", help="comma-separated control ids (validated before the run)")
     s.add_argument("--adapter", help="override the adapter type (default: from the config)")
+    if cloud_sources:
+        s.add_argument("--qualifier",
+                       help="with --arn: the AgentCore endpoint qualifier. Defaults to the one "
+                            "named in the ARN, else DEFAULT. Given here, it wins over both.")
+        s.add_argument("--response-path", metavar="DOTPATH",
+                       help="with --arn: where the answer is in the runtime's JSON reply, e.g. "
+                            "output.text. Omit and the adapter takes the first of the usual "
+                            "answer keys (output/response/result/text/answer/content/message).")
     _add_target_auth_args(s)
     s.add_argument("--allow-internal", action="store_true",
                    help="allow link-local/cloud-metadata hosts (169.254/fd00::) — off by default")
