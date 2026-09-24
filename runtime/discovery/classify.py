@@ -1247,6 +1247,11 @@ def compose(classified: Dict[str, Any]) -> Dict[str, Any]:
                     },
                     "message": {"body": _template_session_fields(
                         sp.get("message_body") or tparams.get("body", {"message": "{{PROMPT}}"}))},
+                    # WARMUP a conversational bot past a standardized first-turn greeting so the
+                    # scored probe is not the first message. MEASURED on directv's Eva: without it
+                    # every probe scored the greeting; with it the probe gets Eva's real reply. A
+                    # benign "hi" is harmless to a bot that answers on turn one.
+                    "warmup": "hi",
                 })
             else:
                 config.update({

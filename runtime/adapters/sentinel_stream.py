@@ -76,6 +76,7 @@ def parse_frames(text: str, begin: str, end: str):
 
 class SentinelStreamAdapter(BotAdapter):
     def __init__(self):
+        self._warmed = False
         self._conv = None
         self._key = None
         self._index = 0
@@ -129,8 +130,25 @@ class SentinelStreamAdapter(BotAdapter):
                 return self._fail(f"could not extract conversation id via '{conv_path}'", start_t,
                                   raw=utf8_text(r)[:400])
 
-        # 2. send the message
+        # 1.5 WARMUP once per conversation. Some agents (Sierra voice bots like directv's Eva)
+        # return a fixed greeting to the FIRST message of a conversation and only answer from the
+        # second turn on. A `warmup` sends a throwaway greeting so the scored probe is not the
+        # first message. MEASURED on directv: without it every probe scored the greeting; with it
+        # an sp_leak probe returns Eva's real refusal.
         msg_cfg = config.get("message") or {}
+        warmup = config.get("warmup")
+        if warmup and not self._warmed:
+            try:
+                requests.request(method, url,
+                                 json=self._render(msg_cfg.get("body", {"message": "{{PROMPT}}"}),
+                                                   prompt=str(warmup), conv=self._conv or "", key=self._key or ""),
+                                 headers=headers, timeout=timeout)
+            except requests.RequestException:
+                pass                       # a warmup that fails must not fail the probe
+            self._warmed = True
+            self._index += 1
+
+        # 2. send the message
         body = self._render(msg_cfg.get("body", {"message": "{{PROMPT}}"}),
                             prompt=prompt, conv=self._conv or "", key=self._key or "")
         try:
