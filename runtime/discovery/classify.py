@@ -222,6 +222,15 @@ def load_har(path: str, prompt_sent: Optional[str] = None) -> Dict[str, Any]:
     """
     with open(path, "r", encoding="utf-8") as fh:
         har = json.load(fh)
+    # A saved browser/HAR capture (`--save-evidence`, or the default persisted by `target add`)
+    # is ALREADY normalized evidence — {pairs, ws_messages} — not a raw .har with .log.entries.
+    # Accept it directly so a capture can be re-wired without re-driving the browser: the whole
+    # point of keeping it is that it is the source of truth, reusable for adapter-building and
+    # re-analysis. A real .har (no top-level `pairs`) goes through the converter as before.
+    if isinstance(har, dict) and isinstance(har.get("pairs"), list):
+        if prompt_sent and not har.get("prompt_sent"):
+            har = {**har, "prompt_sent": prompt_sent}
+        return har
     return har_to_evidence(har, prompt_sent=prompt_sent)
 
 

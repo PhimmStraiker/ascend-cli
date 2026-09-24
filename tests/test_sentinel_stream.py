@@ -107,3 +107,29 @@ def test_uuid_token_regenerates_per_request():
     import re
     assert re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
                         r1["idempotencyKey"]), "must be a uuid4"
+
+
+def test_start_supports_separate_json_create_endpoint(monkeypatch):
+    """A create step may live at a different endpoint than the message, carry its own headers, and
+    answer in plain JSON (Sierra: POST /graphql mints the id, POST /chat sends). PROVEN against
+    live directv.com/support."""
+    calls = []
+    def fake(method, u, **kw):
+        calls.append((method, u))
+        if u.endswith("/graphql"):
+            return _Resp('{"data":{"x":{"conversationID":"C-fresh","encryptionKey":"K-fresh"}}}')
+        # the message must carry the minted id/key and a fresh idempotency
+        body = json.loads(kw.get("json") and json.dumps(kw["json"]) or "{}")
+        assert body.get("conversationID") == "C-fresh", "message did not carry the created id"
+        assert body.get("encryptionKey") == "K-fresh", "message did not carry the created key"
+        return _Resp(_state("hi from the bot"))
+    monkeypatch.setattr("adapters.sentinel_stream.requests.request", fake)
+    cfg = {"url": "https://t/-/api/chat",
+           "start": {"url": "https://t/-/api/graphql", "response": "json",
+                     "conv_path": "data.x.conversationID", "key_path": "data.x.encryptionKey",
+                     "body": {"query": "mutation{}"}},
+           "message": {"body": {"conversationID": "{{CONV}}", "encryptionKey": "{{KEY}}",
+                                "idempotencyKey": "{{UUID}}", "content": "{{PROMPT}}"}}}
+    r = run_async(SentinelStreamAdapter().send_prompt("hello", cfg))
+    assert r["success"] and "hi from the bot" in r["response"], r
+    assert calls[0][1].endswith("/graphql") and calls[1][1].endswith("/chat"), calls

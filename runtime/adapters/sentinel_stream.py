@@ -92,21 +92,39 @@ class SentinelStreamAdapter(BotAdapter):
         end = config.get("end_marker", DEFAULT_END)
         ex = config.get("extract") or {}
 
-        # 1. bootstrap a conversation if configured and not already held
+        # 1. bootstrap a conversation if configured and not already held. The create call may live
+        # at a DIFFERENT endpoint than the message (Sierra mints the id via POST /-/api/graphql and
+        # sends via POST /-/api/chat), carry its own headers, and answer in plain JSON rather than
+        # marker frames — so `start` takes an optional url/method/headers/response. MEASURED against
+        # directv.com/support: create graphql -> {conversationID, encryptionKey} -> chat answers.
         start_cfg = config.get("start") or {}
         if start_cfg and self._conv is None:
+            start_url = start_cfg.get("url") or url
+            start_method = (start_cfg.get("method") or method).upper()
+            start_headers = {**headers, **(start_cfg.get("headers") or {})}
             try:
-                r = requests.request(method, url, json=self._render(start_cfg.get("body", {}), prompt="", conv="", key=""),
-                                     headers=headers, timeout=timeout)
+                r = requests.request(start_method, start_url,
+                                     json=self._render(start_cfg.get("body", {}), prompt="", conv="", key=""),
+                                     headers=start_headers, timeout=timeout)
                 r.raise_for_status()
             except requests.RequestException as e:
                 return self._fail(f"start failed: {e}", start_t,
                                   status_code=getattr(getattr(e, "response", None), "status_code", None))
             conv_path = start_cfg.get("conv_path", "conversationID")
             key_path = start_cfg.get("key_path", "encryptionKey")
-            for obj in parse_frames(utf8_text(r), begin, end):
-                self._conv = self._conv or _dot(obj, conv_path)
-                self._key = self._key or _dot(obj, key_path)
+            if start_cfg.get("response") == "json":
+                # A JSON create response (a GraphQL mutation, a REST create) — extract the id and
+                # key straight off the parsed body, not from BEGIN/END frames.
+                try:
+                    obj = r.json()
+                except Exception:
+                    obj = json.loads(utf8_text(r) or "{}")
+                self._conv = _dot(obj, conv_path)
+                self._key = _dot(obj, key_path)
+            else:
+                for obj in parse_frames(utf8_text(r), begin, end):
+                    self._conv = self._conv or _dot(obj, conv_path)
+                    self._key = self._key or _dot(obj, key_path)
             if not self._conv:
                 return self._fail(f"could not extract conversation id via '{conv_path}'", start_t,
                                   raw=utf8_text(r)[:400])
