@@ -4658,6 +4658,12 @@ def _detect_source(thing):
                 head = ""
             if '"log"' in head and '"entries"' in head:
                 return "har", str(p)
+            # A SAVED CAPTURE (`--save-evidence`, or the capture `target add` persists) is already
+            # normalized evidence — {"pairs": [...]} — not a raw HAR. It re-derives through the same
+            # path (load_har accepts it), so route it to `har`, NOT curl. Without this a reused
+            # capture is mis-read as a curl command and the whole point of keeping it is lost.
+            if '"pairs"' in head:
+                return "har", str(p)
             if '"adapter"' in head:
                 return "config", p.stem
             return "curl", str(p)

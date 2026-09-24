@@ -1021,7 +1021,7 @@ def classify_session(ev: Dict[str, Any], chat_idx: Optional[int]) -> Dict[str, A
     for i, p in enumerate(pairs):
         if _host_of(p["request"]["url"]) != chat_host:
             continue                      # a session for THIS chat comes from THIS service
-        rid, rfield = _first_id(p["response"]["json"]), None
+        rid, rfield = _session_first_id(p["response"]["json"]), None
         if not rid:
             continue
         rfield = _id_field_of(p["response"]["json"], rid)
@@ -1031,6 +1031,21 @@ def classify_session(ev: Dict[str, Any], chat_idx: Optional[int]) -> Dict[str, A
                 continue
             in_url = str(rid) in later["url"]
             in_body = str(rid) in (later["raw_body"] or "")
+            # An id that lands in the message body must land in a CONVERSATION/SESSION-named field
+            # to be the session. On a real page several minted values reach the chat body — a
+            # static auth `token`, a `releaseHash` — and only the one in a conversation-shaped
+            # field is the per-turn session. MEASURED on directv.com/support: `token` (from
+            # embedChatQuery) reached the chat body first and was wired as the session, so the
+            # create call minted a token instead of the conversationID and no probe answered.
+            if in_body and not in_url:
+                try:
+                    _lbody = json.loads(later["raw_body"] or "{}")
+                except Exception:
+                    _lbody = {}
+                _field = (_id_field_of(_lbody, str(rid)) or "").split(".")[-1].lower()
+                if _field not in ("conversationid", "conversation_id", "sessionid", "session_id",
+                                  "threadid", "thread_id", "session", "conversation"):
+                    continue              # lands in an auth/other field, not the session — keep looking
             if in_url or in_body:
                 if in_url and re.search(rf"/[^/]*/{re.escape(str(rid))}(/|$)", later["url"]):
                     return {"value": "create_conversation", "confidence": 0.8,
@@ -1039,11 +1054,22 @@ def classify_session(ev: Dict[str, Any], chat_idx: Optional[int]) -> Dict[str, A
                                                       "method": p["request"]["method"],
                                                       "body": _body_template(p["request"])},
                                        "id_field": rfield,
+                                       # The OBSERVED id, published so the body can be templated
+                                       # from the same value the URL is. Without it the body kept
+                                       # the recorded conversation's id forever.
+                                       "id_value": str(rid),
                                        "send_url_template": later["url"].replace(str(rid), "{{SESSION_ID}}")}}
                 return {"value": "create_session", "confidence": 0.75,
                         "evidence": f"id {rfield}={rid!r} from step {i} injected into step {j}'s body",
                         "params": {"session_endpoint": _strip_query(p["request"]["url"]),
+                                   "session_method": p["request"].get("method", "POST"),
+                                   "session_body": _body_template(p["request"]),
                                    "session_extract": rfield,
+                                   # the create response is JSON when the id came from a parsed body
+                                   "session_response": "json" if isinstance(p["response"].get("json"), (dict, list)) else "frames",
+                                   # a session key minted ALONGSIDE the id (Sierra: encryptionKey)
+                                   "key_path": _key_path_in(p["response"].get("json")),
+                                   "id_value": str(rid),
                                    "message_endpoint": _strip_query(later["url"]),
                                    "message_body": _body_template(later)}}
 
@@ -1197,13 +1223,39 @@ def compose(classified: Dict[str, Any]) -> Dict[str, Any]:
                 config["framing"] = tparams["framing"]
         elif tp == "sentinel_stream":
             adapter = "sentinel_stream"
-            config.update({
-                "url": endpoint,
-                "method": tparams.get("method", "POST"),
-                "begin_marker": tparams.get("begin_marker", "BOT_CHAT_EVENT_BEGIN"),
-                "end_marker": tparams.get("end_marker", "BOT_CHAT_EVENT_END"),
-                "message": {"body": tparams.get("body", {"message": "{{PROMPT}}"})},
-            })
+            sess = session or {}
+            sp = sess.get("params") or {}
+            if sess.get("value") in ("create_session", "create_conversation") and sp.get("session_endpoint"):
+                # CREATE-THEN-SEND. The target mints a fresh conversation id (and often a session
+                # key) per turn; freezing them replays a dead session and scores nothing. Wire the
+                # create call as a `start` step so the adapter mints a fresh one per probe, and
+                # template the per-conversation values in the message body. MEASURED + PROVEN
+                # against directv.com/support (Sierra): create graphql -> {conversationID,
+                # encryptionKey} -> chat answers.
+                config.update({
+                    "url": sp.get("message_endpoint") or endpoint,
+                    "method": tparams.get("method", "POST"),
+                    "begin_marker": tparams.get("begin_marker", "BOT_CHAT_EVENT_BEGIN"),
+                    "end_marker": tparams.get("end_marker", "BOT_CHAT_EVENT_END"),
+                    "start": {
+                        "url": sp.get("session_endpoint"),
+                        "method": sp.get("session_method", "POST"),
+                        "body": sp.get("session_body", {}),
+                        "response": sp.get("session_response", "json"),
+                        "conv_path": sp.get("session_extract", "conversationID"),
+                        "key_path": sp.get("key_path") or "encryptionKey",
+                    },
+                    "message": {"body": _template_session_fields(
+                        sp.get("message_body") or tparams.get("body", {"message": "{{PROMPT}}"}))},
+                })
+            else:
+                config.update({
+                    "url": endpoint,
+                    "method": tparams.get("method", "POST"),
+                    "begin_marker": tparams.get("begin_marker", "BOT_CHAT_EVENT_BEGIN"),
+                    "end_marker": tparams.get("end_marker", "BOT_CHAT_EVENT_END"),
+                    "message": {"body": tparams.get("body", {"message": "{{PROMPT}}"})},
+                })
         elif tp == "poll":
             # Generic watermark/transcript polling (create -> send -> GET-poll).
             adapter = "session_poll"
@@ -1551,6 +1603,57 @@ def _orig_header_name(pair: Dict[str, Any], lower: str) -> str:
     return _canonical_header(lower)
 
 
+_SESSION_KEY_NAMES = ("encryptionkey", "encryption_key", "sessionkey", "session_key",
+                     "secret", "sessionsecret")
+_NONCE_NAMES = ("idempotencykey", "idempotency_key", "nonce", "windowid", "window_id",
+                "requestid", "request_id", "messageid", "message_id")
+
+
+def _key_path_in(obj: Any) -> Optional[str]:
+    """Dot-path to a session KEY minted beside the conversation id (Sierra's encryptionKey), or
+    None. Same walk as `_id_field_of` but matched on the field NAME, since the value is opaque."""
+    def walk(o: Any, prefix: str) -> Optional[str]:
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if str(k).lower() in _SESSION_KEY_NAMES and isinstance(v, (str, int)):
+                    return f"{prefix}{k}"
+                r = walk(v, f"{prefix}{k}.")
+                if r:
+                    return r
+        elif isinstance(o, list):
+            for i, v in enumerate(o):
+                r = walk(v, f"{prefix}{i}.")
+                if r:
+                    return r
+        return None
+    return walk(obj, "") if obj is not None else None
+
+
+def _template_session_fields(body: Any) -> Any:
+    """Replace a captured message body's per-conversation VALUES with the adapter's tokens by
+    FIELD NAME: conversationID -> {{CONV}}, an encryption/session key -> {{KEY}}, an idempotency
+    key / nonce / window id -> a fresh {{UUID}} per request. Leaves {{PROMPT}} and everything else
+    as it was. This is what turns a frozen static replay into a per-probe create-then-send."""
+    def walk(o: Any) -> Any:
+        if isinstance(o, dict):
+            out = {}
+            for k, v in o.items():
+                lk = str(k).lower()
+                if lk in ("conversationid", "conversation_id", "threadid", "thread_id") and isinstance(v, str):
+                    out[k] = "{{CONV}}"
+                elif lk in _SESSION_KEY_NAMES and isinstance(v, str):
+                    out[k] = "{{KEY}}"
+                elif lk in _NONCE_NAMES and isinstance(v, str):
+                    out[k] = "{{UUID}}"
+                else:
+                    out[k] = walk(v)
+            return out
+        if isinstance(o, list):
+            return [walk(x) for x in o]
+        return o
+    return walk(body)
+
+
 def _body_template(req: Dict[str, Any]) -> Any:
     """Turn a captured request body into a template with ``{{PROMPT}}``."""
     body = req.get("json")
@@ -1761,6 +1864,32 @@ def _first_id(obj: Any) -> Optional[str]:
             if r:
                 return r
     return None
+
+
+_SESSION_ID_NAMES = ("conversationid", "conversation_id", "sessionid", "session_id",
+                    "threadid", "thread_id", "session", "conversation")
+
+
+def _session_first_id(obj: Any) -> Optional[str]:
+    """Like `_first_id`, but PREFER a value in a conversation/session-named field over the first
+    id-shaped value anywhere. A create response can carry several minted values (Sierra returns a
+    static `token` AND a per-turn `conversationID`); the session is the conversation-named one,
+    not whichever id happens to appear first. Falls back to `_first_id` when none is named."""
+    def named(o: Any) -> Optional[str]:
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if str(k).lower() in _SESSION_ID_NAMES and isinstance(v, (str, int)) and str(v):
+                    return str(v)
+                r = named(v)
+                if r:
+                    return r
+        elif isinstance(o, list):
+            for v in o:
+                r = named(v)
+                if r:
+                    return r
+        return None
+    return named(obj) or _first_id(obj)
 
 
 def _id_field_of(obj: Any, target: str) -> Optional[str]:
