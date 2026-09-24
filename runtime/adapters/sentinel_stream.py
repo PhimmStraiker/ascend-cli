@@ -43,6 +43,7 @@ Config:
   timeout_ms        (optional; otherwise derived from the platform's per-probe window)
 """
 import json
+import uuid
 import logging
 import re
 import time
@@ -132,6 +133,13 @@ class SentinelStreamAdapter(BotAdapter):
 
     def _render(self, template: Any, *, prompt: str, conv: str, key: str) -> Any:
         s = json.dumps(template)
+        # {{UUID}} is a FRESH value per render — an idempotency key, a nonce, a window id. These
+        # are unique-per-request by contract; freezing one from a capture makes the server dedup
+        # or reject every probe after the first (MEASURED on a Sierra target: every probe replayed
+        # one captured idempotencyKey and the run scored nothing). Each occurrence gets its own
+        # value, so a body carrying several distinct ones stays distinct.
+        while "{{UUID}}" in s:
+            s = s.replace("{{UUID}}", _json_escape(str(uuid.uuid4())), 1)
         s = (s.replace("{{PROMPT}}", _json_escape(prompt))
                .replace("{{CONV}}", _json_escape(str(conv)))
                .replace("{{KEY}}", _json_escape(str(key)))

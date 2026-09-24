@@ -89,3 +89,21 @@ def test_no_frames_fails_cleanly(monkeypatch):
 def test_missing_url_fails():
     r=run_async(SentinelStreamAdapter().send_prompt("q", {}))
     assert r["success"] is False and "needs a url" in r["error"]
+
+
+def test_uuid_token_regenerates_per_request():
+    """A per-request nonce ({{UUID}}) — an idempotency key, a window id — must be freshly minted
+    each render, never replayed. MEASURED on a Sierra target: one captured idempotencyKey replayed
+    on every probe made the server dedup them, so a run scored nothing. Distinct {{UUID}} slots in
+    one body get distinct values."""
+    a = SentinelStreamAdapter()
+    body = {"conversationID": "{{CONV}}", "idempotencyKey": "{{UUID}}",
+            "windowId": "{{UUID}}", "content": "{{PROMPT}}"}
+    r1 = a._render(body, prompt="hi", conv="C1", key="")
+    r2 = a._render(body, prompt="hi", conv="C1", key="")
+    assert r1["idempotencyKey"] != r2["idempotencyKey"], "idempotency key must change per request"
+    assert r1["idempotencyKey"] != r1["windowId"], "two {{UUID}} slots must be distinct"
+    assert r1["conversationID"] == "C1" and r1["content"] == "hi", "CONV/PROMPT still substitute"
+    import re
+    assert re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+                        r1["idempotencyKey"]), "must be a uuid4"

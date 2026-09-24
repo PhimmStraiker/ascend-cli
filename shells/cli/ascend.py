@@ -583,6 +583,26 @@ def _profile_for(args):
     return args._profile_cache
 
 
+def _persist_capture(evidence, url: str, explicit: str = "") -> str:
+    """Write a browser/HAR capture to a local file and return its path (best-effort, never raises).
+
+    Default location is `<config_dir>/captures/<host-slug>-<stamp>.evidence.json`, so every capture
+    is kept without the operator asking or passing a flag. An explicit `--save-evidence` path wins.
+    The file is the normalized evidence (request/response pairs + websocket frames) — the same shape
+    `--har` and the classifier read, so it can be re-analysed or re-wired directly."""
+    try:
+        if explicit:
+            path = Path(explicit).expanduser()
+        else:
+            host = _slug(url.split("//", 1)[-1].split("/", 1)[0] or "capture")
+            path = Path(config_dir()) / "captures" / f"{host}-{time.strftime('%Y%m%d-%H%M%S')}.evidence.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_private(str(path), json.dumps(evidence, indent=2, default=str))
+        return str(path)
+    except Exception:
+        return ""
+
+
 def _slug(text: str) -> str:
     return re.sub(r"-+", "-", re.sub(r"[^a-z0-9]+", "-", str(text).lower())).strip("-") or "target"
 
@@ -4333,9 +4353,22 @@ def cmd_onboard(args):
                              cdp=getattr(args, "cdp", None))
             for n in ev.get("notes", []):
                 _ok(n)
+            # HAR CAPTURE IS KEPT BY DEFAULT. The whole traffic — including the
+            # create-conversation call that fires at page load and mints a session target's id —
+            # is written to a local file the moment it is captured, before anything is derived
+            # from it. A summary config alone cannot be re-analysed or re-wired, and re-driving a
+            # bot-protected browser is often impossible; the capture is the one artefact that
+            # survives. Saved even when the prompt was not verified, so a failed/blocked capture
+            # can still be inspected. Never uploaded; 0600 like every other captured artefact.
+            _saved_capture = _persist_capture(ev, args.url, args.save_evidence if
+                                              getattr(args, "save_evidence", None) else "")
+            if _saved_capture:
+                _ok(f"capture kept: {_saved_capture}")
             if not ev.get("send_verified"):
                 _die("the capture never delivered the prompt to the target, so there is no "
                      "contract to build on.\n"
+                     f"  the raw capture is saved at {_saved_capture} — inspect it or pass it "
+                     "back with --har\n"
                      "  try:  --settle 15 | --manual | --har <file> | copy configs/example-*.json",
                      code=EXIT_ERROR)
         else:
