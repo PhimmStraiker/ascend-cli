@@ -1298,6 +1298,12 @@ def compose(classified: Dict[str, Any]) -> Dict[str, Any]:
                 # verbatim first reply. Set only when discovery saw a session-init turn.
                 if sp.get("warmup_message"):
                     config["warmup"] = sp["warmup_message"]
+                # Each Ascend probe is scored independently, so the adapter re-mints the
+                # conversation (fresh conversationID + encryptionKey) per probe rather than
+                # accumulating probes in one conversation a bot would eventually end. Explicit in
+                # the config so `target inspect` shows it and the operator can flip it off for a
+                # genuinely multi-turn target.
+                config["session_per_probe"] = True
             else:
                 config.update({
                     "url": endpoint,
