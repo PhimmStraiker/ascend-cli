@@ -1018,6 +1018,40 @@ def classify_session(ev: Dict[str, Any], chat_idx: Optional[int]) -> Dict[str, A
     # the chat request never uses is not the chat's session.
     chat_req = pairs[chat_idx]["request"]
     chat_host = _host_of(chat_req["url"])
+
+    def _probe_turn(rid: Any) -> Optional[Dict[str, Any]]:
+        # The turn to template the scored probe from is the SCORED PROMPT turn (chat_idx), which
+        # carries prompt_sent — NOT the first id-using turn, which on a create-then-send target is
+        # a session init/resume with no real message. MEASURED on directv.com/support: the init
+        # turn froze clientEvent.type="resume-session", left userMessageText empty, and mismapped
+        # {{PROMPT}} into memory.variables.VisitorID, so every probe scored the greeting. Because
+        # `_body_template` templates {{PROMPT}} BY VALUE (prompt_sent), sourcing the body from
+        # chat_idx places {{PROMPT}} in the real message field and sets clientEvent.type="message"
+        # automatically. Falls back to `later` only when chat_idx does not carry the flowed id.
+        cr = pairs[chat_idx]["request"]
+        if str(rid) in (cr.get("raw_body") or "") or str(rid) in cr.get("url", ""):
+            return cr
+        return None
+
+    def _opener_before_scored(rid: Any) -> Optional[str]:
+        # A create-then-send target mints a FRESH conversation per probe, so the scored probe is the
+        # conversation's first message — and greeting-first bots (Sierra voice/IVR, e.g. directv's
+        # Eva) answer only from the SECOND turn. When the capture shows a message-endpoint turn
+        # before the scored prompt that carries the session but no real message (a session
+        # init/resume), the probe would score the verbatim greeting, so a throwaway opener has to
+        # go first. Returns the opener text, or None. Generic: keyed on the shape (a distinct init
+        # turn to the message endpoint), no host names. PROVEN on directv: with it, an sp_leak probe
+        # returns Eva's real reply instead of the greeting.
+        scored = pairs[chat_idx]["request"]
+        for k in range(chat_idx):
+            q = pairs[k]["request"]
+            if _host_of(q["url"]) != chat_host:
+                continue
+            if (_same_endpoint(q, scored) and str(rid) in (q.get("raw_body") or "")
+                    and _request_has_prompt(q) is None):
+                return "hi"
+        return None
+
     for i, p in enumerate(pairs):
         if _host_of(p["request"]["url"]) != chat_host:
             continue                      # a session for THIS chat comes from THIS service
@@ -1047,6 +1081,11 @@ def classify_session(ev: Dict[str, Any], chat_idx: Optional[int]) -> Dict[str, A
                                   "threadid", "thread_id", "session", "conversation"):
                     continue              # lands in an auth/other field, not the session — keep looking
             if in_url or in_body:
+                # The scored probe is templated from the SCORED PROMPT turn (chat_idx), not the
+                # first id-using turn — see `_probe_turn`. A greeting-first target needs a throwaway
+                # opener before the probe — see `_opener_before_scored`.
+                msg_req = _probe_turn(rid) or later
+                warmup = _opener_before_scored(rid)
                 if in_url and re.search(rf"/[^/]*/{re.escape(str(rid))}(/|$)", later["url"]):
                     return {"value": "create_conversation", "confidence": 0.8,
                             "evidence": f"id {rfield}={rid!r} from step {i} appears in the URL path of step {j}",
@@ -1058,6 +1097,7 @@ def classify_session(ev: Dict[str, Any], chat_idx: Optional[int]) -> Dict[str, A
                                        # from the same value the URL is. Without it the body kept
                                        # the recorded conversation's id forever.
                                        "id_value": str(rid),
+                                       "warmup_message": warmup,
                                        "send_url_template": later["url"].replace(str(rid), "{{SESSION_ID}}")}}
                 return {"value": "create_session", "confidence": 0.75,
                         "evidence": f"id {rfield}={rid!r} from step {i} injected into step {j}'s body",
@@ -1070,8 +1110,13 @@ def classify_session(ev: Dict[str, Any], chat_idx: Optional[int]) -> Dict[str, A
                                    # a session key minted ALONGSIDE the id (Sierra: encryptionKey)
                                    "key_path": _key_path_in(p["response"].get("json")),
                                    "id_value": str(rid),
-                                   "message_endpoint": _strip_query(later["url"]),
-                                   "message_body": _body_template(later)}}
+                                   # a throwaway opener for greeting-first bots, so the scored probe
+                                   # is not the bot's verbatim first reply (None when not needed)
+                                   "warmup_message": warmup,
+                                   # the probe body comes from the SCORED turn, so {{PROMPT}} lands
+                                   # in the real message field, not a session-init/tracking field
+                                   "message_endpoint": _strip_query(msg_req["url"]),
+                                   "message_body": _body_template(msg_req)}}
 
     # warmup: an early greeting turn distinct from the scored prompt.
     chat_prompt = _request_has_prompt(pairs[chat_idx]["request"])
@@ -1248,6 +1293,11 @@ def compose(classified: Dict[str, Any]) -> Dict[str, Any]:
                     "message": {"body": _template_session_fields(
                         sp.get("message_body") or tparams.get("body", {"message": "{{PROMPT}}"}))},
                 })
+                # A throwaway opener for greeting-first bots (Sierra voice/IVR): the adapter sends
+                # it once per conversation before the scored probe, so the probe is not the bot's
+                # verbatim first reply. Set only when discovery saw a session-init turn.
+                if sp.get("warmup_message"):
+                    config["warmup"] = sp["warmup_message"]
             else:
                 config.update({
                     "url": endpoint,
