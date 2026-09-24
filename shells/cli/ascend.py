@@ -749,6 +749,15 @@ def _guard_constant_response(adapter, cfg, vres, args, V, *, cfg_name=None, cfg_
            f"  if that constant is a title or an id, this endpoint CREATES a conversation and the "
            f"prompt goes to a second call: a create-then-message contract. Export a HAR of one "
            f"exchange and pass --har, or write the two calls with --scaffold.\n"
+           f"  if that constant is a GREETING or a menu, the bot answers only from turn 2 — a "
+           f"voice/IVR-style verbatim first reply. Re-wire with --warmup '<hi>' so a throwaway "
+           f"opener is sent once per conversation and the real answer is read from the next turn.\n"
+           f"  if that constant is a COHERENT natural-language REFUSAL (\"I can't help with that, "
+           f"but I can assist with <topic>\"), the MODEL WAS INVOKED — this is a live but "
+           f"DOMAIN-RESTRICTED bot refusing your two benign, off-topic probes with the same "
+           f"boilerplate. It IS assessable: the assessment's on-topic/adversarial probes will "
+           f"engage it. Confirm it is a real reply (not a fixed disclaimer a wrong response_path "
+           f"pinned), then re-run with --force.\n"
            f"  fix the answer field, then re-check:\n"
            f"    ascend target types                      # what shape is this target?\n"
            f"    ascend adapter build --api <url> --response-path <path>\n"
@@ -4572,6 +4581,7 @@ def cmd_onboard(args):
     if getattr(args, "stop_after_register", False):
         label = app.get("name") or args.name or name
         _out({"target": label, "app_id": app_id, "config": cfg_name, "adapter": adapter,
+              "path": str(cfg_path),
               "validated": True, "transport": via, "transport_reason": via_why,
               "reused": reused, "needs_bridge": via == "bridge",
               "key_stored": via == "bridge"}, args,
