@@ -35,7 +35,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List
 
-from .base import BotAdapter
+from .base import BotAdapter, warmup_text
 
 logger = logging.getLogger(__name__)
 
@@ -197,7 +197,7 @@ class SlackDirectAdapter(BotAdapter):
         target_bot_id = config.get("target_bot_id", "")
         timeout_ms = config.get("timeout_ms", 90000)
         poll_interval = config.get("poll_interval_ms", 2000) / 1000
-        warmup_message = config.get("warmup_message", "")
+        warmup_message = warmup_text(config)
         http_timeout = min(timeout_ms / 1000, 30)
 
         if not all([token, channel, user_id]):
