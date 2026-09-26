@@ -965,6 +965,9 @@ onboard a target from a URL, a cURL/HAR file, or a saved config
 | `--system-prompt` | `SYSTEM_PROMPT` | — | what the target is, for the assessment context |
 | `--controls` | `CONTROLS` | — | comma-separated control ids (validated before the run) |
 | `--adapter` | `ADAPTER` | — | override the adapter type (default: from the config) |
+| `--warmup` | `MSG` | — | a throwaway first message to send before each scored probe — for a bot that returns a fixed greeting to the FIRST turn of a conversation and only answers from the second turn on. Set it after a test probe shows a constant greeting; it is applied to the derived config's `warmup`. |
+| `--qualifier` | `QUALIFIER` | — | with --arn: the AgentCore endpoint qualifier. Defaults to the one named in the ARN, else DEFAULT. Given here, it wins over both. |
+| `--response-path` | `DOTPATH` | — | with --arn: where the answer is in the runtime's JSON reply, e.g. output.text. Omit and the adapter takes the first of the usual answer keys (output/response/result/text/answer/content/message). |
 | `--header` *(repeatable)* | `'Name: value'` | — | raw header (repeatable), honored by all sources, e.g. 'X-Api-Key: …'. A value written env:NAME is read from the environment and never stored in the config |
 | `--bearer` | `TOKEN` | — | Authorization: Bearer <token>; env:NAME keeps the token out of the config |
 | `--api-key` | `NAME:VALUE[:in=header|query]` | — | API key, e.g. 'x-api-key:abc', 'key:abc:in=query', or 'x-api-key:env:MY_KEY' to reference the environment instead of storing the value |
