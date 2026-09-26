@@ -222,6 +222,15 @@ def load_har(path: str, prompt_sent: Optional[str] = None) -> Dict[str, Any]:
     """
     with open(path, "r", encoding="utf-8") as fh:
         har = json.load(fh)
+    # A saved browser/HAR capture (`--save-evidence`, or the default persisted by `target add`)
+    # is ALREADY normalized evidence — {pairs, ws_messages} — not a raw .har with .log.entries.
+    # Accept it directly so a capture can be re-wired without re-driving the browser: the whole
+    # point of keeping it is that it is the source of truth, reusable for adapter-building and
+    # re-analysis. A real .har (no top-level `pairs`) goes through the converter as before.
+    if isinstance(har, dict) and isinstance(har.get("pairs"), list):
+        if prompt_sent and not har.get("prompt_sent"):
+            har = {**har, "prompt_sent": prompt_sent}
+        return har
     return har_to_evidence(har, prompt_sent=prompt_sent)
 
 
@@ -581,6 +590,11 @@ def _http_params(req: Dict[str, Any], resp: Dict[str, Any], stream: Optional[str
     held = dropped_secret_headers(req["headers"])
     if held:
         params["withheld_headers"] = held
+        # The values travel beside the names so `compose` can turn them into references and the
+        # CLI can store them. `classify_evidence` lifts this key out of the layers before it
+        # returns, so a caller that dumps its result cannot print a credential by accident.
+        params["secret_header_values"] = captured_secret_headers(req["headers"])
+        params["secret_header_url"] = req.get("url") or ""
     if stream:
         # Derive the field mapping from the captured body rather than emitting a bare
         # {"format": "sse"}. Without text_path/token_types the adapter collects no frames and
@@ -914,6 +928,24 @@ def _auth_oauth2(login_pair: Dict[str, Any], url: str) -> Dict[str, Any]:
                        "client_secret_ref": "env:OAUTH_CLIENT_SECRET"}}
 
 
+def _dot_value(data: Any, path: Optional[str]) -> Any:
+    """Dot-path lookup used when checking where a derived value reappears."""
+    if not path or data is None:
+        return None
+    cur = data
+    for part in str(path).split("."):
+        if isinstance(cur, list):
+            try:
+                cur = cur[int(part)]
+                continue
+            except (ValueError, IndexError):
+                return None
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(part)
+    return cur
+
+
 def _auth_derived(pairs: List[Dict[str, Any]], chat_idx: int, origin_idx: int,
                   field: Optional[str], url: str, kind_hint: str = "bearer") -> Dict[str, Any]:
     login = pairs[origin_idx]["request"]
@@ -925,8 +957,30 @@ def _auth_derived(pairs: List[Dict[str, Any]], chat_idx: int, origin_idx: int,
     }
     if login.get("json") is not None:
         step["json"] = login["json"]
-    attach_header = "Cookie" if kind_hint == "cookie" else "Authorization"
-    attach_val = "{{AUTH_VALUE}}" if kind_hint == "cookie" else "Bearer {{AUTH_VALUE}}"
+    # ATTACH IT WHERE IT WAS SEEN. This guessed `Cookie` or `Authorization` from a hint, and a
+    # value that a target actually wants in a custom header — `X-Session-Token`, `X-CSRF-Token`,
+    # the double-submit pattern, which is ordinary — was attached to the wrong one. MEASURED: a
+    # bootstrap token that the capture shows being echoed in `X-Session-Token` was attached as a
+    # Cookie, so every probe came back 403 and the derivation looked wrong rather than
+    # mis-aimed. The evidence says where it goes; there is no need to guess.
+    attach_header, attach_val = None, None
+    try:
+        observed = _dot_value(pairs[origin_idx]["response"].get("json"), field) if field else None
+    except Exception:  # noqa: BLE001
+        observed = None
+    if observed:
+        token = str(observed)
+        for hname, hval in (pairs[chat_idx]["request"].get("headers") or {}).items():
+            if hname.startswith(":") or not isinstance(hval, str) or token not in hval:
+                continue
+            attach_header = _canonical_header(hname)
+            # Keep whatever wrapper the real request used — "Bearer x", "x", "k=x" — so a
+            # prefix the target requires is not dropped on the way through.
+            attach_val = hval.replace(token, "{{AUTH_VALUE}}")
+            break
+    if not attach_header:
+        attach_header = "Cookie" if kind_hint == "cookie" else "Authorization"
+        attach_val = "{{AUTH_VALUE}}" if kind_hint == "cookie" else "Bearer {{AUTH_VALUE}}"
     return {"value": "derived_multihop", "confidence": 0.7,
             "evidence": f"value from {login['method']} {_strip_query(login['url'])} reappears on the chat request",
             "params": {"steps": [step], "attach": {"headers": {attach_header: attach_val}},
@@ -1009,10 +1063,44 @@ def classify_session(ev: Dict[str, Any], chat_idx: Optional[int]) -> Dict[str, A
     # the chat request never uses is not the chat's session.
     chat_req = pairs[chat_idx]["request"]
     chat_host = _host_of(chat_req["url"])
+
+    def _probe_turn(rid: Any) -> Optional[Dict[str, Any]]:
+        # The turn to template the scored probe from is the SCORED PROMPT turn (chat_idx), which
+        # carries prompt_sent — NOT the first id-using turn, which on a create-then-send target is
+        # a session init/resume with no real message. MEASURED on directv.com/support: the init
+        # turn froze clientEvent.type="resume-session", left userMessageText empty, and mismapped
+        # {{PROMPT}} into memory.variables.VisitorID, so every probe scored the greeting. Because
+        # `_body_template` templates {{PROMPT}} BY VALUE (prompt_sent), sourcing the body from
+        # chat_idx places {{PROMPT}} in the real message field and sets clientEvent.type="message"
+        # automatically. Falls back to `later` only when chat_idx does not carry the flowed id.
+        cr = pairs[chat_idx]["request"]
+        if str(rid) in (cr.get("raw_body") or "") or str(rid) in cr.get("url", ""):
+            return cr
+        return None
+
+    def _opener_before_scored(rid: Any) -> Optional[str]:
+        # A create-then-send target mints a FRESH conversation per probe, so the scored probe is the
+        # conversation's first message — and greeting-first bots (Sierra voice/IVR, e.g. directv's
+        # Eva) answer only from the SECOND turn. When the capture shows a message-endpoint turn
+        # before the scored prompt that carries the session but no real message (a session
+        # init/resume), the probe would score the verbatim greeting, so a throwaway opener has to
+        # go first. Returns the opener text, or None. Generic: keyed on the shape (a distinct init
+        # turn to the message endpoint), no host names. PROVEN on directv: with it, an sp_leak probe
+        # returns Eva's real reply instead of the greeting.
+        scored = pairs[chat_idx]["request"]
+        for k in range(chat_idx):
+            q = pairs[k]["request"]
+            if _host_of(q["url"]) != chat_host:
+                continue
+            if (_same_endpoint(q, scored) and str(rid) in (q.get("raw_body") or "")
+                    and _request_has_prompt(q) is None):
+                return "hi"
+        return None
+
     for i, p in enumerate(pairs):
         if _host_of(p["request"]["url"]) != chat_host:
             continue                      # a session for THIS chat comes from THIS service
-        rid, rfield = _first_id(p["response"]["json"]), None
+        rid, rfield = _session_first_id(p["response"]["json"]), None
         if not rid:
             continue
         rfield = _id_field_of(p["response"]["json"], rid)
@@ -1022,7 +1110,27 @@ def classify_session(ev: Dict[str, Any], chat_idx: Optional[int]) -> Dict[str, A
                 continue
             in_url = str(rid) in later["url"]
             in_body = str(rid) in (later["raw_body"] or "")
+            # An id that lands in the message body must land in a CONVERSATION/SESSION-named field
+            # to be the session. On a real page several minted values reach the chat body — a
+            # static auth `token`, a `releaseHash` — and only the one in a conversation-shaped
+            # field is the per-turn session. MEASURED on directv.com/support: `token` (from
+            # embedChatQuery) reached the chat body first and was wired as the session, so the
+            # create call minted a token instead of the conversationID and no probe answered.
+            if in_body and not in_url:
+                try:
+                    _lbody = json.loads(later["raw_body"] or "{}")
+                except Exception:
+                    _lbody = {}
+                _field = (_id_field_of(_lbody, str(rid)) or "").split(".")[-1].lower()
+                if _field not in ("conversationid", "conversation_id", "sessionid", "session_id",
+                                  "threadid", "thread_id", "session", "conversation"):
+                    continue              # lands in an auth/other field, not the session — keep looking
             if in_url or in_body:
+                # The scored probe is templated from the SCORED PROMPT turn (chat_idx), not the
+                # first id-using turn — see `_probe_turn`. A greeting-first target needs a throwaway
+                # opener before the probe — see `_opener_before_scored`.
+                msg_req = _probe_turn(rid) or later
+                warmup = _opener_before_scored(rid)
                 if in_url and re.search(rf"/[^/]*/{re.escape(str(rid))}(/|$)", later["url"]):
                     return {"value": "create_conversation", "confidence": 0.8,
                             "evidence": f"id {rfield}={rid!r} from step {i} appears in the URL path of step {j}",
@@ -1030,13 +1138,30 @@ def classify_session(ev: Dict[str, Any], chat_idx: Optional[int]) -> Dict[str, A
                                                       "method": p["request"]["method"],
                                                       "body": _body_template(p["request"])},
                                        "id_field": rfield,
+                                       # The OBSERVED id, published so the body can be templated
+                                       # from the same value the URL is. Without it the body kept
+                                       # the recorded conversation's id forever.
+                                       "id_value": str(rid),
+                                       "warmup_message": warmup,
                                        "send_url_template": later["url"].replace(str(rid), "{{SESSION_ID}}")}}
                 return {"value": "create_session", "confidence": 0.75,
                         "evidence": f"id {rfield}={rid!r} from step {i} injected into step {j}'s body",
                         "params": {"session_endpoint": _strip_query(p["request"]["url"]),
+                                   "session_method": p["request"].get("method", "POST"),
+                                   "session_body": _body_template(p["request"]),
                                    "session_extract": rfield,
-                                   "message_endpoint": _strip_query(later["url"]),
-                                   "message_body": _body_template(later)}}
+                                   # the create response is JSON when the id came from a parsed body
+                                   "session_response": "json" if isinstance(p["response"].get("json"), (dict, list)) else "frames",
+                                   # a session key minted ALONGSIDE the id (Sierra: encryptionKey)
+                                   "key_path": _key_path_in(p["response"].get("json")),
+                                   "id_value": str(rid),
+                                   # a throwaway opener for greeting-first bots, so the scored probe
+                                   # is not the bot's verbatim first reply (None when not needed)
+                                   "warmup_message": warmup,
+                                   # the probe body comes from the SCORED turn, so {{PROMPT}} lands
+                                   # in the real message field, not a session-init/tracking field
+                                   "message_endpoint": _strip_query(msg_req["url"]),
+                                   "message_body": _body_template(msg_req)}}
 
     # warmup: an early greeting turn distinct from the scored prompt.
     chat_prompt = _request_has_prompt(pairs[chat_idx]["request"])
@@ -1138,6 +1263,71 @@ def _preset_for_url(url: str) -> Optional[str]:
     return None
 
 
+def _origin_of(url: str) -> str:
+    m = re.match(r"(https?://[^/]+)", url or "")
+    return m.group(1) if m else ""
+
+
+def _field_from(text: str, keys) -> Optional[str]:
+    """A config value out of a request body, whether it was JSON or form/query encoded."""
+    from urllib.parse import unquote
+    for k in keys:
+        m = re.search(r'"%s"\s*:\s*"([^"]+)"' % re.escape(k), text or "")
+        if m:
+            return m.group(1)
+        m = re.search(r'(?:^|[&?])%s=([^&\s]+)' % re.escape(k), text or "")
+        if m:
+            return unquote(m.group(1))
+    return None
+
+
+def _scrt2_config_from_evidence(ev: Dict[str, Any], endpoint: str) -> Dict[str, Any]:
+    """Derive the Salesforce Embedded Messaging (SCRT2) adapter's four config fields FROM THE
+    CAPTURE, so the agent wires the widget itself instead of reporting them "missing" and leaving
+    the operator to hand-fill them. This is the whole class of `*.my.salesforce-scrt.com` chat
+    widgets. scrt_base = the scrt host; org_id / developer_name / capabilities_ver = the
+    authorization (accessToken) call body; widget_origin = the Origin those calls carried.
+    Only fields it can actually derive are set; anything it cannot is left for validate to name."""
+    pairs = ev.get("pairs", []) if isinstance(ev, dict) else []
+    out: Dict[str, Any] = {}
+    urls = [endpoint] + [str((p.get("request") or {}).get("url", "")) for p in pairs]
+    for u in urls:
+        if "salesforce-scrt.com" in (u or "").lower():
+            out["scrt_base"] = _origin_of(u)
+            break
+    for p in pairs:
+        req = p.get("request") or {}
+        u = str(req.get("url", "")).lower()
+        if "iamessage" in u and ("authorization" in u or "accesstoken" in u):
+            body = req.get("json") if isinstance(req.get("json"), dict) else {}
+            raw = req.get("raw_body") or ""
+            oid = body.get("orgId") or body.get("org_id") or _field_from(raw, ("orgId", "org_id"))
+            dev = (body.get("developerName") or body.get("esDeveloperName") or body.get("eswConfigDevName")
+                   or _field_from(raw, ("developerName", "esDeveloperName", "eswConfigDevName")))
+            cap = body.get("capabilitiesVersion") or _field_from(raw, ("capabilitiesVersion",))
+            if oid:
+                out["org_id"] = str(oid)
+            if dev:
+                out["developer_name"] = str(dev)
+            if cap:
+                out["capabilities_ver"] = str(cap)
+            break
+    for p in pairs:
+        req = p.get("request") or {}
+        if "salesforce-scrt.com" in str(req.get("url", "")).lower():
+            origin = (req.get("headers") or {}).get("origin")
+            if origin:
+                out["widget_origin"] = origin.rstrip("/")
+                break
+    return out
+
+
+# How each preset adapter fills its own config from the capture. A preset with no filler keeps the
+# old behaviour (endpoint hint only); the ones here derive what they saw so the agent wires them
+# without asking the operator for values already in the traffic.
+_PRESET_FILLERS = {"scrt2_direct": _scrt2_config_from_evidence}
+
+
 def compose(classified: Dict[str, Any]) -> Dict[str, Any]:
     """Fold the six classified layers into a runnable adapter config.
 
@@ -1146,6 +1336,7 @@ def compose(classified: Dict[str, Any]) -> Dict[str, Any]:
     Secrets are referenced via ``env:`` placeholders, never inlined.
     """
     layers = classified["layers"] if "layers" in classified else classified
+    ev = classified.get("evidence") if isinstance(classified, dict) else None
     transport = layers["transport"]
     auth = layers["auth"]
     lifecycle = layers["auth_lifecycle"]
@@ -1188,13 +1379,50 @@ def compose(classified: Dict[str, Any]) -> Dict[str, Any]:
                 config["framing"] = tparams["framing"]
         elif tp == "sentinel_stream":
             adapter = "sentinel_stream"
-            config.update({
-                "url": endpoint,
-                "method": tparams.get("method", "POST"),
-                "begin_marker": tparams.get("begin_marker", "BOT_CHAT_EVENT_BEGIN"),
-                "end_marker": tparams.get("end_marker", "BOT_CHAT_EVENT_END"),
-                "message": {"body": tparams.get("body", {"message": "{{PROMPT}}"})},
-            })
+            sess = session or {}
+            sp = sess.get("params") or {}
+            if sess.get("value") in ("create_session", "create_conversation") and sp.get("session_endpoint"):
+                # CREATE-THEN-SEND. The target mints a fresh conversation id (and often a session
+                # key) per turn; freezing them replays a dead session and scores nothing. Wire the
+                # create call as a `start` step so the adapter mints a fresh one per probe, and
+                # template the per-conversation values in the message body. MEASURED + PROVEN
+                # against directv.com/support (Sierra): create graphql -> {conversationID,
+                # encryptionKey} -> chat answers.
+                config.update({
+                    "url": sp.get("message_endpoint") or endpoint,
+                    "method": tparams.get("method", "POST"),
+                    "begin_marker": tparams.get("begin_marker", "BOT_CHAT_EVENT_BEGIN"),
+                    "end_marker": tparams.get("end_marker", "BOT_CHAT_EVENT_END"),
+                    "start": {
+                        "url": sp.get("session_endpoint"),
+                        "method": sp.get("session_method", "POST"),
+                        "body": sp.get("session_body", {}),
+                        "response": sp.get("session_response", "json"),
+                        "conv_path": sp.get("session_extract", "conversationID"),
+                        "key_path": sp.get("key_path") or "encryptionKey",
+                    },
+                    "message": {"body": _template_session_fields(
+                        sp.get("message_body") or tparams.get("body", {"message": "{{PROMPT}}"}))},
+                })
+                # A throwaway opener for greeting-first bots (Sierra voice/IVR): the adapter sends
+                # it once per conversation before the scored probe, so the probe is not the bot's
+                # verbatim first reply. Set only when discovery saw a session-init turn.
+                if sp.get("warmup_message"):
+                    config["warmup"] = sp["warmup_message"]
+                # Each Ascend probe is scored independently, so the adapter re-mints the
+                # conversation (fresh conversationID + encryptionKey) per probe rather than
+                # accumulating probes in one conversation a bot would eventually end. Explicit in
+                # the config so `target inspect` shows it and the operator can flip it off for a
+                # genuinely multi-turn target.
+                config["session_per_probe"] = True
+            else:
+                config.update({
+                    "url": endpoint,
+                    "method": tparams.get("method", "POST"),
+                    "begin_marker": tparams.get("begin_marker", "BOT_CHAT_EVENT_BEGIN"),
+                    "end_marker": tparams.get("end_marker", "BOT_CHAT_EVENT_END"),
+                    "message": {"body": tparams.get("body", {"message": "{{PROMPT}}"})},
+                })
         elif tp == "poll":
             # Generic watermark/transcript polling (create -> send -> GET-poll).
             adapter = "session_poll"
@@ -1221,8 +1449,13 @@ def compose(classified: Dict[str, Any]) -> Dict[str, Any]:
             adapter = "session_api"
             config = _session_api_from_session(session, tparams)
     else:
-        # Preset adapter: keep endpoint hints; operator fills preset-specific keys.
+        # Preset adapter: derive its own config from the capture where we know how, so the agent
+        # wires it itself. A filler that cannot find a field leaves it out; validate names what is
+        # still missing rather than the derivation guessing.
         config["_preset_endpoint"] = endpoint
+        filler = _PRESET_FILLERS.get(adapter)
+        if filler and isinstance(ev, dict):
+            config.update({k: v for k, v in filler(ev, endpoint).items() if v})
 
     # Non-secret request headers.
     if tparams.get("headers"):
@@ -1240,6 +1473,40 @@ def compose(classified: Dict[str, Any]) -> Dict[str, Any]:
     # Layer blocks (auth secrets always via env refs).
     if auth.get("value") and auth["value"] != "none":
         config["auth"] = _auth_block(auth)
+    # THE CREDENTIAL THE CAPTURE ACTUALLY SAW.
+    #
+    # Everything above this line describes auth the classifier INFERRED. What the browser really
+    # presented is `secret_header_values`, and until now it was discarded — so a target behind
+    # any authentication at all, which is every target worth testing, was registered with a
+    # config that could not authenticate. `classify_auth` emitted `env:DISCOVERED_TOKEN` for the
+    # bearer case, a variable name that appears nowhere else in this repository except the docs.
+    #
+    # Replaying the header VERBATIM is deliberate, and it is why this is one block rather than a
+    # mode per scheme. `Authorization: Bearer eyJ…`, `Cookie: sid=…`, `X-Window-Token: …` are all
+    # just headers the target accepted thirty seconds ago. Reconstructing them from a parsed
+    # scheme plus a token is a second chance to get the prefix wrong for no benefit.
+    #
+    # A DYNAMIC block is left alone. oauth2 / csrf / derived_multihop re-acquire credentials
+    # during the run, which a captured value cannot do, so replacing one of those with a frozen
+    # header would trade a working mechanism for an expiring one.
+    _values = tparams.get("secret_header_values") or {}
+    _dynamic = isinstance(config.get("auth"), dict) and \
+        config["auth"].get("type") in ("oauth2", "csrf", "derived_multihop")
+    if _values and not _dynamic:
+        _url = tparams.get("secret_header_url") or endpoint or ""
+        refs = {name: f"env:{secret_var_name(_url, name)}" for name in sorted(_values)}
+        config["auth"] = {"type": "static", "mode": "headers", "headers": refs}
+        # Not a lost cause, just not this mechanism's job — say so where it will be read.
+        config["_captured_credentials"] = sorted(refs)
+    elif _values and _dynamic:
+        config["_captured_credentials_unused"] = {
+            "headers": sorted(_values),
+            "why": (f"the capture also saw {len(_values)} credential header(s), but this target "
+                    f"authenticates with '{config['auth'].get('type')}', which re-acquires "
+                    f"credentials during a run. A frozen header would expire mid-run; the live "
+                    f"mechanism is kept instead."),
+        }
+
     config["auth_lifecycle"] = _lifecycle_block(lifecycle)
     config["identity"] = {"mode": identity.get("params", {}).get("mode", "fixed")}
 
@@ -1376,6 +1643,32 @@ def _sse_create_from_session(session: Dict[str, Any], chat_path: str) -> Dict[st
     return out
 
 
+def _template_session_id(body: Any, observed_id: Any, variable: str = "SESSION_ID") -> Any:
+    """Replace the id captured during the recording with `{{SESSION_ID}}` wherever it appears.
+
+    The URL was templated and the BODY was not, so a derived session_api config sent the id of
+    the conversation that happened to be open when the capture was taken — forever. MEASURED on
+    a target documented as wanting the id "in URL AND body": the adapter created a fresh thread,
+    addressed it correctly in the path, and posted the OLD id in the body. Every probe came back
+    400, which reads as a broken target rather than a broken config.
+
+    Worth stating plainly: a stale id in a body is the kind of defect that survives a green
+    wire-time check on some targets and fails only under a real run, because the recorded
+    conversation is often still alive when the check runs and dead by the time probes start.
+    """
+    if not observed_id:
+        return body
+    token = str(observed_id)
+    placeholder = "{{%s}}" % variable
+    if isinstance(body, str):
+        return body.replace(token, placeholder)
+    if isinstance(body, dict):
+        return {k: _template_session_id(v, token, variable) for k, v in body.items()}
+    if isinstance(body, list):
+        return [_template_session_id(v, token, variable) for v in body]
+    return body
+
+
 def _session_api_from_session(session: Dict[str, Any], tparams: Dict[str, Any]) -> Dict[str, Any]:
     p = session.get("params", {})
     if session["value"] == "create_conversation":
@@ -1386,7 +1679,8 @@ def _session_api_from_session(session: Dict[str, Any], tparams: Dict[str, Any]) 
             "session_extract": p.get("id_field", "id"),
             "session_variable": "SESSION_ID",
             "message_endpoint": p.get("send_url_template", ""),
-            "message_body": tparams.get("body", {"message": "{{PROMPT}}"}),
+            "message_body": _template_session_id(
+                tparams.get("body", {"message": "{{PROMPT}}"}), p.get("id_value")),
             "response_path": tparams.get("response_path", "messages.0.message"),
         }
     return {
@@ -1394,7 +1688,9 @@ def _session_api_from_session(session: Dict[str, Any], tparams: Dict[str, Any]) 
         "session_extract": p.get("session_extract", "sessionId"),
         "session_variable": "SESSION_ID",
         "message_endpoint": p.get("message_endpoint", ""),
-        "message_body": p.get("message_body", tparams.get("body", {"message": "{{PROMPT}}"})),
+        "message_body": _template_session_id(
+            p.get("message_body", tparams.get("body", {"message": "{{PROMPT}}"})),
+            p.get("id_value") or p.get("session_id_value")),
         "response_path": tparams.get("response_path", "messages.0.message"),
     }
 
@@ -1485,7 +1781,25 @@ def classify_evidence(evidence: Dict[str, Any]) -> Dict[str, Any]:
         "transport": transport, "auth": auth, "auth_lifecycle": lifecycle,
         "session": session, "identity": identity, "rate": rate,
     }
-    config = compose({"layers": layers})
+    config = compose({"layers": layers, "evidence": ev})
+
+
+    # Lift the captured credential VALUES out of `layers` and into their own key, then delete
+    # them from the layer params. Two reasons, and the second is the one that matters:
+    #
+    #   1. The caller needs them, to put in the 0600 store before it validates or registers.
+    #   2. `layers` is returned to the caller and is the natural thing to print, log or attach to
+    #      a support bundle — `--json` emits it wholesale. A credential reachable at
+    #      `layers.transport.params.secret_header_values` is a credential that ends up in a
+    #      ticket. Having exactly one place to look after this point is worth the extra step.
+    tp = layers.get("transport", {}).get("params") or {}
+    secrets = {}
+    if tp.get("secret_header_values"):
+        url = tp.get("secret_header_url") or ""
+        secrets = {secret_var_name(url, name): value
+                   for name, value in tp["secret_header_values"].items()}
+    tp.pop("secret_header_values", None)
+    tp.pop("secret_header_url", None)
 
     unresolved = [name for name in LAYER_NAMES
                   if layers[name]["value"] is None or layers[name]["confidence"] < LOW_CONF]
@@ -1493,6 +1807,7 @@ def classify_evidence(evidence: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "layers": layers,
         "config": config,
+        "secrets": secrets,
         "overall_confidence": round(overall, 3),
         "unresolved": unresolved,
         "chat_pair_index": chat_idx,
@@ -1531,6 +1846,43 @@ def dropped_secret_headers(headers: Dict[str, str]) -> List[str]:
                   and _looks_secret_header(k, v))
 
 
+def captured_secret_headers(headers: Dict[str, str]) -> Dict[str, str]:
+    """The credential headers WITH their values — `{Canonical-Name: value}`.
+
+    The counterpart to `dropped_secret_headers`, which names them and nothing else. Keeping the
+    value is the whole point of watching a signed-in session: the browser presented exactly what
+    the target requires, and a capture that discards it produces a target that can never
+    authenticate. MEASURED: 10 probes leased, 10 delivered, **0 answered**, because the endpoint
+    wanted an `X-Window-Token` that had been seen, recognised, and thrown away.
+
+    What is returned here must never be written into a config file. `compose` puts an `env:`
+    reference in the config and the caller puts the value in the 0600 store — which is the
+    arrangement `layers/auth.py` has specified from the beginning and that this path never used.
+    """
+    return {_canonical_header(k): v for k, v in headers.items()
+            if not k.startswith(":") and k not in _NEVER_SECRET
+            and isinstance(v, str) and v.strip()
+            and _looks_secret_header(k, v)}
+
+
+def secret_var_name(url: str, header: str) -> str:
+    """The environment-variable name for one (target, header) credential.
+
+    Host-scoped, because `env:DISCOVERED_TOKEN` — the name this module emitted for years — is
+    the same string for every target anyone ever captures. Two targets in one shell would have
+    overwritten each other, which is only invisible because nothing ever set it: grep the repo
+    and `DISCOVERED_TOKEN` appears at its emission sites and in the docs, and nowhere else. It
+    was a reference to a variable that by construction did not exist.
+    """
+    from urllib.parse import urlparse  # noqa: PLC0415
+    host = ""
+    try:
+        host = (urlparse(url or "").hostname or "").strip()
+    except ValueError:
+        host = ""
+    slug = re.sub(r"[^A-Z0-9]+", "_", f"{host}_{header}".upper()).strip("_")
+    return f"ASCEND_SECRET_{slug}" if slug else "ASCEND_SECRET_TARGET"
+
 def _canonical_header(name_lower: str) -> str:
     special = {"content-type": "Content-Type", "user-agent": "User-Agent",
                "accept": "Accept", "accept-language": "Accept-Language"}
@@ -1540,6 +1892,57 @@ def _canonical_header(name_lower: str) -> str:
 def _orig_header_name(pair: Dict[str, Any], lower: str) -> str:
     # We stored headers lowercased; return a canonicalized display name.
     return _canonical_header(lower)
+
+
+_SESSION_KEY_NAMES = ("encryptionkey", "encryption_key", "sessionkey", "session_key",
+                     "secret", "sessionsecret")
+_NONCE_NAMES = ("idempotencykey", "idempotency_key", "nonce", "windowid", "window_id",
+                "requestid", "request_id", "messageid", "message_id")
+
+
+def _key_path_in(obj: Any) -> Optional[str]:
+    """Dot-path to a session KEY minted beside the conversation id (Sierra's encryptionKey), or
+    None. Same walk as `_id_field_of` but matched on the field NAME, since the value is opaque."""
+    def walk(o: Any, prefix: str) -> Optional[str]:
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if str(k).lower() in _SESSION_KEY_NAMES and isinstance(v, (str, int)):
+                    return f"{prefix}{k}"
+                r = walk(v, f"{prefix}{k}.")
+                if r:
+                    return r
+        elif isinstance(o, list):
+            for i, v in enumerate(o):
+                r = walk(v, f"{prefix}{i}.")
+                if r:
+                    return r
+        return None
+    return walk(obj, "") if obj is not None else None
+
+
+def _template_session_fields(body: Any) -> Any:
+    """Replace a captured message body's per-conversation VALUES with the adapter's tokens by
+    FIELD NAME: conversationID -> {{CONV}}, an encryption/session key -> {{KEY}}, an idempotency
+    key / nonce / window id -> a fresh {{UUID}} per request. Leaves {{PROMPT}} and everything else
+    as it was. This is what turns a frozen static replay into a per-probe create-then-send."""
+    def walk(o: Any) -> Any:
+        if isinstance(o, dict):
+            out = {}
+            for k, v in o.items():
+                lk = str(k).lower()
+                if lk in ("conversationid", "conversation_id", "threadid", "thread_id") and isinstance(v, str):
+                    out[k] = "{{CONV}}"
+                elif lk in _SESSION_KEY_NAMES and isinstance(v, str):
+                    out[k] = "{{KEY}}"
+                elif lk in _NONCE_NAMES and isinstance(v, str):
+                    out[k] = "{{UUID}}"
+                else:
+                    out[k] = walk(v)
+            return out
+        if isinstance(o, list):
+            return [walk(x) for x in o]
+        return o
+    return walk(body)
 
 
 def _body_template(req: Dict[str, Any]) -> Any:
@@ -1752,6 +2155,32 @@ def _first_id(obj: Any) -> Optional[str]:
             if r:
                 return r
     return None
+
+
+_SESSION_ID_NAMES = ("conversationid", "conversation_id", "sessionid", "session_id",
+                    "threadid", "thread_id", "session", "conversation")
+
+
+def _session_first_id(obj: Any) -> Optional[str]:
+    """Like `_first_id`, but PREFER a value in a conversation/session-named field over the first
+    id-shaped value anywhere. A create response can carry several minted values (Sierra returns a
+    static `token` AND a per-turn `conversationID`); the session is the conversation-named one,
+    not whichever id happens to appear first. Falls back to `_first_id` when none is named."""
+    def named(o: Any) -> Optional[str]:
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if str(k).lower() in _SESSION_ID_NAMES and isinstance(v, (str, int)) and str(v):
+                    return str(v)
+                r = named(v)
+                if r:
+                    return r
+        elif isinstance(o, list):
+            for v in o:
+                r = named(v)
+                if r:
+                    return r
+        return None
+    return named(obj) or _first_id(obj)
 
 
 def _id_field_of(obj: Any, target: str) -> Optional[str]:

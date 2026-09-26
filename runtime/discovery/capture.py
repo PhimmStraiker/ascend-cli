@@ -96,6 +96,58 @@ def _browser_channels(preferred=None):
     return ["chrome", "msedge", None]
 
 
+def _pairs_from_har_file(path: str) -> List[Dict[str, Any]]:
+    """HAR entries in the same shape the live response handler produces."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return []
+    out: List[Dict[str, Any]] = []
+    for e in (data.get("log", {}) or {}).get("entries", []):
+        req = e.get("request", {}) or {}
+        resp = e.get("response", {}) or {}
+        content = resp.get("content", {}) or {}
+        out.append({
+            "request": {"method": req.get("method", "GET"), "url": req.get("url", ""),
+                        "headers": req.get("headers", []),
+                        "raw_body": (req.get("postData", {}) or {}).get("text")},
+            "response": {"status": resp.get("status", 0), "headers": resp.get("headers", []),
+                         "raw_body": content.get("text"),
+                         "content_type": content.get("mimeType", "")},
+        })
+    return out
+
+
+def _augment_pairs_from_har(pairs: List[Dict[str, Any]], har_path: Optional[str],
+                            notes: List[str]) -> None:
+    """Fold the driven session's OWN recorded HAR into the evidence — including the page bootstrap
+    (GET documents/inline scripts the live filter skips) where widget config like a Salesforce ESW
+    bootstrap lives. The browser was just open; there is no reason to open it a second time or ask
+    the operator to save a HAR by hand (owner, 2026-09-26). Best-effort; a HAR problem is never
+    fatal to a capture that already has live pairs."""
+    if not har_path or not os.path.exists(har_path):
+        return
+    try:
+        seen = {(p.get("request", {}).get("method"), p.get("request", {}).get("url")) for p in pairs}
+        added = 0
+        for hp in _pairs_from_har_file(har_path):
+            key = (hp["request"]["method"], hp["request"]["url"])
+            if key not in seen:
+                pairs.append(hp)
+                seen.add(key)
+                added += 1
+        if added:
+            notes.append(f"recorded the session HAR and read {added} more request(s) from it, "
+                         f"including the page bootstrap — no second capture needed")
+    except Exception:
+        pass
+    finally:
+        try:
+            os.remove(har_path)
+        except Exception:
+            pass
+
+
 async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: int,
                          settle_s: int, manual: bool = False, manual_wait_s: int = 180,
                          extra_headers: Optional[Dict[str, str]] = None,
@@ -111,6 +163,7 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
     ws_messages: List[Dict[str, Any]] = []
     notes: List[str] = []
     recipe: Dict[str, Any] = {}
+    _har_path: Optional[str] = None
 
     async with async_playwright() as pw:
         launch_kw = {"headless": headless,
@@ -167,6 +220,16 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
             ctx_kw["no_viewport"] = True
         if extra_headers:
             ctx_kw["extra_http_headers"] = extra_headers
+        # Record the WHOLE session as a HAR (bodies embedded). Playwright writes it when the
+        # context closes; we read the bootstrap out of it below. Only for a context WE create — an
+        # attached CDP browser's context cannot be given a recorder after the fact.
+        if not cdp:
+            import tempfile
+            _fd, _har_path = tempfile.mkstemp(suffix=".har", prefix="ascend-capture-")
+            os.close(_fd)
+            ctx_kw["record_har_path"] = _har_path
+            ctx_kw["record_har_content"] = "embed"
+            ctx_kw["record_har_mode"] = "full"
         # Optional: record a video of the browser as it drives itself (for demos / auditing).
         # Uses Playwright's built-in viewport recorder — no OS screen-recording permission needed.
         _viddir = os.environ.get("ASCEND_CAPTURE_VIDEO_DIR")
@@ -273,6 +336,7 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
                     pass
             if not cdp:                       # never close the operator's own browser
                 await browser.close()
+            _augment_pairs_from_har(pairs, _har_path, notes)
 
             def _in_traffic_m(needle):
                 if not needle: return False
@@ -417,6 +481,8 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
                 pass
         if not cdp:                       # never close the operator's own browser
             await browser.close()
+
+    _augment_pairs_from_har(pairs, _har_path, notes)
 
     # HARD VERIFICATION: typing into a box proves nothing — the prompt must appear in
     # real traffic. Two silent failure modes this catches: (a) we typed into a site

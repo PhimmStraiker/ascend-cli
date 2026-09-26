@@ -43,6 +43,7 @@ Config:
   timeout_ms        (optional; otherwise derived from the platform's per-probe window)
 """
 import json
+import uuid
 import logging
 import re
 import time
@@ -75,6 +76,7 @@ def parse_frames(text: str, begin: str, end: str):
 
 class SentinelStreamAdapter(BotAdapter):
     def __init__(self):
+        self._warmed = False
         self._conv = None
         self._key = None
         self._index = 0
@@ -91,27 +93,74 @@ class SentinelStreamAdapter(BotAdapter):
         end = config.get("end_marker", DEFAULT_END)
         ex = config.get("extract") or {}
 
-        # 1. bootstrap a conversation if configured and not already held
+        # 1. bootstrap a conversation if configured and not already held. The create call may live
+        # at a DIFFERENT endpoint than the message (Sierra mints the id via POST /-/api/graphql and
+        # sends via POST /-/api/chat), carry its own headers, and answer in plain JSON rather than
+        # marker frames — so `start` takes an optional url/method/headers/response. MEASURED against
+        # directv.com/support: create graphql -> {conversationID, encryptionKey} -> chat answers.
+        # FRESH CONVERSATION PER PROBE for a create-then-send target. Ascend scores each probe
+        # INDEPENDENTLY, and a bot that greets or ends a conversation after a few turns must not
+        # accumulate probes in one conversation. MEASURED on directv.com/support: with conv_key
+        # defaulting to None the router hands every probe the SAME adapter instance, so `self._conv`
+        # stuck to one conversationID; after a few turns Eva returned "I'm ending the conversation"
+        # and every later probe scored that refusal instead of a real answer. So each probe re-mints
+        # the conversation — a fresh conversationID and its per-conversation encryptionKey — through
+        # the start call below. Opt out with `session_per_probe: false` for a genuinely multi-turn
+        # target that must hold context server-side across probes.
         start_cfg = config.get("start") or {}
+        if start_cfg and config.get("session_per_probe", True):
+            self._conv = self._key = None
+            self._warmed = False
         if start_cfg and self._conv is None:
+            start_url = start_cfg.get("url") or url
+            start_method = (start_cfg.get("method") or method).upper()
+            start_headers = {**headers, **(start_cfg.get("headers") or {})}
             try:
-                r = requests.request(method, url, json=self._render(start_cfg.get("body", {}), prompt="", conv="", key=""),
-                                     headers=headers, timeout=timeout)
+                r = requests.request(start_method, start_url,
+                                     json=self._render(start_cfg.get("body", {}), prompt="", conv="", key=""),
+                                     headers=start_headers, timeout=timeout)
                 r.raise_for_status()
             except requests.RequestException as e:
                 return self._fail(f"start failed: {e}", start_t,
                                   status_code=getattr(getattr(e, "response", None), "status_code", None))
             conv_path = start_cfg.get("conv_path", "conversationID")
             key_path = start_cfg.get("key_path", "encryptionKey")
-            for obj in parse_frames(utf8_text(r), begin, end):
-                self._conv = self._conv or _dot(obj, conv_path)
-                self._key = self._key or _dot(obj, key_path)
+            if start_cfg.get("response") == "json":
+                # A JSON create response (a GraphQL mutation, a REST create) — extract the id and
+                # key straight off the parsed body, not from BEGIN/END frames.
+                try:
+                    obj = r.json()
+                except Exception:
+                    obj = json.loads(utf8_text(r) or "{}")
+                self._conv = _dot(obj, conv_path)
+                self._key = _dot(obj, key_path)
+            else:
+                for obj in parse_frames(utf8_text(r), begin, end):
+                    self._conv = self._conv or _dot(obj, conv_path)
+                    self._key = self._key or _dot(obj, key_path)
             if not self._conv:
                 return self._fail(f"could not extract conversation id via '{conv_path}'", start_t,
                                   raw=utf8_text(r)[:400])
 
-        # 2. send the message
+        # 1.5 WARMUP once per conversation. Some agents (Sierra voice bots like directv's Eva)
+        # return a fixed greeting to the FIRST message of a conversation and only answer from the
+        # second turn on. A `warmup` sends a throwaway greeting so the scored probe is not the
+        # first message. MEASURED on directv: without it every probe scored the greeting; with it
+        # an sp_leak probe returns Eva's real refusal.
         msg_cfg = config.get("message") or {}
+        warmup = config.get("warmup")
+        if warmup and not self._warmed:
+            try:
+                requests.request(method, url,
+                                 json=self._render(msg_cfg.get("body", {"message": "{{PROMPT}}"}),
+                                                   prompt=str(warmup), conv=self._conv or "", key=self._key or ""),
+                                 headers=headers, timeout=timeout)
+            except requests.RequestException:
+                pass                       # a warmup that fails must not fail the probe
+            self._warmed = True
+            self._index += 1
+
+        # 2. send the message
         body = self._render(msg_cfg.get("body", {"message": "{{PROMPT}}"}),
                             prompt=prompt, conv=self._conv or "", key=self._key or "")
         try:
@@ -132,6 +181,13 @@ class SentinelStreamAdapter(BotAdapter):
 
     def _render(self, template: Any, *, prompt: str, conv: str, key: str) -> Any:
         s = json.dumps(template)
+        # {{UUID}} is a FRESH value per render — an idempotency key, a nonce, a window id. These
+        # are unique-per-request by contract; freezing one from a capture makes the server dedup
+        # or reject every probe after the first (MEASURED on a Sierra target: every probe replayed
+        # one captured idempotencyKey and the run scored nothing). Each occurrence gets its own
+        # value, so a body carrying several distinct ones stays distinct.
+        while "{{UUID}}" in s:
+            s = s.replace("{{UUID}}", _json_escape(str(uuid.uuid4())), 1)
         s = (s.replace("{{PROMPT}}", _json_escape(prompt))
                .replace("{{CONV}}", _json_escape(str(conv)))
                .replace("{{KEY}}", _json_escape(str(key)))
