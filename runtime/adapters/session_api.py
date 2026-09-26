@@ -29,7 +29,7 @@ from typing import Any, Dict, Optional
 
 import requests
 
-from .base import BotAdapter, resolve_timeout_s
+from .base import BotAdapter, resolve_timeout_s, warmup_text
 from .websocket_direct import _json_escape
 
 logger = logging.getLogger(__name__)
@@ -102,7 +102,7 @@ class SessionAPIAdapter(BotAdapter):
             # Some agents return a mandatory greeting/consent on the FIRST message; send a
             # throwaway first so the probe gets the real answer, not a false PASS on the greeting.
             resolved_endpoint = message_endpoint.replace(f"{{{{{variable_name}}}}}", str(session_value))
-            warmup_message = config.get("warmup_message") or config.get("session_greeting")   # #75 alias
+            warmup_message = warmup_text(config)   # warmup_message / warmup / session_greeting (#75 alias)
             if warmup_message:
                 wb = json.dumps(config.get("message_body", {}))
                 wb = wb.replace("{{PROMPT}}", _json_escape(str(warmup_message)))

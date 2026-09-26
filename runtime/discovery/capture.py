@@ -118,6 +118,32 @@ def _pairs_from_har_file(path: str) -> List[Dict[str, Any]]:
     return out
 
 
+def _durable_har_path(url: str) -> str:
+    """A HAR path under the per-credential state home, so EVERY browser run keeps its full session
+    HAR for review — not a tempfile deleted the moment its pairs are folded in.
+
+    The whole session (page bootstrap, the create-conversation call, auth headers) is the one
+    artefact that survives a run, and re-driving a bot-protected widget is often impossible, so the
+    HAR is worth keeping without the operator asking. It lands beside the evidence JSON in
+    `ASCEND_HOME/captures/` and is chmod 0600 after Playwright writes it (it carries auth headers).
+    Falls back to a tempfile only if the state home cannot be resolved (capture.py imported outside
+    the CLI runtime, e.g. a unit test), so a capture never fails for want of a place to write.
+    """
+    import time as _time
+    host = re.sub(r"[^a-z0-9]+", "-", (url.split("//", 1)[-1].split("/", 1)[0] or "capture").lower()).strip("-") or "capture"
+    stamp = _time.strftime("%Y%m%d-%H%M%S")
+    try:
+        import tenant as _tenant  # runtime module; on the path only under the CLI runtime
+        d = _tenant.ASCEND_HOME / "captures"
+        d.mkdir(parents=True, exist_ok=True)
+        return str(d / f"{host}-{stamp}.har")
+    except Exception:
+        import tempfile
+        fd, p = tempfile.mkstemp(suffix=".har", prefix=f"ascend-capture-{host}-")
+        os.close(fd)
+        return p
+
+
 def _augment_pairs_from_har(pairs: List[Dict[str, Any]], har_path: Optional[str],
                             notes: List[str]) -> None:
     """Fold the driven session's OWN recorded HAR into the evidence — including the page bootstrap
@@ -142,10 +168,14 @@ def _augment_pairs_from_har(pairs: List[Dict[str, Any]], har_path: Optional[str]
     except Exception:
         pass
     finally:
+        # KEEP the HAR — it is the full session, saved for review. It carries auth headers, so it
+        # is locked to the owner like every other captured artefact (best-effort). Said in a note,
+        # so every caller that prints capture notes tells the operator where it is.
         try:
-            os.remove(har_path)
+            os.chmod(har_path, 0o600)
         except Exception:
             pass
+        notes.append(f"HAR saved for review: {har_path}")
 
 
 async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: int,
@@ -224,9 +254,7 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
         # context closes; we read the bootstrap out of it below. Only for a context WE create — an
         # attached CDP browser's context cannot be given a recorder after the fact.
         if not cdp:
-            import tempfile
-            _fd, _har_path = tempfile.mkstemp(suffix=".har", prefix="ascend-capture-")
-            os.close(_fd)
+            _har_path = _durable_har_path(url)
             ctx_kw["record_har_path"] = _har_path
             ctx_kw["record_har_content"] = "embed"
             ctx_kw["record_har_mode"] = "full"
@@ -335,6 +363,10 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
                 except Exception:
                     pass
             if not cdp:                       # never close the operator's own browser
+                try:
+                    await ctx.close()         # writes the HAR to disk — Playwright flushes it on
+                except Exception:             # CONTEXT close, not browser close
+                    pass
                 await browser.close()
             _augment_pairs_from_har(pairs, _har_path, notes)
 
@@ -351,7 +383,8 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
             return {"pairs": pairs, "ws_messages": ws_messages, "notes": notes,
                     "prompt_sent": prompt if verified_m else None,
                     "send_attempted": True, "send_verified": verified_m,
-                    "reply_text": None, "url": url}
+                    "reply_text": None, "url": url,
+                    "har_path": _har_path if _har_path and os.path.exists(_har_path) else None}
 
         # ---- open the widget -------------------------------------------------
         # Widgets live in the page, in shadow DOM, or in a cross-origin iframe. Try the
@@ -480,6 +513,10 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
             except Exception:
                 pass
         if not cdp:                       # never close the operator's own browser
+            try:
+                await ctx.close()         # writes the HAR to disk — Playwright flushes it on
+            except Exception:             # CONTEXT close, not browser close
+                pass
             await browser.close()
 
     _augment_pairs_from_har(pairs, _har_path, notes)
@@ -510,6 +547,7 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
               "prompt_sent": prompt if verified else None,
               "send_attempted": sent, "send_verified": verified,
               "reply_text": reply_text, "url": url,
+              "har_path": _har_path if _har_path and os.path.exists(_har_path) else None,
               "browser_recipe": recipe if recipe.get("input_selector") else None}
     if nav_failed and not verified and nav_diag:
         # surface the real cause (DNS/refused/timeout/bot-wall) instead of a generic stop
