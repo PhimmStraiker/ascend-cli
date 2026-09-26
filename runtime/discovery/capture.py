@@ -362,11 +362,12 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
                     await asyncio.wait(pending_tasks, timeout=10)
                 except Exception:
                     pass
-            if not cdp:                       # never close the operator's own browser
-                try:
-                    await ctx.close()         # writes the HAR to disk — Playwright flushes it on
-                except Exception:             # CONTEXT close, not browser close
+            if not cdp:                       # flush the HAR: Playwright writes it on CONTEXT close;
+                try:                          # this is our own context, never the operator's
+                    await ctx.close()
+                except Exception:
                     pass
+            if not cdp:                       # never close the operator's own browser
                 await browser.close()
             _augment_pairs_from_har(pairs, _har_path, notes)
 
@@ -512,11 +513,12 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
                 await asyncio.wait(pending_tasks, timeout=10)
             except Exception:
                 pass
-        if not cdp:                       # never close the operator's own browser
-            try:
-                await ctx.close()         # writes the HAR to disk — Playwright flushes it on
-            except Exception:             # CONTEXT close, not browser close
+        if not cdp:                       # flush the HAR: Playwright writes it on CONTEXT close;
+            try:                          # this is our own context, never the operator's
+                await ctx.close()
+            except Exception:
                 pass
+        if not cdp:                       # never close the operator's own browser
             await browser.close()
 
     _augment_pairs_from_har(pairs, _har_path, notes)
