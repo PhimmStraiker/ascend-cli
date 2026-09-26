@@ -101,6 +101,31 @@ def resolve_timeout_s(config: Optional[Dict[str, Any]]) -> float:
     return max(1.0, ceiling - _HANDLER_MARGIN_S)
 
 
+def warmup_text(config: Optional[Dict[str, Any]]) -> str:
+    """The throwaway opener an adapter sends once per conversation before the scored probe.
+
+    Some bots answer the FIRST turn of every conversation with a fixed greeting or a consent
+    banner and only answer for real from the second turn. The adapter sends this text first and
+    discards that reply, so the scored probe is not measured against boilerplate.
+
+    Read from any key a writer has used, because they diverged and a mismatch silently drops the
+    warm-up: the `--warmup` flag and the create-then-send derivation write `warmup`, the preset
+    adapters (SCRT2, Slack, Amazon Connect, session_api) read `warmup_message`, and session_api
+    also accepted `session_greeting`. Measured on a Salesforce Agentforce (SCRT2) wire: `--warmup`
+    wrote `warmup`, the adapter read `warmup_message`, so the consent banner was never cleared and
+    every probe scored it. Reading all three here means a warm-up a writer set is honoured whatever
+    the adapter's own key. `warmup_message` wins when both are present — it is the adapter-native
+    name.
+    """
+    if not isinstance(config, dict):
+        return ""
+    for key in ("warmup_message", "warmup", "session_greeting"):
+        value = config.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
+
+
 def utf8_text(r) -> str:
     """Response body as text, decoded UTF-8 when the server declares no charset.
 
