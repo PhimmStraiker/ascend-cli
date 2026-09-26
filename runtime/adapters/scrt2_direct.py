@@ -47,7 +47,7 @@ import urllib.request
 import urllib.error
 from typing import Any, Dict
 
-from .base import BotAdapter
+from .base import BotAdapter, warmup_text
 
 logger = logging.getLogger(__name__)
 
@@ -187,7 +187,7 @@ class SCRT2DirectAdapter(BotAdapter):
         main_origin = config.get("url", widget_origin)
         capabilities_ver = config.get("capabilities_ver", "258")
         sse_timeout = config.get("sse_timeout", 45)
-        warmup_message = config.get("warmup_message", "")
+        warmup_message = warmup_text(config)
 
         if not all([scrt_base, org_id, developer_name, widget_origin]):
             return self._fail(
