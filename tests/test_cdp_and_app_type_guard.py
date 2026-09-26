@@ -69,6 +69,18 @@ class TestCdpReachesTheCapture:
             f"{len(closes)} browser.close() sites, {len(guarded)} guarded — an unguarded one kills "
             f"the operator's real Chrome when the capture ends")
 
+    def test_the_operators_context_is_never_closed(self):
+        """Closing the context is what flushes the session HAR to disk, but on an attached (--cdp)
+        browser the context IS the operator's signed-in session; closing it would sign them out
+        and kill their tabs. Every ctx.close() sits under the same guard as browser.close()."""
+        closes = re.findall(r"^([ \t]+)await ctx\.close\(\)", CAP, re.M)
+        assert closes, "no context close sites — the recorded HAR is never flushed to disk"
+        guarded = re.findall(
+            r"^([ \t]+)if not cdp:[^\n]*\n\1    try:[^\n]*\n\1        await ctx\.close\(\)", CAP, re.M)
+        assert len(guarded) == len(closes), (
+            f"{len(closes)} ctx.close() sites, {len(guarded)} guarded — an unguarded one signs the "
+            f"operator out of their real Chrome when the capture ends")
+
     @pytest.mark.parametrize("fn", ["cmd_onboard", "cmd_discover"])
     def test_both_commands_pass_the_flag_through(self, fn):
         assert 'cdp=getattr(args, "cdp", None)' in _body(fn), f"{fn} captures without --cdp"
