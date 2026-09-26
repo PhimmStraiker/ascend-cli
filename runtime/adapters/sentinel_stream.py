@@ -51,7 +51,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from .base import BotAdapter, utf8_text, resolve_timeout_s
+from .base import BotAdapter, utf8_text, resolve_timeout_s, warmup_text
 from .websocket_direct import _json_escape, _dot
 
 logger = logging.getLogger(__name__)
@@ -148,7 +148,7 @@ class SentinelStreamAdapter(BotAdapter):
         # first message. MEASURED on directv: without it every probe scored the greeting; with it
         # an sp_leak probe returns Eva's real refusal.
         msg_cfg = config.get("message") or {}
-        warmup = config.get("warmup")
+        warmup = warmup_text(config)
         if warmup and not self._warmed:
             try:
                 requests.request(method, url,
