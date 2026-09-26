@@ -91,6 +91,50 @@ _ID_FIELDS = (
     "requestId", "request_id", "jobId", "job_id",
 )
 _PROMPT_FIELDS = ("prompt", "message", "input", "text", "query", "content", "question", "msg")
+# Keys and values that name a record rather than say anything. An id is never a chatbot's answer,
+# but it is often the LONGEST string in an acknowledgement body (`{"id": "<uuid>", "status":
+# "queued"}`), so "longest string anywhere" picked it — and because a fresh id comes back per
+# request, two different test questions got two different "answers", which is exactly what the
+# constant-reply guard accepts as a live bot. A false pass the guard cannot see.
+_ID_KEYS_LOWER = frozenset(k.lower() for k in (
+    "id", "sessionId", "session_id", "conversationId", "conversation_id", "threadId", "thread_id",
+    "chatId", "chat_id", "ticketId", "ticket_id", "requestId", "request_id", "jobId", "job_id",
+    "conversationEntryId", "entryId", "messageId", "message_id", "eventId", "event_id",
+    "correlationId", "correlation_id", "traceId", "trace_id", "uuid", "guid",
+))
+_ID_VALUE_RE = re.compile(
+    r"^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+    r"|[0-9a-fA-F]{16,}|[A-Za-z0-9_\-]{24,})$")
+
+
+def _is_identifier_leaf(path: str, value: str) -> bool:
+    """True when a string leaf is an identifier — by its key or by its shape — never an answer."""
+    if str(path).rsplit(".", 1)[-1].lower() in _ID_KEYS_LOWER:
+        return True
+    v = (value or "").strip()
+    return bool(v) and not any(c.isspace() for c in v) and bool(_ID_VALUE_RE.match(v))
+
+
+def _is_bare_ack(resp_json: Any) -> bool:
+    """A JSON reply that names a record and says nothing: an id, maybe a status, no answer text.
+
+    The send half of an ack-then-poll contract, whose answer arrives on a later call. When the
+    capture stopped before that call, this body was wired as a plain JSON endpoint at 0.85 and the
+    acknowledgement was scored as the reply. Requires an id AND no prose anywhere, so a terse real
+    answer under a known key (`"answer": "4"`) is never mistaken for one.
+    """
+    if not isinstance(resp_json, (dict, list)) or _first_id(resp_json) is None:
+        return False
+    for path in _RESPONSE_PATH_GUESSES:
+        val = _dot(resp_json, path)
+        if isinstance(val, str) and val.strip() and not _is_identifier_leaf(path, val):
+            return False
+    for path, val in _paths_to_strings(resp_json):
+        if not _is_identifier_leaf(path, val) and len(val.split()) >= 3:
+            return False
+    return True
+
+
 _RESPONSE_PATH_GUESSES = (
     "response", "message", "text", "content", "answer", "output", "reply",
     "data.text", "data.message", "data.content", "result", "completion",
@@ -512,6 +556,15 @@ def classify_transport(ev: Dict[str, Any], chat_idx: Optional[int]) -> Dict[str,
         return poll
 
     if "application/json" in ct or resp["json"] is not None:
+        if _is_bare_ack(resp["json"]):
+            # Below LOW_CONF on purpose: the layer is reported unresolved instead of wired with
+            # false certainty, and the validation gate — not this guess — decides.
+            return {"value": "rest_json", "confidence": 0.35,
+                    "evidence": ("the reply to the message is an acknowledgement — an id and "
+                                 "status fields, no answer text. The answer most likely arrives on "
+                                 "a later call (a poll or a stream) that the capture did not "
+                                 "include; capture the whole exchange, through the answer"),
+                    "params": _http_params(req, resp, stream=None)}
         return {"value": "rest_json", "confidence": 0.85,
                 "evidence": f"content-type={ct or 'n/a'}, single JSON body",
                 "params": _http_params(req, resp, stream=None)}
@@ -2086,8 +2139,10 @@ def _guess_response_path_raw(resp_json: Any, reply_text: Optional[str] = None) -
         if isinstance(val, str) and val.strip():
             return path
 
-    # Longest string anywhere beats longest top-level string.
-    real = [(p, v) for p, v in candidates if v.strip()]
+    # Longest string anywhere beats longest top-level string — but never an identifier. An id is
+    # usually the longest string in an acknowledgement body and it changes per request, so picking
+    # it made two different questions "answer" differently and passed the constant-reply guard.
+    real = [(p, v) for p, v in candidates if v.strip() and not _is_identifier_leaf(p, v)]
     if real:
         return max(real, key=lambda pv: len(pv[1]))[0]
     return "response"
