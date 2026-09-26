@@ -163,8 +163,8 @@ def test_a_warmup_clears_the_banner_and_two_questions_get_two_answers(monkeypatc
 
 
 def test_the_warmup_is_honoured_under_the_flag_key_not_only_the_adapter_key(monkeypatch) -> None:
-    """The exact Fortinet bug: `--warmup` writes `warmup`, the adapter reads `warmup_message`. The
-    accessor now reads either, so a warm-up the flag set is not silently dropped."""
+    """The exact key-name bug behind the live false pass: `--warmup` writes `warmup`, the adapter
+    reads `warmup_message`. The accessor now reads either, so a warm-up the flag set is not dropped."""
     assert base.warmup_text({"warmup": "Hello"}) == "Hello"
     assert base.warmup_text({"warmup_message": "Hi"}) == "Hi"
     assert base.warmup_text({"warmup_message": "native", "warmup": "flag"}) == "native"
