@@ -7562,7 +7562,7 @@ def _add_target_auth_args(s):
                         "same way, and your browser is never closed.")
 
 
-def _add_onboard_args(s, *, require_source):
+def _add_onboard_args(s, *, require_source, cloud_sources=False):
     """Every argument the onboard flow reads. Shared by `onboard` and `target add` so the two
     cannot drift apart — `target add` takes the same evidence, it just stops once registered."""
     src = s.add_mutually_exclusive_group(required=require_source)
@@ -7595,14 +7595,14 @@ def _add_onboard_args(s, *, require_source):
                    help="name the adapter config (default: derived from the URL, e.g. "
                         "'myhost-com'). Use this and you always know what to pass to --config.")
     s.add_argument("--system-prompt", help="what the target is, for the assessment context")
-    s.add_argument("--warmup", metavar="MSG",
-                   help="a throwaway first message to send before each scored probe — for a bot "
-                        "that returns a fixed greeting to the FIRST turn of a conversation and only "
-                        "answers from the second turn on. Set it after a test probe shows a "
-                        "constant greeting; it is applied to the derived config's `warmup`.")
     s.add_argument("--controls", help="comma-separated control ids (validated before the run)")
     s.add_argument("--adapter", help="override the adapter type (default: from the config)")
     if cloud_sources:
+        s.add_argument("--warmup", metavar="MSG",
+                       help="a throwaway first message to send before each scored probe — for a bot "
+                            "that returns a fixed greeting to the FIRST turn of a conversation and only "
+                            "answers from the second turn on. Set it after a test probe shows a "
+                            "constant greeting; it is applied to the derived config's `warmup`.")
         s.add_argument("--qualifier",
                        help="with --arn: the AgentCore endpoint qualifier. Defaults to the one "
                             "named in the ARN, else DEFAULT. Given here, it wins over both.")
@@ -8189,7 +8189,7 @@ def build_parser():
                               "  ascend target add mybot --run          # existing config, then assess"))
     s.add_argument("source", nargs="?",
                    help="a URL, a cURL/HAR file, or a saved config name — detected for you")
-    _add_onboard_args(s, require_source=False)
+    _add_onboard_args(s, require_source=False, cloud_sources=True)
     s.add_argument("--run", action="store_true",
                    help="continue into an assessment once the target is registered")
     # New in the idempotent/direct-first flow. Deliberately NOT on the legacy `onboard` form,

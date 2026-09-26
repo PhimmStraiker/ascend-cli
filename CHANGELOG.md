@@ -67,6 +67,12 @@ them is visible at a glance. A growing Regressions section is a process signal, 
   `completed_at` set; judged by `completed_at` and progress, not by the status string alone.
 - `list_apps` asks for a full page, so a name lookup cannot miss an application on a tenant past
   the default page size.
+- **The parser could not be built on this branch.** `_add_onboard_args` used a `cloud_sources`
+  keyword it never took, so `build_parser()` raised NameError and every `ascend …` invocation died
+  before parsing — in a fresh checkout, not in a working tree that carried the unsaved fix. The
+  keyword is a parameter now; only `target add` passes it, so `--warmup`, `--qualifier` and
+  `--response-path` are `target add` flags and the legacy `onboard --help` is byte-identical to
+  1.1.1 again (the back-compat gate).
 
 ## [1.1.4] — 2026-09-07
 
