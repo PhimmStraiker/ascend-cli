@@ -2,7 +2,7 @@
 
 *Generated from the CLI's argparse tree by `scripts/gen_command_map.py`. A test fails if this file is stale, so every flag here is a flag that exists.*
 
-22 command groups · 60 commands. Sections follow `ascend --help`.
+22 command groups · 61 commands. Sections follow `ascend --help`.
 
 ## Flags every command accepts
 
@@ -325,7 +325,9 @@ create->pause->resume->poll an assessment
 | `--all-bound` | — | — | every app with a stored bridge key (see `ascend keys list`) |
 | `--name` **(required)** | `NAME` | — | a label for this assessment run |
 | `--controls` | `CONTROLS` | — | scope the run to these control ids — applied to the app, because the platform has no per-run override |
-| `--no-wait` | — | — | return as soon as the run starts |
+| `--resume-on-pause` | `N` | `0` | while waiting, put the run back on its feet up to N times if the PLATFORM pauses it (measured: a run against a healthy target is paused roughly every 90s). The count is always reported. 0 disables. |
+| `--new` | — | — | create a fresh assessment even if one on this app has not finished (default: pick the unfinished one up — assessments cannot be deleted) |
+| `--no-wait` | — | — | return once the run is CONFIRMED started (about 45s), not when it finishes |
 | `--interval` | `INTERVAL` | `20` | seconds between status polls |
 | `--timeout` | `TIMEOUT` | `7200` | max seconds to wait for completion |
 | `--force` | — | — | run even if the selected controls would generate zero probes |
@@ -963,6 +965,9 @@ onboard a target from a URL, a cURL/HAR file, or a saved config
 | `--system-prompt` | `SYSTEM_PROMPT` | — | what the target is, for the assessment context |
 | `--controls` | `CONTROLS` | — | comma-separated control ids (validated before the run) |
 | `--adapter` | `ADAPTER` | — | override the adapter type (default: from the config) |
+| `--warmup` | `MSG` | — | a throwaway first message to send before each scored probe — for a bot that returns a fixed greeting to the FIRST turn of a conversation and only answers from the second turn on. Set it after a test probe shows a constant greeting; it is applied to the derived config's `warmup`. |
+| `--qualifier` | `QUALIFIER` | — | with --arn: the AgentCore endpoint qualifier. Defaults to the one named in the ARN, else DEFAULT. Given here, it wins over both. |
+| `--response-path` | `DOTPATH` | — | with --arn: where the answer is in the runtime's JSON reply, e.g. output.text. Omit and the adapter takes the first of the usual answer keys (output/response/result/text/answer/content/message). |
 | `--header` *(repeatable)* | `'Name: value'` | — | raw header (repeatable), honored by all sources, e.g. 'X-Api-Key: …'. A value written env:NAME is read from the environment and never stored in the config |
 | `--bearer` | `TOKEN` | — | Authorization: Bearer <token>; env:NAME keeps the token out of the config |
 | `--api-key` | `NAME:VALUE[:in=header|query]` | — | API key, e.g. 'x-api-key:abc', 'key:abc:in=query', or 'x-api-key:env:MY_KEY' to reference the environment instead of storing the value |
@@ -1000,6 +1005,10 @@ onboard a target from a URL, a cURL/HAR file, or a saved config
 | `--assessment-name` | `ASSESSMENT_NAME` | — | assessment name (default: '<app> run 1') |
 | `-v`, `--verbose` | — | — | debug logging for the bridge |
 | `--run` | — | — | continue into an assessment once the target is registered |
+| `--via` | `auto|api|bridge` | `auto` | how probes reach the target. auto (default): direct when the platform can reach the endpoint and speak its contract, a bridge only when it cannot. api: direct or fail. bridge: force a local relay. |
+| `--workspace` | `SLUG` | — | which agent to target, on a host that serves several (see `target inspect`) |
+| `--no-profile` | — | — | ignore a contract the target publishes and probe the endpoint instead |
+| `--purpose` | `PURPOSE` | — | one line on what the agent is for (business purpose) |
 
 ```bash
 ascend target add https://your-bot.example.com/chat
@@ -1021,6 +1030,19 @@ re-prove a target against its live endpoint (the hard gate)
 | `--expect` | `EXPECT` | — | require this substring in the reply |
 | `--timeout` | `TIMEOUT` | `60.0` | per-request timeout in seconds |
 | `--adapter` | `ADAPTER` | — | override the adapter type (default: from the config) |
+
+### `ascend target inspect`
+
+look at a target first: what it is, what it needs, what is already registered
+
+- **`source`** (required) — the target URL
+
+
+| Flag | Value | Default | What it does |
+|---|---|---|---|
+| `--header` *(repeatable)* | `'Name: value'` | — | — |
+| `--bearer` | `TOKEN` | — | — |
+| `--insecure` | — | — | — |
 
 ### `ascend target list`
 

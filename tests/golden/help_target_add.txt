@@ -5,17 +5,18 @@ usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] t
        [-h] [--json] [--token TOKEN] [--base BASE] [--bridge-base BRIDGE_BASE]
        [--api URL | --ws URL | --url URL | --curl FILE | --har HAR | --config NAME|PATH | --module FILE.py]
        [--scaffold FILE.py] [--name NAME] [--app NAME|aapp_id] [--save-as NAME]
-       [--system-prompt SYSTEM_PROMPT] [--controls CONTROLS] [--adapter ADAPTER]
-       [--header 'Name: value'] [--bearer TOKEN] [--api-key NAME:VALUE[:in=header|query]]
-       [--basic USER:PASS] [--cookie 'k=v; k2=v2'] [--token-file PATH] [--body-field key=value]
-       [--login-url URL] [--login-body JSON|FORM] [--token-path DOTPATH]
-       [--login-method {POST,GET}] [--token-regex RE] [--token-header NAME] [--insecure]
-       [--ca-bundle PATH] [--client-cert PATH] [--client-key PATH] [--proxy URL]
+       [--system-prompt SYSTEM_PROMPT] [--controls CONTROLS] [--adapter ADAPTER] [--warmup MSG]
+       [--qualifier QUALIFIER] [--response-path DOTPATH] [--header 'Name: value'] [--bearer TOKEN]
+       [--api-key NAME:VALUE[:in=header|query]] [--basic USER:PASS] [--cookie 'k=v; k2=v2']
+       [--token-file PATH] [--body-field key=value] [--login-url URL] [--login-body JSON|FORM]
+       [--token-path DOTPATH] [--login-method {POST,GET}] [--token-regex RE] [--token-header NAME]
+       [--insecure] [--ca-bundle PATH] [--client-cert PATH] [--client-key PATH] [--proxy URL]
        [--cdp [ENDPOINT]] [--allow-internal] [--prompt-hint PROMPT_HINT]
        [--size {small,medium,large}] [--qpm QPM] [--prompt PROMPT] [--settle SETTLE] [--headless]
        [--manual] [--timeout TIMEOUT] [--dry-run] [--force] [--wait] [--detail]
        [--interval INTERVAL] [--timeout-assess TIMEOUT_ASSESS] [--assessment-name ASSESSMENT_NAME]
-       [-v] [--run]
+       [-v] [--run] [--via {auto,api,bridge}] [--workspace SLUG] [--no-profile]
+       [--purpose PURPOSE]
        [source]
 
 positional arguments:
@@ -59,6 +60,18 @@ options:
                         what the target is, for the assessment context (default: None)
   --controls CONTROLS   comma-separated control ids (validated before the run) (default: None)
   --adapter ADAPTER     override the adapter type (default: from the config) (default: None)
+  --warmup MSG          a throwaway first message to send before each scored probe — for a bot
+                        that returns a fixed greeting to the FIRST turn of a conversation and only
+                        answers from the second turn on. Set it after a test probe shows a
+                        constant greeting; it is applied to the derived config's `warmup`.
+                        (default: None)
+  --qualifier QUALIFIER
+                        with --arn: the AgentCore endpoint qualifier. Defaults to the one named in
+                        the ARN, else DEFAULT. Given here, it wins over both. (default: None)
+  --response-path DOTPATH
+                        with --arn: where the answer is in the runtime's JSON reply, e.g.
+                        output.text. Omit and the adapter takes the first of the usual answer keys
+                        (output/response/result/text/answer/content/message). (default: None)
   --header 'Name: value'
                         raw header (repeatable), honored by all sources, e.g. 'X-Api-Key: …'. A
                         value written env:NAME is read from the environment and never stored in
@@ -130,6 +143,15 @@ options:
                         assessment name (default: '<app> run 1') (default: None)
   -v, --verbose         debug logging for the bridge (default: False)
   --run                 continue into an assessment once the target is registered (default: False)
+  --via {auto,api,bridge}
+                        how probes reach the target. auto (default): direct when the platform can
+                        reach the endpoint and speak its contract, a bridge only when it cannot.
+                        api: direct or fail. bridge: force a local relay. (default: auto)
+  --workspace SLUG      which agent to target, on a host that serves several (see `target
+                        inspect`) (default: None)
+  --no-profile          ignore a contract the target publishes and probe the endpoint instead
+                        (default: False)
+  --purpose PURPOSE     one line on what the agent is for (business purpose) (default: None)
 
 examples:
   ascend target add https://your-bot.example.com/chat

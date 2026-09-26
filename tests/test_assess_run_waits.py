@@ -44,6 +44,7 @@ def _client(get_sequence, *, transitions_ok=True):
     c.pause = lambda app_id, aid: None
     c.resume = lambda app_id, aid: None
     c.create_assessment = lambda app_id, name: {"id": "asmt_1"}
+    c.live_assessment = lambda app_id: None     # nothing unfinished; these tests are about polling
     return c
 
 
@@ -96,7 +97,8 @@ class TestRunWithWaitReturnsOnlyTerminal:
     def test_a_paused_recovery_is_resumed_before_polling(self, monkeypatch):
         monkeypatch.setattr(api.time, "sleep", lambda s: None)
         resumed = {"n": 0}
-        c = _client([{"status": "paused"}, {"status": "complete"}])
+        # running (the verified-start read), then the drop leaves it paused, then it completes
+        c = _client([{"status": "running"}, {"status": "paused"}, {"status": "complete"}])
         def resume(app_id, aid): resumed["n"] += 1
         c.resume = resume
         calls = {"n": 0}
