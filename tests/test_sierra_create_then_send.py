@@ -1,7 +1,7 @@
 """
 test_sierra_create_then_send.py — a create-then-send chat that GREETS derives from the SCORED turn.
 
-MEASURED on a support bot. The capture is a create-then-send
+MEASURED on a support bot (`sierra.chat`). The capture is a create-then-send
 conversation: a create call mints `conversationID`+`encryptionKey`, then a `resume-session` INIT
 turn (empty message) precedes the real `type:"message"` turn that carries what the operator typed.
 

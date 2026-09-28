@@ -1133,8 +1133,8 @@ def classify_session(ev: Dict[str, Any], chat_idx: Optional[int]) -> Dict[str, A
 
     def _opener_before_scored(rid: Any) -> Optional[str]:
         # A create-then-send target mints a FRESH conversation per probe, so the scored probe is the
-        # conversation's first message — and greeting-first bots (Sierra voice/IVR, e.g. a
-        # support bot) answer only from the SECOND turn. When the capture shows a message-endpoint turn
+        # conversation's first message — and greeting-first bots (Sierra voice/IVR bots, for
+        # one) answer only from the SECOND turn. When the capture shows a message-endpoint turn
         # before the scored prompt that carries the session but no real message (a session
         # init/resume), the probe would score the verbatim greeting, so a throwaway opener has to
         # go first. Returns the opener text, or None. Generic: keyed on the shape (a distinct init
@@ -1439,7 +1439,7 @@ def compose(classified: Dict[str, Any]) -> Dict[str, Any]:
                 # key) per turn; freezing them replays a dead session and scores nothing. Wire the
                 # create call as a `start` step so the adapter mints a fresh one per probe, and
                 # template the per-conversation values in the message body. MEASURED + PROVEN
-                # against a support bot (Sierra): create graphql -> {conversationID,
+                # against a support bot: create graphql -> {conversationID,
                 # encryptionKey} -> chat answers.
                 config.update({
                     "url": sp.get("message_endpoint") or endpoint,
