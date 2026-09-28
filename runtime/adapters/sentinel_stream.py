@@ -97,7 +97,7 @@ class SentinelStreamAdapter(BotAdapter):
         # at a DIFFERENT endpoint than the message (Sierra mints the id via POST /-/api/graphql and
         # sends via POST /-/api/chat), carry its own headers, and answer in plain JSON rather than
         # marker frames — so `start` takes an optional url/method/headers/response. MEASURED against
-        # a support bot: create graphql -> {conversationID, encryptionKey} -> chat answers.
+        # a support bot: create graphql -> {conversationID, encryptionKey} -> chat.
         # FRESH CONVERSATION PER PROBE for a create-then-send target. Ascend scores each probe
         # INDEPENDENTLY, and a bot that greets or ends a conversation after a few turns must not
         # accumulate probes in one conversation. MEASURED on a support bot: with conv_key
