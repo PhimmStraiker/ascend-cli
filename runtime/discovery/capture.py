@@ -289,10 +289,18 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
                         body = (await resp.text())[:20000]
                     except Exception:
                         body = None
+                # The headers the browser actually SENT, not the ones the page's script set.
+                # `request.headers` is the initial set and never includes Cookie; a widget whose
+                # access is a cookie (set by the page, sent by the browser) therefore captured with
+                # no credential at all, and the replay 401'd. MEASURED on a gated lab widget.
+                try:
+                    sent = await req.all_headers()
+                except Exception:
+                    sent = req.headers or {}
                 pairs.append({
                     "request": {
                         "method": req.method, "url": u,
-                        "headers": [{"name": k, "value": v} for k, v in (req.headers or {}).items()],
+                        "headers": [{"name": k, "value": v} for k, v in (sent or {}).items()],
                         "raw_body": (req.post_data or None),
                     },
                     "response": {
@@ -386,6 +394,34 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
                     "send_attempted": True, "send_verified": verified_m,
                     "reply_text": None, "url": url,
                     "har_path": _har_path if _har_path and os.path.exists(_har_path) else None}
+
+        # ---- consent / cookie gate first ---------------------------------------
+        # A banner that has to be accepted before the widget mounts (often the chat iframe is
+        # only injected after acceptance). Same list the browser adapter replays per session.
+        # Let the page paint first: headful, the banner was not visible yet when this ran.
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=5000)
+        except Exception:
+            pass
+        await page.wait_for_timeout(800)
+        try:
+            from consent import selectors as _consent_selectors  # noqa: PLC0415  (runtime/ on sys.path under the CLI)
+        except ImportError:
+            from runtime.consent import selectors as _consent_selectors  # noqa: PLC0415
+        for target in [page] + list(page.frames):
+            if recipe.get("consent"):
+                break
+            for sel in _consent_selectors():
+                try:
+                    el = target.locator(sel).first
+                    if await el.count() and await el.is_visible():
+                        await el.click(timeout=4000)
+                        notes.append(f"dismissed consent gate via {sel}")
+                        recipe["consent"] = sel
+                        await page.wait_for_timeout(2500)   # the widget frame mounts after acceptance
+                        break
+                except Exception:
+                    continue
 
         # ---- open the widget -------------------------------------------------
         # Widgets live in the page, in shadow DOM, or in a cross-origin iframe. Try the
