@@ -78,7 +78,9 @@ OPTIONAL CONFIG KEYS
       done_when         {"path": "...", "equals": "..."} or {"contains": "..."}
                         (default {"path": "type", "equals": "done"})
       aggregate         "concat" (default) join the token frames, or "last"
-      idle_ms           give up after this much silence between frames (default 20000)
+      idle_ms           give up after this much silence BETWEEN frames (default 20000)
+      first_frame_ms    how long to wait for the FIRST frame (default: the probe budget). The
+                        idle gap never applies before the first frame: think time is not silence.
   timeout_ms        - overall budget in ms ((optional; otherwise derived from the platform's per-probe window); raise for slow agentic targets, leaving headroom for delivery inside the ~90s reclaim window)
   verify_tls        - set false for self-signed targets (default true)
 
@@ -273,7 +275,14 @@ class SSEStreamAdapter(BotAdapter):
                     headers[boot.get("csrf_header", "X-CSRF-Token")] = self._csrf
 
                 idle = stream_cfg.get("idle_ms", 20000) / 1000
-                read_timeout = max(1.0, min(idle, deadline - time.time()))
+                # The socket read timeout at request time is the FIRST-frame wait: how long the
+                # target may think before its first byte. The idle gap (silence between frames)
+                # is applied by _read_stream once the first frame has arrived. Before this, one
+                # timeout served both, and a target slower than idle_ms to start answering read
+                # as "produced no output" — a whole run of false failures on a slow agentic bot.
+                first_frame = stream_cfg.get("first_frame_ms") or config.get("first_frame_ms")
+                first_wait = (float(first_frame) / 1000) if first_frame else (deadline - time.time() - 2.0)
+                read_timeout = max(1.0, min(max(first_wait, idle), deadline - time.time()))
 
                 resp = session.request(
                     method,
@@ -317,7 +326,7 @@ class SSEStreamAdapter(BotAdapter):
 
                 if not text and stalled:
                     return self._fail(
-                        f"Target produced no output within {read_timeout:.0f}s "
+                        f"Target produced no output within {read_timeout:.0f}s of think time "
                         f"(slow/overloaded target, session left intact)",
                         start, adapter="sse_stream", stalled=True,
                     )
@@ -377,6 +386,8 @@ class SSEStreamAdapter(BotAdapter):
         cur_event: List[Optional[str]] = [None]   # SSE `event:` name for the buffered frame
         truncated = False
         stalled = False
+        idle_s = float(cfg.get("idle_ms", 20000)) / 1000
+        first_seen = False
 
         def flush() -> bool:
             """Parse one buffered event. Returns True when the stream is done."""
@@ -394,6 +405,9 @@ class SSEStreamAdapter(BotAdapter):
                 if time.time() >= deadline:
                     truncated = True
                     break
+                if not first_seen and raw:
+                    first_seen = True
+                    _set_read_timeout(resp, min(idle_s, max(1.0, deadline - time.time())))
 
                 # iter_lines yields None/b"" for the blank line between SSE events.
                 line = "" if not raw else (
@@ -626,6 +640,24 @@ class SSEStreamAdapter(BotAdapter):
         path, equals = done_when.get("path"), done_when.get("equals")
         if path is not None:
             return _dot(frame, path) == equals
+        return False
+
+
+def _set_read_timeout(resp: requests.Response, seconds: float) -> bool:
+    """Change the socket read timeout of a streaming response mid-stream.
+
+    requests fixes one read timeout when the request is made. A stream needs two: a long one for
+    the target's think time before the first frame, a short one for silence between frames. The
+    socket sits under urllib3's connection; when it cannot be reached (a mocked response, another
+    transport), the first timeout simply stays in force."""
+    try:
+        conn = getattr(resp.raw, "_connection", None)
+        sock = getattr(conn, "sock", None)
+        if sock is None:
+            return False
+        sock.settimeout(seconds)
+        return True
+    except Exception:  # noqa: BLE001 — best effort; the request timeout still bounds the read
         return False
 
 

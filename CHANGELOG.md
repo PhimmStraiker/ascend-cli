@@ -11,6 +11,20 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ## [Unreleased]
 
+### Fixed
+- Streaming adapters give the target its think time. `websocket_direct` and `sse_stream` applied
+  the idle gap (silence *between* frames) from the moment the prompt was sent, so a target slower
+  than `idle_ms` to start answering read as "No response frames collected". Measured on a
+  Lambda-backed socket: 25 of 26 probes empty under a run; 10 of 10 answered after the fix. The
+  first frame now gets the probe budget (or `first_frame_ms`), the idle gap applies once frames
+  flow; a gateway error frame is reported as the reason instead of scored as the reply.
+- A WebSocket contract is derived from the frames the page exchanged: the send frame that carried
+  the prompt (with `{{PROMPT}}` substituted), the field that carried the reply (`response_path`)
+  and the terminal frame (`done_when`). Before, only the URL came from the capture.
+- The browser capture records a streamed response body (`text/event-stream`, NDJSON) after the
+  stream ends; read at response start it was empty and the derived SSE config was a bare
+  `{"format": "sse"}`.
+
 ### Added
 - `ascend adapter bundle <config>` — the adapter as a hand-over artifact: one folder with
   `adapter.json` (env: references only, never a secret), `manifest.json`, `secrets.template.env`,

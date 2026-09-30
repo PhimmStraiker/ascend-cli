@@ -706,23 +706,117 @@ def _detect_stop_marker(body: str) -> Optional[str]:
     return None
 
 
+_WS_DONE_VALUES = {"done", "complete", "completed", "end", "finished", "final", "stop", "eos"}
+_WS_ID_FIELDS = {"id", "conversation_id", "conversationId", "session_id", "sessionId", "message_id",
+                 "messageId", "request_id", "requestId", "connectionId", "type", "event", "status",
+                 "state", "kind", "role", "timestamp", "ts"}
+
+
+def _ws_frame(raw: Any) -> Any:
+    """A captured frame as the adapter will see it: JSON when it parses, else the raw text."""
+    if isinstance(raw, (dict, list)):
+        return raw
+    if not isinstance(raw, str):
+        return raw
+    t = raw.strip()
+    if t.startswith(("{", "[")):
+        try:
+            return json.loads(t)
+        except (ValueError, TypeError):
+            return raw
+    return raw
+
+
+def _ws_done_marker(frames: List[Any]) -> Optional[Dict[str, str]]:
+    """The terminal frame the socket sends when the answer is complete, as the adapter's
+    `done_when` rule (same rule the socket-onboarding path in probe.py derives)."""
+    for frame in reversed(frames):
+        if not isinstance(frame, dict):
+            continue
+        for key in ("type", "event", "status", "state", "kind"):
+            val = frame.get(key)
+            if isinstance(val, str) and val.strip().lower() in _WS_DONE_VALUES:
+                return {"path": key, "equals": val}
+    return None
+
+
+def _ws_reply_field(frames: List[Any]) -> Optional[str]:
+    """The string field that carried the most answer text across the received frames."""
+    totals: Dict[str, int] = {}
+    for f in frames:
+        if not isinstance(f, dict):
+            continue
+        for k, v in f.items():
+            if isinstance(v, str) and v.strip() and k not in _WS_ID_FIELDS:
+                totals[k] = totals.get(k, 0) + len(v)
+            elif isinstance(v, dict):
+                for kk, vv in v.items():
+                    if isinstance(vv, str) and vv.strip() and kk not in _WS_ID_FIELDS:
+                        totals[f"{k}.{kk}"] = totals.get(f"{k}.{kk}", 0) + len(vv)
+    if not totals:
+        return None
+    return max(totals.items(), key=lambda kv: kv[1])[0]
+
+
+def _ws_send_template(sent: List[Any], prompt: str) -> Any:
+    """The frame the page sent carrying the prompt, with the prompt replaced by {{PROMPT}}.
+
+    The page's own frame IS the contract; the old fixed guess ({"type": "message", "text": …})
+    happened to work on a target that only read `text` and would send every other socket a
+    message it ignores — read back as "no frames" a probe later.
+    """
+    def _sub(obj: Any) -> Any:
+        if isinstance(obj, str):
+            return obj.replace(prompt, "{{PROMPT}}") if prompt and prompt in obj else obj
+        if isinstance(obj, dict):
+            return {k: _sub(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_sub(v) for v in obj]
+        return obj
+    if prompt:
+        for raw in sent:
+            if prompt in str(raw):
+                return _sub(_ws_frame(raw))
+    return None
+
+
 def _ws_params(ev: Dict[str, Any]) -> Dict[str, Any]:
+    """The websocket_direct contract, read off the frames the page exchanged.
+
+    Before: only the socket URL came from the capture; the send frame, the reply field and the
+    terminal frame were fixed guesses and a 1.5 s silence rule did the rest. MEASURED on a
+    Lambda-backed socket: the capture held {"type":"token","text":…} frames and a {"type":"done"}
+    terminator, the derived config carried none of it, and 25 of 26 probes came back empty.
+    """
     url = ""
-    framing = "text"
+    sent: List[Any] = []
+    received: List[Any] = []
+    prompt = (ev.get("prompt_sent") or "").strip()
     for m in ev.get("ws_messages", []):
         url = m.get("url", url)
-        data = m.get("data")
-        if isinstance(data, str) and data.strip().startswith(("{", "[")):
-            try:
-                json.loads(data)
-                framing = "json"
-            except (ValueError, TypeError):
-                pass
+        sent.extend(m.get("sent") or [])
+        received.extend(m.get("received") or [])
+        data = m.get("data")             # legacy single-frame shape
+        if isinstance(data, str):
+            received.append(data)
     if url.startswith("http"):
         url = "ws" + url[len("http"):]  # http->ws, https->wss
-    return {"ws_url": url, "framing": framing,
-            "send_template": {"type": "message", "text": "{{PROMPT}}"},
-            "idle_ms": 1500}
+    frames = [_ws_frame(r) for r in received]
+    framing = "json" if any(isinstance(f, (dict, list)) for f in frames) or \
+        any(isinstance(_ws_frame(x), (dict, list)) for x in sent) else "text"
+    params: Dict[str, Any] = {"ws_url": url, "framing": framing,
+                              "send_template": _ws_send_template(sent, prompt)
+                              or {"type": "message", "text": "{{PROMPT}}"}}
+    reply = _ws_reply_field(frames)
+    if reply:
+        params["response_path"] = reply
+    done = _ws_done_marker(frames)
+    if done:
+        params["done_when"] = done
+    # With a terminal frame the idle gap is only a fallback; without one it is the completion
+    # rule and must outlast a normal pause between tokens.
+    params["idle_ms"] = 1500 if done else 5000
+    return params
 
 
 def _guess_transcript(obj: Any) -> Dict[str, Any]:
@@ -1431,6 +1525,11 @@ def compose(classified: Dict[str, Any]) -> Dict[str, Any]:
                            "idle_ms": tparams.get("idle_ms", 1500)})
             if tparams.get("framing"):
                 config["framing"] = tparams["framing"]
+            # the reply field and the terminal frame read off the captured frames
+            if tparams.get("response_path"):
+                config["response_path"] = tparams["response_path"]
+            if tparams.get("done_when"):
+                config["done_when"] = tparams["done_when"]
         elif tp == "sentinel_stream":
             adapter = "sentinel_stream"
             sess = session or {}

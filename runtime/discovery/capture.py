@@ -318,6 +318,12 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
                 ct = (resp.headers or {}).get("content-type", "")
                 if any(t in ct for t in ("json", "text", "event-stream", "ndjson")):
                     try:
+                        if "event-stream" in ct or "ndjson" in ct:
+                            # A streamed body is only readable once the stream has ended; read
+                            # at response start it raised, the body was recorded as empty, and
+                            # the derived config was a bare {"format": "sse"} with the field
+                            # mapping left to guesswork. MEASURED on the SSE lab widget.
+                            await resp.finished()
                         body = (await resp.text())[:20000]
                     except Exception:
                         body = None
