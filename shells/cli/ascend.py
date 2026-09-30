@@ -547,6 +547,24 @@ def _lift_api_key(cfg) -> str:
     return "none"
 
 
+# Headers a browser adds for its own sake, never for the target's: client hints and fetch
+# metadata (`Sec-*`), the user agent, language/encoding negotiation, cache and connection
+# management. A capture copies them into the config faithfully — right for replaying from this
+# machine, wrong for a direct app: MEASURED 2026-09-30, the platform rejected the create with the
+# full captured set ("rejected by the upstream service", naming nothing) and accepted the same
+# spec without them. The target never needed them; the credential and content headers stay.
+_BROWSER_ONLY_HEADERS = {
+    "user-agent", "accept-language", "accept-encoding", "connection", "host", "content-length",
+    "cache-control", "pragma", "priority", "dnt", "te", "upgrade-insecure-requests",
+}
+
+
+def _target_relevant_headers(headers):
+    """Drop browser-only headers from a direct app's spec; keep what the target may check."""
+    return {k: v for k, v in (headers or {}).items()
+            if k.lower() not in _BROWSER_ONLY_HEADERS and not k.lower().startswith("sec-")}
+
+
 def _api_contract(cfg):
     """A proven adapter config as the fields a direct (`api`) application is made of."""
     out = {}
@@ -561,6 +579,7 @@ def _api_contract(cfg):
             headers.update(merge_auth(dict(cfg)).get("headers") or {})
         except Exception:                     # noqa: BLE001 - reported by the gate, not here
             pass
+    headers = _target_relevant_headers(headers)   # after the merge: it re-adds the config's own set
     headers.setdefault("Content-Type", "application/json")
     out["headers"] = headers
     body = cfg.get("body") or cfg.get("request_body")
