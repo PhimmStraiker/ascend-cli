@@ -20,6 +20,7 @@ import json
 import os
 import re
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 
 BENIGN_DEFAULT = "Hello, what can you help me with?"
 
@@ -82,6 +83,36 @@ INPUT_SELECTORS = [
     "input[placeholder*='type' i]", "textarea[placeholder*='message' i]",
     "input[placeholder*='message' i]", "input[placeholder*='ask' i]",
 ]
+INPUT_WAIT_S = 20.0   # how long to keep looking for the chat input after the settle
+
+
+async def _await_chat_input(page, scan, wait_s: float, notes: List[str], *, clock=None):
+    """Poll for a usable chat input instead of trusting one fixed settle.
+
+    A bot challenge (WAF / CDN interstitial) solves itself in the page and then RELOADS it; a
+    widget inside an SPA mounts late. One scan straight after the settle looked at the
+    interstitial, found no input, and the capture came back holding nothing but the page
+    bootstrap while the real widget landed a second later. Seen live against a WAF-challenged
+    range: the HAR had the challenge, the token cookie and the 200 reload, never the chat call.
+    Re-scan every second until an input that is not a search box shows up or ``wait_s`` runs
+    out. ``scan`` returns the scored candidates; a note records the wait and any navigation."""
+    import time as _time
+    now = clock or _time.monotonic
+    url_before = getattr(page, "url", "") or ""
+    deadline = now() + max(float(wait_s or 0), 0.0)
+    polls = 0
+    while True:
+        found = await scan()
+        polls += 1
+        if any(c[0] >= 0 for c in found) or now() >= deadline:
+            break
+        await page.wait_for_timeout(1000)
+    if polls > 1:
+        moved = (getattr(page, "url", "") or "") != url_before
+        notes.append(f"waited {polls - 1}s more for the chat input"
+                     + (" (the page navigated meanwhile: bot challenge or redirect)" if moved else "")
+                     + ("" if any(c[0] >= 0 for c in found) else " — none appeared"))
+    return found
 
 
 def _browser_channels(preferred=None):
@@ -180,6 +211,7 @@ def _augment_pairs_from_har(pairs: List[Dict[str, Any]], har_path: Optional[str]
 
 async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: int,
                          settle_s: int, manual: bool = False, manual_wait_s: int = 180,
+                         input_wait_s: float = INPUT_WAIT_S,
                          extra_headers: Optional[Dict[str, str]] = None,
                          proxy: Optional[str] = None, insecure: bool = False,
                          browser_channel: Optional[str] = None,
@@ -473,16 +505,21 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
                 pass
             return score
 
-        candidates = []
-        for fr in [page] + list(page.frames):
-            for sel in INPUT_SELECTORS:
-                try:
-                    loc = fr.locator(sel).first
-                    if await loc.count() and await loc.is_visible():
-                        candidates.append((await score_input(fr, loc, sel), fr, loc, sel))
-                except Exception:
-                    continue
-        candidates.sort(key=lambda c: c[0], reverse=True)
+        async def scan_inputs():
+            found = []
+            for fr in [page] + list(page.frames):
+                for sel in INPUT_SELECTORS:
+                    try:
+                        loc = fr.locator(sel).first
+                        if await loc.count() and await loc.is_visible():
+                            found.append((await score_input(fr, loc, sel), fr, loc, sel))
+                    except Exception:
+                        continue
+            found.sort(key=lambda c: c[0], reverse=True)
+            return found
+
+        # not one scan on a fixed settle: a bot challenge reloads the page, a widget mounts late
+        candidates = await _await_chat_input(page, scan_inputs, input_wait_s, notes)
 
         sent = False
         for score, fr, loc, sel in candidates:
@@ -518,7 +555,11 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
             except Exception:
                 continue
         if not sent:
-            notes.append("no chat input found — capture may only contain page bootstrap")
+            # The site root is usually a landing page: the widget lives on a page of its own. Seen
+            # live: a drive at `/` (the operator had given `/rest`) captured the bootstrap and nothing else.
+            root = not urlsplit(url).path.strip("/")
+            notes.append("no chat input found — capture may only contain page bootstrap"
+                         + (" (this is the site root: if the chat lives on a specific page, capture that page's URL)" if root else ""))
 
         # ---- try to read the bot's reply back off the page -------------------
         reply_text = None
@@ -723,6 +764,7 @@ def diagnose_browser_failure(exc: Exception, url: str) -> Dict[str, str]:
 def capture_url(url: str, *, prompt: str = BENIGN_DEFAULT, headless: bool = False,
                 timeout_s: int = 60, settle_s: int = 6, manual: bool = False,
                 manual_wait_s: int = 180, extra_headers: Optional[Dict[str, str]] = None,
+                input_wait_s: float = INPUT_WAIT_S,
                 proxy: Optional[str] = None, insecure: bool = False,
                 browser_channel: Optional[str] = None,
                 cdp: Optional[str] = None) -> Dict[str, Any]:
@@ -739,6 +781,7 @@ def capture_url(url: str, *, prompt: str = BENIGN_DEFAULT, headless: bool = Fals
         return asyncio.run(_capture_async(url, prompt=prompt, headless=headless,
                                           timeout_s=timeout_s, settle_s=settle_s,
                                           manual=manual, manual_wait_s=manual_wait_s,
+                                          input_wait_s=input_wait_s,
                                           cdp=cdp,
                                           extra_headers=extra_headers, proxy=proxy,
                                           insecure=insecure,
