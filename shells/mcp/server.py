@@ -453,8 +453,25 @@ def run_tool(name: str, arguments: dict[str, Any] | None, timeout: int = 7800) -
     err = (proc.stderr or "").strip()
     if proc.returncode != 0:
         msg = err or out or "CLI error"
-        return {"ok": False, "returncode": proc.returncode,
-                "error": msg + _flags_as_params(name, msg), "stdout": out}
+        res = {"ok": False, "returncode": proc.returncode,
+               "error": msg + _flags_as_params(name, msg), "stdout": out}
+        # The CLI's JSON error envelope is on stdout: its code, hint and — when the code knows
+        # the cause — a {reason, detail, next} diagnosis. Surfaced as fields, so a caller never
+        # has to regex the human text for them.
+        env = _last_json(out)
+        if isinstance(env, dict) and env.get("ok") is False:
+            e = env.get("error")
+            if isinstance(e, dict):
+                if e.get("message"):
+                    res["error"] = str(e["message"]) + _flags_as_params(name, str(e["message"]))
+                if e.get("code"):
+                    res["error_code"] = e["code"]
+                if e.get("hint"):
+                    res["hint"] = e["hint"]
+            d = env.get("diagnosis") or (e.get("diagnosis") if isinstance(e, dict) else None)
+            if isinstance(d, dict):
+                res["diagnosis"] = d
+        return res
 
     if not out:
         return {"ok": True, "result": None, "stderr": err or None}
@@ -463,6 +480,18 @@ def run_tool(name: str, arguments: dict[str, Any] | None, timeout: int = 7800) -
     except json.JSONDecodeError:
         # a --json path should always emit JSON; fall back to raw text rather than crash
         return {"ok": True, "result": out, "stderr": err or None}
+
+
+def _last_json(text: str):
+    """The last line of stdout that parses as JSON: the envelope, after any progress lines."""
+    for line in reversed((text or "").splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                return json.loads(line)
+            except ValueError:
+                continue
+    return None
 
 
 # --------------------------------------------------------------------------- JSON-RPC loop

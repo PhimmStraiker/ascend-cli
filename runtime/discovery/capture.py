@@ -812,6 +812,39 @@ async def _derive_reply_recipe(fr, prompt, reply_text, recipe) -> None:
     recipe["reply_strategy"] = "new_element"
 
 
+def capture_diagnosis(ev: Dict[str, Any], url: str = "") -> Dict[str, str]:
+    """What a failed capture means, as {reason, detail, next} — read off the notes the drive
+    left. One reason each; the first that matches wins, most specific first."""
+    notes = [str(n) for n in (ev or {}).get("notes", [])]
+    text = "\n".join(notes)
+    if (ev or {}).get("diagnosis") and isinstance(ev["diagnosis"], dict):
+        return ev["diagnosis"]
+    if "this is the site root" in text:
+        return {"reason": "site_root_no_widget",
+                "detail": "the drive was at the site root and found no chat input; the widget lives on a page of its own",
+                "next": "capture the exact page URL that shows the chat widget (keep its path and query); do not retry the root"}
+    if "no chat input found" in text:
+        return {"reason": "no_chat_input",
+                "detail": "the page rendered but no visible chat input was found within the wait",
+                "next": "open the page yourself to see where the widget is; if it needs a click to appear, use --manual once; if it loads slowly, raise --settle"}
+    if "TYPED BUT NOT OBSERVED IN TRAFFIC" in text:
+        return {"reason": "typed_not_observed",
+                "detail": "text was typed into an input but never appeared in any request: that box was not the chat widget (a site search, a form)",
+                "next": "capture the page whose input is the chat box, or drive it with --manual once so the real send is recorded"}
+    if "navigation issue" in text:
+        return {"reason": "navigation_failed", "detail": notes[0] if notes else "the page did not load",
+                "next": "fix reachability first (DNS, VPN, the bot wall): a plain probe of the URL says which"}
+    if "MANUAL MODE" in text and "NO PROMPT SENT" in text:
+        return {"reason": "manual_no_send",
+                "detail": "manual mode waited for a message and none was sent in the browser",
+                "next": "someone must type in the opened browser during manual mode; otherwise use the driven capture"}
+    if "NO PROMPT SENT" in text:
+        return {"reason": "no_prompt_sent", "detail": "the capture holds only the page bootstrap",
+                "next": "capture the page that carries the widget; if a consent gate or login stands in front, deal with it first (--manual, or a login capture)"}
+    return {"reason": "capture_unverified", "detail": "the prompt was not seen in the traffic",
+            "next": "inspect the saved capture; pass a HAR of a real conversation with --har if you have one"}
+
+
 def diagnose_browser_failure(exc: Exception, url: str) -> Dict[str, str]:
     """Turn a Playwright failure into something a human can act on.
 

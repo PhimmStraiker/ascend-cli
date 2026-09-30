@@ -305,7 +305,10 @@ class SSEStreamAdapter(BotAdapter):
                     detail = resp.text[:500]
                     resp.close()
                     return self._fail(
-                        f"HTTP {resp.status_code}: {detail}", start, adapter="sse_stream"
+                        f"HTTP {resp.status_code}: {detail}", start, adapter="sse_stream",
+                        reason=f"http_{resp.status_code}",
+                        next=("credentials: a 401/403 means the stored header or cookie is wrong or expired" if resp.status_code in (401, 403)
+                              else "the target rejected the request: compare the body and headers with the capture"),
                     )
 
                 text, truncated, stalled = self._read_stream(resp, stream_cfg, deadline)
@@ -328,13 +331,15 @@ class SSEStreamAdapter(BotAdapter):
                     return self._fail(
                         f"Target produced no output within {read_timeout:.0f}s of think time "
                         f"(slow/overloaded target, session left intact)",
-                        start, adapter="sse_stream", stalled=True,
+                        start, adapter="sse_stream", stalled=True, reason="no_first_frame",
+                        next="the target sent nothing in the think-time wait: raise first_frame_ms only if it is known to be slow; otherwise it is not answering this request shape",
                     )
 
                 break
 
         except requests.RequestException as e:
-            return self._fail(f"Request error: {e}", start, adapter="sse_stream")
+            return self._fail(f"Request error: {e}", start, adapter="sse_stream", reason="request_error",
+                              next="a transport error before any reply: reachability, TLS or a closed keep-alive; retry once, then check the host")
         except Exception as e:  # noqa: BLE001 — never raise out of send_prompt
             logger.error("sse_stream adapter error: %s", e, exc_info=True)
             return self._fail(str(e), start, adapter="sse_stream")
@@ -348,12 +353,14 @@ class SSEStreamAdapter(BotAdapter):
                 return self._fail(
                     f"Agent still running tool rounds at the {timeout:.0f}s budget — "
                     f"no answer text emitted yet",
-                    start, adapter="sse_stream", truncated=True,
+                    start, adapter="sse_stream", truncated=True, reason="budget_before_answer",
+                    next="the stream was alive but carried only status frames: check token_types/text_path against the recorded stream, or raise the probe window",
                 )
             return self._fail(
                 "No response frames collected (check stream.token_types / text_path)",
                 start,
-                adapter="sse_stream",
+                adapter="sse_stream", reason="no_answer_text",
+                next="frames arrived but none matched: set stream.text_path (and token_types) to what the recorded stream shows",
             )
 
         return self._ok(text.strip(), start, adapter="sse_stream", truncated=truncated)

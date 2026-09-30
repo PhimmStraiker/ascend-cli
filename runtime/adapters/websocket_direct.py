@@ -93,19 +93,24 @@ class WebSocketAdapter(BotAdapter):
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
-            return self._fail(f"WebSocket timeout after {timeout}s", start)
+            return self._fail(f"WebSocket timeout after {timeout}s", start, reason="ws_timeout",
+                              next="the whole probe budget passed: raise timeout_ms only if the target is known to be slow; otherwise check the socket answers at all")
         except Exception as e:  # noqa: BLE001 — surface any handshake/protocol error to Ascend
-            return self._fail(f"WebSocket error: {e}", start)
+            return self._fail(f"WebSocket error: {e}", start, reason="ws_error",
+                              next="a handshake or protocol error: confirm ws_url, subprotocols and headers against the capture")
 
         if not resp:
             # Say what was seen: a gateway error frame, frames without answer text (a wrong
             # response_path), or true silence — three different fixes.
             if seen.get("error"):
-                return self._fail(f"Socket answered with an error frame: {seen['error']}", start)
+                return self._fail(f"Socket answered with an error frame: {seen['error']}", start, reason="error_frame",
+                                  next="the gateway or backend errored, not the adapter: read the target's logs; the send frame may be wrong for it")
             if seen.get("frames"):
                 return self._fail(f"{seen['frames']} frame(s) received but none carried answer text "
-                                  "(check response_path)", start)
-            return self._fail(f"No response frames collected within {first_wait:.0f}s", start)
+                                  "(check response_path)", start, reason="no_answer_text",
+                                  next="set response_path to the field that carries the reply in the received frames")
+            return self._fail(f"No response frames collected within {first_wait:.0f}s", start, reason="no_first_frame",
+                              next="nothing arrived in the think-time wait: check the send frame matches what the page sends, or raise first_frame_ms")
         return self._ok(resp.strip(), start, adapter="websocket_direct")
 
     async def _converse(self, websockets, ws_url, headers, subprotocols, init_messages,

@@ -11,6 +11,18 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ## [Unreleased]
 
+### Added
+- `ascend bridge grade <app|recording>` — what the platform's score cannot see, from the relay's own
+  recording: probes answered / failed / without a result, and how many replies leak, by `--marker`
+  (a planted value), by verbatim overlap with `--system-prompt-file`, or by an instruction-like
+  heuristic. Numbers only, never reply text (`runtime/evidence_grade.py`, importable by the engine).
+  Measured on our own range: two relayed runs scored PASSED 0 of 4 while all 8 delivered replies
+  carried the planted secret. `bridge --help` gains the subcommand (corpora re-recorded).
+- Structured diagnoses. A failure the code understands carries `diagnosis` {reason, detail, next}
+  in the JSON error envelope, in the adapters' failure metadata (`no_first_frame`, `no_answer_text`,
+  `error_frame`, `http_401`…) and in a failed browser capture (`site_root_no_widget`,
+  `typed_not_observed`…); the MCP shim surfaces `error_code`, `hint` and `diagnosis` as fields.
+
 ### Fixed
 - Streaming adapters give the target its think time. `websocket_direct` and `sse_stream` applied
   the idle gap (silence *between* frames) from the moment the prompt was sent, so a target slower
