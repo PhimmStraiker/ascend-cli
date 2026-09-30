@@ -116,6 +116,20 @@ def resolve_secret_ref(ref: Any, *, allow_literal: bool = False) -> str:
     )
 
 
+def _resolve_env_values(headers: Dict[str, Any]) -> Dict[str, Any]:
+    """`env:NAME` header values in a multihop step or attach block resolve like any other secret.
+
+    A credential minted per request often rides next to a STATIC one — the site's access code,
+    a tenant key — that every call, the mint included, must carry. The static value belongs in
+    the store, referenced as env:NAME, never in the config; without this the reference went out
+    on the wire as the literal string "env:NAME".
+    """
+    out = {}
+    for k, v in (headers or {}).items():
+        out[k] = resolve_secret_ref(v) if isinstance(v, str) and v.startswith("env:") else v
+    return out
+
+
 def _render_vars(template: Any, variables: Dict[str, str]) -> Any:
     """Substitute ``{{VAR}}`` placeholders in a (possibly nested) structure."""
     if isinstance(template, str):
@@ -459,7 +473,7 @@ class AuthProvider:
             url = _render_vars(step.get("url", ""), variables)
             if not url:
                 raise AuthError(f"derived_multihop step {i} missing 'url'")
-            headers = _render_vars(step.get("headers", {}) or {}, variables)
+            headers = _resolve_env_values(_render_vars(step.get("headers", {}) or {}, variables))
             json_body = _render_vars(step.get("json"), variables) if step.get("json") is not None else None
             data_body = _render_vars(step.get("data"), variables) if step.get("data") is not None else None
 
@@ -484,7 +498,7 @@ class AuthProvider:
         # Final material: render the downstream attach spec with the variables.
         attach = cfg.get("attach", {}) or {}
         mat = AuthMaterial()
-        mat.headers = _render_vars(attach.get("headers", {}) or {}, variables)
+        mat.headers = _resolve_env_values(_render_vars(attach.get("headers", {}) or {}, variables))
         mat.cookies = _render_vars(attach.get("cookies", {}) or {}, variables)
         mat.params = _render_vars(attach.get("params", {}) or {}, variables)
         # Also carry session cookies picked up along the way.
