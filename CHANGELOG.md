@@ -26,6 +26,11 @@ them is visible at a glance. A growing Regressions section is a process signal, 
   `{"format": "sse"}`.
 
 ### Added
+- The hand-over bundle carries `bridge/`: a `config.yaml` and a `docker-compose.yaml` for the bridge the
+  Console hands out (`ascendai-bridge` binary or the `straikerai/ascendai-bridge:latest` image, so the newest
+  bridge is always the one used). A plain direct adapter is pointed at the target; streams, sockets, minted
+  credentials and browsers are pointed at the bundle's shim. The manifest records which, plus the request
+  template and reply path to paste into the Console's Bridge application.
 - `ascend adapter bundle <config>` — the adapter as a hand-over artifact: one folder with
   `adapter.json` (env: references only, never a secret), `manifest.json`, `secrets.template.env`,
   a README, `relay/` (the bridge as a container for the customer's network), `shim/` (a

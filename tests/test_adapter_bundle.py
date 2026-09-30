@@ -75,3 +75,45 @@ def test_redaction_helpers_leave_clean_urls_alone():
     assert bundle.redact_url("https://h/rest") == "https://h/rest"
     assert bundle.redact_url("https://h/a?k=v&flag") == "https://h/a?k=***&flag"
     assert bundle.redact_evidence({"n": 3, "u": "https://h/a?t=1", "s": "plain"}) == {"n": 3, "u": "https://h/a?t=***", "s": "plain"}
+
+
+def test_a_plain_direct_adapter_points_the_console_bridge_at_the_target(tmp_path):
+    """The bridge the Console hands out forwards one POST with one auth block; a static-header
+    direct adapter needs nothing else, so the bridge is pointed straight at the target."""
+    cfg = {"adapter": "direct_api", "endpoint": "https://lab.example.test/rest/api/chat", "method": "POST",
+           "body": {"message": "{{PROMPT}}"}, "response_path": "reply",
+           "headers": {"Content-Type": "application/json", "Origin": "https://lab.example.test"},
+           "auth": {"type": "static", "mode": "headers", "headers": {"Cookie": "env:ASCEND_SECRET_LAB_COOKIE"}}}
+    m = bundle.write_bundle(cfg, tmp_path / "e", app_name="rest", vendor_runtime=False)
+    out = tmp_path / "e"
+    assert m["bridge"]["console_bridge"]["points_at"] == "direct"
+    assert m["bridge"]["console_bridge"]["image"] == "straikerai/ascendai-bridge:latest"
+    assert m["bridge"]["console_bridge"]["console_request_template"] == {"message": "{{PROMPT}}"}
+    assert m["bridge"]["console_bridge"]["console_response_path"] == "reply"
+    y = (out / "bridge" / "config.yaml").read_text()
+    assert 'url: "https://lab.example.test/rest/api/chat"' in y
+    assert "type: custom" in y and "Cookie:" in y and "ASCEND_SECRET_LAB_COOKIE" in y
+    assert "env:" not in y.split("Cookie:")[1].splitlines()[0]        # a placeholder, never the ref syntax or a value
+    assert "transport: pull" in y
+    assert "straikerai/ascendai-bridge:latest" in (out / "bridge" / "docker-compose.yaml").read_text()
+
+
+def test_everything_else_points_the_console_bridge_at_the_shim(tmp_path):
+    m = bundle.write_bundle(CFG, tmp_path / "f", app_name="session", vendor_runtime=False)     # derived_multihop
+    out = tmp_path / "f"
+    assert m["bridge"]["console_bridge"]["points_at"] == "shim"
+    assert m["bridge"]["console_bridge"]["console_request_template"] == {"prompt": "{{PROMPT}}"}
+    assert m["bridge"]["console_bridge"]["console_response_path"] == "response"
+    y = (out / "bridge" / "config.yaml").read_text()
+    assert "http://shim:8787/chat" in y and "api_key_name: X-Shim-Key" in y
+    c = (out / "bridge" / "docker-compose.yaml").read_text()
+    assert "TARGET_APP_API_KEY_NAME: X-Shim-Key" in c and "shim/Dockerfile" in c and "depends_on: [shim]" in c
+    assert m["bridge"]["cli_relay"]["protocol"].startswith("v2 lease")
+
+
+def test_a_streaming_adapter_goes_through_the_shim(tmp_path):
+    cfg = {"adapter": "sse_stream", "base_url": "https://lab.example.test", "chat_path": "/sse/api/chat",
+           "stream": {"format": "sse"}, "headers": {"Cookie": "env:ASCEND_SECRET_LAB_COOKIE"}}
+    assert bundle.console_bridge_plan(cfg)["target"] == "shim"
+    ws = {"adapter": "websocket_direct", "ws_url": "wss://gw.example.test/demo"}
+    assert bundle.console_bridge_plan(ws)["target"] == "shim"
