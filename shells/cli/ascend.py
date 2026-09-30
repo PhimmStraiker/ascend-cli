@@ -7582,6 +7582,38 @@ def _describe_shape(result):
     return out
 
 
+def cmd_adapter_bundle(args):
+    """Write the hand-over bundle for a config: the adapter as a reusable, hostable artifact."""
+    from bundle import write_bundle  # noqa: PLC0415  (runtime/ on sys.path)
+    path = resolve_config_path(args.config)
+    cfg = json.loads(Path(path).read_text())
+    name = Path(path).stem
+    app_id = getattr(args, "app", None) or ""
+    if not app_id:
+        try:
+            import creds as C  # noqa: PLC0415
+            for aid, rec in (C.load_all() or {}).items():
+                if (rec.get("app_name") or "") == name:
+                    app_id = aid
+                    break
+        except Exception:  # noqa: BLE001
+            app_id = ""
+    out = Path(args.out) if getattr(args, "out", None) else Path("handover") / name
+    evidence = {}
+    disc = cfg.get("_discovery") or {}
+    if isinstance(disc, dict):
+        evidence = {k: disc.get(k) for k in ("source", "captured_at", "har", "capture") if disc.get(k)}
+    manifest = write_bundle(cfg, out, app_name=name, app_id=app_id, tenant=getattr(args, "tenant_id", "") or "",
+                            evidence=evidence, vendor_runtime=not getattr(args, "no_vendor", False))
+    if getattr(args, "json", False):
+        _out({"ok": True, "path": str(out), "manifest": manifest})
+        return
+    print(f"hand-over bundle for {name}: {out}")
+    print(f"  adapter {manifest['adapter']} · hash {manifest['hash']} · secrets to supply: "
+          f"{', '.join(manifest['secrets_required']) or 'none'}")
+    print(f"  relay/ (bridge container), shim/ (POST /chat service + Lambda), vendor/ (runtime @ {manifest['runtime']['cli_commit']})")
+
+
 def cmd_adapter_validate(args):
     """HARD GATE: run one prompt through the config against the live target."""
     from runtime.discovery import validate as V
@@ -8609,6 +8641,17 @@ def build_parser():
     s.add_argument("--expect", default=None, help="substring the response must contain")
     s.add_argument("--timeout", type=float, default=60.0)
     s.set_defaults(func=cmd_adapter_validate)
+    s = adp.add_parser("bundle", parents=[GLOBALS], formatter_class=_Fmt,
+                       help="write the hand-over bundle for a config: adapter.json (env: refs only), manifest, "
+                            "secrets template, relay/ container, shim/ service + Lambda, vendored runtime",
+                       description=("The adapter as a reusable artifact another team can host: in the customer's "
+                                    "network as the relay, on our side as a POST /chat shim a direct app calls, "
+                                    "or inside the engine by importing the vendored runtime. No secret is written."))
+    s.add_argument("config", help="config name in the config dir")
+    s.add_argument("--app", help="the registered application id (aapp_…) this adapter serves (default: looked up by name)")
+    s.add_argument("--out", help="folder to write (default: ./handover/<config>)")
+    s.add_argument("--no-vendor", action="store_true", help="skip vendoring runtime/ and control/ (smaller; needs the CLI tree to run)")
+    s.set_defaults(func=cmd_adapter_bundle)
 
     # discover
     # `adapter build` is the primary name — you are building an adapter, and the source is a flag.

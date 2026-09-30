@@ -12,6 +12,14 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 ## [Unreleased]
 
 ### Added
+- `ascend adapter bundle <config>` — the adapter as a hand-over artifact: one folder with
+  `adapter.json` (env: references only, never a secret), `manifest.json`, `secrets.template.env`,
+  a README, `relay/` (the bridge as a container for the customer's network), `shim/` (a
+  `POST /chat {prompt} -> {response}` service and a Lambda handler to host on our side and point a
+  direct app at) and `vendor/` (the pinned runtime, importable inside the engine). `adapter --help`
+  gains the subcommand (the golden and back-compat corpora were re-recorded for that one line).
+- `deploy/relay/` — the relay as a container (Fargate / Cloud Run / Kubernetes Job), with its own
+  loopback test; `deploy/shim/` — the hosted-adapter shim.
 
 - **`target add` goes direct first, and a bridge only when it has to.** Registration always created
   a bridge app, even for a public JSON endpoint the platform could call itself — so every target

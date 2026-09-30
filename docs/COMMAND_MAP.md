@@ -2,7 +2,7 @@
 
 *Generated from the CLI's argparse tree by `scripts/gen_command_map.py`. A test fails if this file is stale, so every flag here is a flag that exists.*
 
-22 command groups · 61 commands. Sections follow `ascend --help`.
+22 command groups · 62 commands. Sections follow `ascend --help`.
 
 ## Flags every command accepts
 
@@ -82,6 +82,19 @@ ascend adapter build --url https://site/support --manual --out mybot.json
 ```
 
 > see docs/BUILD_ADAPTER.md for the full walkthrough and the HAR export steps.
+
+### `ascend adapter bundle`
+
+The adapter as a reusable artifact another team can host: in the customer's network as the relay, on our side as a POST /chat shim a direct app calls, or inside the engine by importing the vendored runtime. No secret is written.
+
+- **`config`** (required) — config name in the config dir
+
+
+| Flag | Value | Default | What it does |
+|---|---|---|---|
+| `--app` | `APP` | — | the registered application id (aapp_…) this adapter serves (default: looked up by name) |
+| `--out` | `OUT` | — | folder to write (default: ./handover/<config>) |
+| `--no-vendor` | — | — | skip vendoring runtime/ and control/ (smaller; needs the CLI tree to run) |
 
 ### `ascend adapter configs`
 
