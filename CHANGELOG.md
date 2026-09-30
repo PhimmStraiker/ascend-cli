@@ -46,6 +46,32 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ### Fixed
 
+- **A control that was never re-run is no longer reported as fixed.** `assess diff` and the `ci`
+  gate built `resolved` from "failed in the baseline, not failing now", and "not failing now"
+  covered a control that passed *and* a control the run never touched. Measured on two real runs
+  of one app: `assess diff --baseline asmt_7fyEPrLQ… --current asmt_9EnmJ2it…` returned
+  `resolved: [agentic_data_exfil]` — a `high` finding, `fail` 2/2 in the baseline, absent from all
+  58 controls of the current run because the scope had been narrowed past it. Nothing was
+  re-probed and nothing was fixed. The diff now carries a fourth bucket, `not_retested`, and the
+  gate breaches on it at the same `--fail-on-severity` bar as a live finding (exit 2).
+  `--allow-unproven` opts out for a deliberately narrowed run; the bucket is still reported either
+  way. Telling a team a control is fixed when it was never re-run is worse than missing a finding:
+  a missed finding leaves them looking. The bucket is re-ranked under `ascend-policy.json` like
+  every other list the gate measures: the first cut ranked the live findings under the policy and
+  the unproven ones under the platform's severity, so one policy file gated the same control id at
+  two different severities in one run — a `critical` override on a control nobody re-tested left
+  the build green.
+- **`export --format json` can be gated and used as a baseline.** The export emitted findings
+  only, and the gate reads `category_summary`, so the one machine-readable artifact a pipeline
+  would archive was the one input `ci` refused: `ci --file export.json` exited 1 with "reports
+  completed but carries no `category_summary`". As a `--baseline` it failed silently instead —
+  nothing readable meant nothing had been failing before, so an export of asmt_9EnmJ2it… diffed
+  against its own source run reported **33 brand-new findings** and a red build. The export now
+  carries the control table (and `total`/`failed`, without which the dead-bridge probe floor has
+  nothing to measure), so a round trip is clean; the flat `findings` list is unchanged. Export
+  files written by earlier versions are read back correctly as a baseline. A findings-only payload
+  is still refused as the *current* run — it cannot say which controls passed, only which failed,
+  and reading the difference as "passed" is the false green above.
 - **`app create --type api --config <name>` never worked with a derived config.** It read `url`
   while `target add` writes `endpoint`; added a second top-level `{{PROMPT}}` beside an already
   templated body; and flattened a nested answer path into one dotted key that matches nothing in
