@@ -37,6 +37,20 @@ def origin_of(url: str) -> str:
     return f"{p.scheme or 'https'}://{p.netloc}"
 
 
+def _is_power_platform_error(body: Any) -> bool:
+    """The Power Platform API error contract: {"error": {"code": ..., "message": ...}}.
+
+    A 401/403 alone proves nothing about WHICH platform answered. Any host with an access gate
+    (a passcode page, a WAF, basic auth) 401s on an arbitrary path too, and treating that as a
+    Copilot Studio signal claimed an unrelated host for this profile — MEASURED on a gated lab
+    target: "misfingerprinted as Copilot Studio", registration refused. What a real Entra-gated
+    agent's token endpoint returns is this JSON shape; a passcode page returns HTML, a generic
+    gate returns a string error. Only the contract is evidence.
+    """
+    return (isinstance(body, dict) and isinstance(body.get("error"), dict)
+            and bool(body["error"].get("code")))
+
+
 def _get(url: str, headers: Optional[Dict[str, str]] = None, verify: bool = True) -> Tuple[int, Any]:
     try:
         r = requests.get(url, headers=headers or {}, timeout=TIMEOUT, verify=verify)
@@ -269,7 +283,7 @@ class CopilotStudio:
             return True
         status, body = _get(cls.token_url(origin), verify=verify)
         if status in (401, 403):
-            return True
+            return _is_power_platform_error(body)
         return status == 200 and isinstance(body, dict) and bool(body.get("token"))
 
     @classmethod
@@ -278,7 +292,9 @@ class CopilotStudio:
         status, body = _get(cls.token_url(origin), verify=verify)
         if status == 200 and isinstance(body, dict) and body.get("token"):
             return "directline"
-        if status in (401, 403):
+        # On a real Power Platform host the host is the evidence; anywhere else the 401 must
+        # carry the Power Platform error contract to count (see _is_power_platform_error).
+        if status in (401, 403) and (cls.is_power_platform_host(origin) or _is_power_platform_error(body)):
             return "entra"
         return "unknown"
 

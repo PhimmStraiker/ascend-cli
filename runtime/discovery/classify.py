@@ -2003,7 +2003,11 @@ def _body_template(req: Dict[str, Any]) -> Any:
     body = req.get("json")
     prompt = _request_has_prompt(req)
     if isinstance(body, (dict, list)):
-        if prompt is not None:
+        # Only a NON-EMPTY prompt can be templated by substitution. An empty one (a create call
+        # recorded with {"message": ""}) made str.replace("", "{{PROMPT}}") insert the placeholder
+        # between every character, and json.loads then failed at char 1 — reported to the operator
+        # as "the HAR parser dies on char 1", which sent an afternoon looking at the wrong file.
+        if prompt:
             replaced = json.loads(json.dumps(body).replace(json.dumps(prompt)[1:-1], "{{PROMPT}}"))
             return replaced
         return body
