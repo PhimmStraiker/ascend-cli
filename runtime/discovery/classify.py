@@ -1771,6 +1771,32 @@ def _sse_stream_hints(body: str) -> Dict[str, Any]:
             if term in events or term in order:
                 hints["done_when"] = {"event": term}
                 break
+        return hints
+    # No named events: the frames may carry the discriminator in a `type` field instead
+    # ({"type":"token","content":…} … {"type":"done"}). Read it the same way — the type on the
+    # frames that carried the answer text, and a terminal type — so the config says what the
+    # stream does instead of leaning on the adapter's defaults. MEASURED on the SSE lab widget.
+    types_text: Dict[str, int] = {}
+    terminal = None
+    for line in str(body).splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        try:
+            obj = json.loads(line.split(":", 1)[1].strip())
+        except Exception:
+            continue
+        if not isinstance(obj, dict) or not isinstance(obj.get("type"), str):
+            continue
+        t = obj["type"]
+        if t.strip().lower() in _WS_DONE_VALUES:
+            terminal = t
+        elif isinstance(obj.get(field), str):
+            types_text[t] = types_text.get(t, 0) + len(obj[field])
+    if types_text:
+        hints["token_types"] = [max(types_text.items(), key=lambda kv: kv[1])[0]]
+    if terminal:
+        hints["done_when"] = {"path": "type", "equals": terminal}
     return hints
 
 

@@ -21,9 +21,10 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 - A WebSocket contract is derived from the frames the page exchanged: the send frame that carried
   the prompt (with `{{PROMPT}}` substituted), the field that carried the reply (`response_path`)
   and the terminal frame (`done_when`). Before, only the URL came from the capture.
-- The browser capture records a streamed response body (`text/event-stream`, NDJSON) after the
-  stream ends; read at response start it was empty and the derived SSE config was a bare
-  `{"format": "sse"}`.
+- The browser capture keeps a streamed reply body (`text/event-stream`, NDJSON) through a hook in
+  the page — Playwright returns neither such a body nor its HAR text, so the pair was recorded empty
+  and the derived SSE config was a bare `{"format": "sse"}` left to the adapter's defaults. The
+  field mapping and terminal frame are now derived from the recorded stream.
 
 ### Added
 - The hand-over bundle carries `bridge/`: a `config.yaml` and a `docker-compose.yaml` for the bridge the

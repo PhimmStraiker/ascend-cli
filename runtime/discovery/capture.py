@@ -209,6 +209,90 @@ def _augment_pairs_from_har(pairs: List[Dict[str, Any]], har_path: Optional[str]
         notes.append(f"HAR saved for review: {har_path}")
 
 
+# The page's own view of a streamed reply. Playwright hands back neither the body of a
+# text/event-stream response nor its HAR text (both measured empty on the SSE lab widget), so the
+# derived config was a bare {"format": "sse"} with the field mapping left to the adapter's
+# defaults. This tees every streamed fetch body inside the page and keeps the text; EventSource
+# messages are kept too. Read back with _collect_streams before the context closes.
+STREAM_HOOK_JS = """
+(() => {
+  if (window.__ascendStreams) return;
+  const streams = window.__ascendStreams = [];
+  const keep = (rec, chunk) => { if (rec.text.length < 200000) rec.text += chunk; };
+  const origFetch = window.fetch;
+  if (origFetch) {
+    window.fetch = async function(input, init) {
+      const res = await origFetch.apply(this, arguments);
+      try {
+        const ct = (res.headers && res.headers.get('content-type')) || '';
+        if (res.body && (ct.includes('event-stream') || ct.includes('ndjson'))) {
+          const url = (typeof input === 'string') ? input : ((input && input.url) || '');
+          const method = ((init && init.method) || (input && input.method) || 'GET').toUpperCase();
+          const rec = {url: new URL(url, location.href).href, method, status: res.status, text: ''};
+          streams.push(rec);
+          const [forPage, forUs] = res.body.tee();
+          (async () => {
+            const reader = forUs.getReader(); const dec = new TextDecoder();
+            try { while (true) { const {done, value} = await reader.read(); if (done) break; keep(rec, dec.decode(value, {stream: true})); } }
+            catch (e) {}
+          })();
+          return new Response(forPage, {status: res.status, statusText: res.statusText, headers: res.headers});
+        }
+      } catch (e) {}
+      return res;
+    };
+  }
+  const OrigES = window.EventSource;
+  if (OrigES) {
+    window.EventSource = function(url, cfg) {
+      const es = new OrigES(url, cfg);
+      const rec = {url: new URL(String(url), location.href).href, method: 'GET', status: 200, text: ''};
+      streams.push(rec);
+      es.addEventListener('message', ev => keep(rec, 'data: ' + ev.data + '\\n\\n'));
+      return es;
+    };
+    window.EventSource.prototype = OrigES.prototype;
+  }
+})();
+"""
+
+
+async def _collect_streams(page) -> List[Dict[str, Any]]:
+    """The streamed bodies the hook kept, from the page and every frame. Never raises."""
+    out: List[Dict[str, Any]] = []
+    for fr in [page] + list(getattr(page, "frames", []) or []):
+        try:
+            recs = await fr.evaluate("() => (window.__ascendStreams || []).map(r => ({url: r.url, method: r.method, status: r.status, text: r.text.slice(0, 20000)}))")
+            out.extend(r for r in (recs or []) if isinstance(r, dict))
+        except Exception:
+            continue
+    return out
+
+
+def _fill_streamed_bodies(pairs: List[Dict[str, Any]], streams: List[Dict[str, Any]],
+                          notes: List[str]) -> int:
+    """Give a streamed pair its body from the page hook. Matches on method and URL (the hook
+    records absolute URLs); only a pair whose recorded body is empty is touched."""
+    if not streams:
+        return 0
+    filled = 0
+    for pr in pairs:
+        resp = pr.get("response") or {}
+        ct = (resp.get("content_type") or "").lower()
+        if resp.get("raw_body") or not ("event-stream" in ct or "ndjson" in ct):
+            continue
+        req = pr.get("request") or {}
+        for rec in streams:
+            if rec.get("text") and rec.get("url") == req.get("url") and \
+                    (rec.get("method") or "").upper() == (req.get("method") or "").upper():
+                resp["raw_body"] = rec["text"][:20000]
+                filled += 1
+                break
+    if filled:
+        notes.append(f"read {filled} streamed reply body(ies) from the page (SSE/NDJSON bodies are not in the HAR)")
+    return filled
+
+
 async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: int,
                          settle_s: int, manual: bool = False, manual_wait_s: int = 180,
                          input_wait_s: float = INPUT_WAIT_S,
@@ -303,7 +387,12 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
             ctx = browser.contexts[0]
         else:
             ctx = await browser.new_context(**ctx_kw)
+        try:
+            await ctx.add_init_script(STREAM_HOOK_JS)
+        except Exception:
+            pass                          # an attached context may refuse; the capture still works
         page = await ctx.new_page()
+        streams: List[Dict[str, Any]] = []
 
         async def on_response(resp):
             try:
@@ -318,12 +407,9 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
                 ct = (resp.headers or {}).get("content-type", "")
                 if any(t in ct for t in ("json", "text", "event-stream", "ndjson")):
                     try:
-                        if "event-stream" in ct or "ndjson" in ct:
-                            # A streamed body is only readable once the stream has ended; read
-                            # at response start it raised, the body was recorded as empty, and
-                            # the derived config was a bare {"format": "sse"} with the field
-                            # mapping left to guesswork. MEASURED on the SSE lab widget.
-                            await resp.finished()
+                        # A streamed body (text/event-stream, NDJSON) is NOT available here, nor
+                        # in the HAR: MEASURED, both come back empty. It is read by the page hook
+                        # (STREAM_HOOK_JS) and folded in by _fill_streamed_bodies below.
                         body = (await resp.text())[:20000]
                     except Exception:
                         body = None
@@ -408,6 +494,7 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
                     await asyncio.wait(pending_tasks, timeout=10)
                 except Exception:
                     pass
+            streams = await _collect_streams(page)
             if not cdp:                       # flush the HAR: Playwright writes it on CONTEXT close;
                 try:                          # this is our own context, never the operator's
                     await ctx.close()
@@ -416,6 +503,7 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
             if not cdp:                       # never close the operator's own browser
                 await browser.close()
             _augment_pairs_from_har(pairs, _har_path, notes)
+            _fill_streamed_bodies(pairs, streams, notes)
 
             def _in_traffic_m(needle):
                 if not needle: return False
@@ -596,6 +684,7 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
                 await asyncio.wait(pending_tasks, timeout=10)
             except Exception:
                 pass
+        streams = await _collect_streams(page)
         if not cdp:                       # flush the HAR: Playwright writes it on CONTEXT close;
             try:                          # this is our own context, never the operator's
                 await ctx.close()
@@ -605,6 +694,7 @@ async def _capture_async(url: str, *, prompt: str, headless: bool, timeout_s: in
             await browser.close()
 
     _augment_pairs_from_har(pairs, _har_path, notes)
+    _fill_streamed_bodies(pairs, streams, notes)
 
     # HARD VERIFICATION: typing into a box proves nothing — the prompt must appear in
     # real traffic. Two silent failure modes this catches: (a) we typed into a site
