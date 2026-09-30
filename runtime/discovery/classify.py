@@ -870,6 +870,7 @@ def classify_auth(ev: Dict[str, Any], chat_idx: Optional[int]) -> Dict[str, Any]
     req = pairs[chat_idx]["request"]
     headers = req["headers"]
     query = req["query"]
+    own = _registrable_host(req.get("url", ""))
 
     # Values produced by earlier responses (login/token/csrf), for reuse detection.
     prior_values = _collect_prior_values(pairs, chat_idx)
@@ -880,7 +881,7 @@ def classify_auth(ev: Dict[str, Any], chat_idx: Optional[int]) -> Dict[str, Any]
         low = authz.lower()
         if low.startswith("bearer "):
             token = authz.split(" ", 1)[1]
-            origin = _reuse_origin(token, prior_values)
+            origin = _reuse_origin(token, prior_values, own_host=own)
             if origin is not None:
                 oi, ofield, ourl = origin
                 if _looks_token_endpoint(ourl) and _has_access_token(pairs[oi]["response"]["json"]):
@@ -905,7 +906,7 @@ def classify_auth(ev: Dict[str, Any], chat_idx: Optional[int]) -> Dict[str, Any]
     # 2) CSRF header echoed from a prior bootstrap.
     for h in _CSRF_HEADERS:
         if h in headers:
-            origin = _reuse_origin(headers[h], prior_values)
+            origin = _reuse_origin(headers[h], prior_values, own_host=own)
             if origin is not None:
                 oi, ofield, ourl = origin
                 return {"value": "csrf", "confidence": 0.8,
@@ -960,7 +961,7 @@ def classify_auth(ev: Dict[str, Any], chat_idx: Optional[int]) -> Dict[str, Any]
 
     # 5) Cookie session (possibly derived from a login).
     if "cookie" in headers:
-        origin = _reuse_origin(headers["cookie"], prior_values, substring=True)
+        origin = _reuse_origin(headers["cookie"], prior_values, substring=True, own_host=own)
         if origin is not None:
             oi, ofield, ourl = origin
             return _auth_derived(pairs, chat_idx, oi, ofield, ourl, kind_hint="cookie")
@@ -1545,7 +1546,22 @@ def compose(classified: Dict[str, Any]) -> Dict[str, Any]:
     _values = tparams.get("secret_header_values") or {}
     _dynamic = isinstance(config.get("auth"), dict) and \
         config["auth"].get("type") in ("oauth2", "csrf", "derived_multihop")
-    if _values and not _dynamic:
+    _pairs = (ev or {}).get("pairs") if isinstance(ev, dict) else None
+    _minted = minted_credentials(_values, _pairs or [], (ev or {}).get("chat_pair_index")
+                                 if isinstance(ev, dict) else None,
+                                 chat_url=tparams.get("secret_header_url") or endpoint or "") \
+        if _values and not _dynamic else {}
+    if _values and not _dynamic and _minted:
+        # A credential the session MINTED (its value came back from an earlier call) is re-minted
+        # before every probe; whatever else was captured stays static and rides along.
+        _url = tparams.get("secret_header_url") or endpoint or ""
+        static_refs = {name: f"env:{secret_var_name(_url, name)}" for name in sorted(_values) if name not in _minted}
+        config["auth"] = _minted_auth_block(_minted, _pairs, static_refs)
+        config["auth_lifecycle"] = {"type": "refresh_on_ttl", "ttl_s": 0}   # already stale = re-mint per probe
+        config["_captured_credentials"] = sorted(static_refs)
+        config["_minted_credentials"] = {name: {"from": _pairs[spec["pair"]]["request"].get("url", ""), "path": spec["path"]}
+                                         for name, spec in _minted.items()}
+    elif _values and not _dynamic:
         _url = tparams.get("secret_header_url") or endpoint or ""
         refs = {name: f"env:{secret_var_name(_url, name)}" for name in sorted(_values)}
         config["auth"] = {"type": "static", "mode": "headers", "headers": refs}
@@ -1560,7 +1576,10 @@ def compose(classified: Dict[str, Any]) -> Dict[str, Any]:
                     f"mechanism is kept instead."),
         }
 
-    config["auth_lifecycle"] = _lifecycle_block(lifecycle)
+    # A minted credential already set its lifecycle (re-mint before every probe); the classified
+    # lifecycle layer describes the static case and must not overwrite it.
+    if not (config.get("_minted_credentials") and config.get("auth_lifecycle")):
+        config["auth_lifecycle"] = _lifecycle_block(lifecycle)
     config["identity"] = {"mode": identity.get("params", {}).get("mode", "fixed")}
 
     # Rate / concurrency.
@@ -1916,6 +1935,102 @@ def captured_secret_headers(headers: Dict[str, str]) -> Dict[str, str]:
             if not k.startswith(":") and k not in _NEVER_SECRET
             and isinstance(v, str) and v.strip()
             and _looks_secret_header(k, v)}
+
+
+def _json_path_to_value(obj: Any, value: str, prefix: str = "") -> Optional[str]:
+    """Dot-path of the first string leaf equal to `value`, or None. `data.token`, `token`, `items.0.id`."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            here = f"{prefix}.{k}" if prefix else str(k)
+            if isinstance(v, str) and v == value:
+                return here
+            found = _json_path_to_value(v, value, here)
+            if found:
+                return found
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            here = f"{prefix}.{i}" if prefix else str(i)
+            if isinstance(v, str) and v == value:
+                return here
+            found = _json_path_to_value(v, value, here)
+            if found:
+                return found
+    return None
+
+
+def _registrable_host(url: str) -> str:
+    """`api.shop.example.com` -> `example.com`-ish: the last two labels, enough to tell a widget's own
+    API from a third-party challenge or identity host."""
+    from urllib.parse import urlparse  # noqa: PLC0415
+    host = (urlparse(url or "").hostname or "").lower()
+    parts = host.split(".")
+    return ".".join(parts[-2:]) if len(parts) >= 2 else host
+
+
+def minted_credentials(values: Dict[str, str], pairs: List[Dict[str, Any]],
+                       chat_idx: Optional[int], chat_url: str = "") -> Dict[str, Dict[str, Any]]:
+    """Which captured credential headers were MINTED by an earlier call in the same session.
+
+    A header whose value appears verbatim in the JSON body of a prior response (a create-conversation
+    call handing back `{"conversation_id": …, "token": …}`) is not a static credential: it was minted
+    for that conversation and a replay with it frozen works only until the conversation ends or
+    expires. MEASURED on a lab widget: a direct app registered with the captured `X-Conv-Token`
+    answered every probe through the ONE captured conversation — right answers, wrong mechanism, and
+    a false clean run on any widget whose tokens expire. Returns `{header: {"pair": i, "path": …}}`.
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    if not values or not pairs:
+        return out
+    upto = len(pairs) if chat_idx is None else max(0, chat_idx)
+    own = _registrable_host(chat_url) if chat_url else ""
+    for name, value in values.items():
+        if not isinstance(value, str) or len(value) < 8:
+            continue
+        for i in range(upto):
+            pair = pairs[i]
+            req = pair.get("request") or {}
+            # A minter is the widget's OWN API. A token handed out by a third-party host — a WAF's
+            # challenge endpoint, a CAPTCHA, an identity provider — is a challenge answer, not a
+            # conversation the adapter can re-create: MEASURED, the bot-challenge token endpoint
+            # got replayed as a "create call" and failed every time. Same registrable domain only.
+            if own and _registrable_host(req.get("url", "")) != own:
+                continue
+            # a call that SENDS the value is a consumer of it, never the minter
+            sent = " ".join(str(v) for v in (req.get("headers") or {}).values())
+            if value in sent:
+                continue
+            body = (pair.get("response") or {}).get("json")
+            path = _json_path_to_value(body, value) if body is not None else None
+            if path:
+                out[name] = {"pair": i, "path": path}
+                break
+    return out
+
+
+def _minted_auth_block(minted: Dict[str, Dict[str, Any]], pairs: List[Dict[str, Any]],
+                       static_refs: Dict[str, str]) -> Dict[str, Any]:
+    """A derived_multihop block: re-run the minting call before every probe, attach what it hands back.
+
+    One minting call (the common case; several minted headers from the same call are all extracted).
+    The static credentials the capture also saw (an access cookie, a tenant key) ride on the minting
+    call and on the probe as env: references, resolved by layers/auth at request time.
+    """
+    first = next(iter(minted.values()))["pair"]
+    create = pairs[first]["request"]
+    step: Dict[str, Any] = {"method": create.get("method", "POST"), "url": create.get("url", "")}
+    if create.get("json") is not None:
+        step["json"] = create["json"]
+    step_headers = {k: v for k, v in _nonsecret_headers(create.get("headers") or {}).items()
+                    if k.lower() in ("content-type", "accept", "origin", "referer")}
+    step_headers.update(static_refs)
+    if step_headers:
+        step["headers"] = step_headers
+    step["extract"] = [{"var": f"MINTED_{i}", "path": spec["path"]}
+                       for i, (name, spec) in enumerate(minted.items()) if spec["pair"] == first]
+    attach = {name: f"{{{{MINTED_{i}}}}}" for i, (name, spec) in enumerate(minted.items()) if spec["pair"] == first}
+    attach.update(static_refs)
+    return {"type": "derived_multihop", "steps": [step], "attach": {"headers": attach}}
+
 
 
 def secret_var_name(url: str, header: str) -> str:
@@ -2345,9 +2460,19 @@ def _html_token_origin(pairs: List[Dict[str, Any]], chat_idx: int,
 
 
 def _reuse_origin(needle: str, prior: List[Tuple[int, str, str, str]],
-                  substring: bool = False) -> Optional[Tuple[int, Optional[str], str]]:
-    """Find the earliest prior response value that equals/appears-in ``needle``."""
+                  substring: bool = False, own_host: str = "") -> Optional[Tuple[int, Optional[str], str]]:
+    """Find the earliest prior response value that equals/appears-in ``needle``.
+
+    Only the widget's OWN API can be the origin of a credential the adapter re-acquires. A value
+    handed out by a third-party host — a bot challenge's token endpoint, a CAPTCHA, an identity
+    provider — is a challenge answer or a login the adapter cannot replay from a script: MEASURED,
+    the WAF's token endpoint was chained as "derived_multihop step 0" and failed every probe.
+    With ``own_host`` (the chat request's registrable domain) such origins are ignored, which leaves
+    the credential static; the browser fallback handles its expiry.
+    """
     for idx, field, val, url in prior:
+        if own_host and _registrable_host(url) != own_host:
+            continue
         if (val in needle) if substring else (val == needle or val in needle):
             return (idx, field, url)
     return None
