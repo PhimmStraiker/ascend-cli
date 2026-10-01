@@ -193,3 +193,55 @@ def verify_config(config: Dict[str, Any], ev: Dict[str, Any],
         out["next"] = ("the derived answer field extracts nothing from the captured reply. Set it to "
                        "the field that carries the answer with ascend_adapter_patch, then re-check")
     return out
+
+
+def shape_fix(config: Dict[str, Any], ev: Dict[str, Any], capture_check: Optional[Dict[str, Any]],
+              framework: Optional[Dict[str, Any]], *, min_overlap: float = 0.34) -> Dict[str, Any]:
+    """Turn the envelope-shape hint into a VERIFIED correction, a suggestion, or nothing.
+
+    Returns ``{config, fix, suggestion}``. ``config`` is the input unless a fix was applied.
+
+    * The derived answer field failed its self-check and the shape names another path: that path
+      is replayed over the captured reply exactly as the adapter would read it. If it reproduces
+      the reply, the config is corrected and ``fix`` says from what, to what, and the overlap. If it
+      does not, nothing is changed and ``suggestion`` carries the path with ``verified: False``.
+    * Derivation found no answer field and nothing could be checked offline: ``suggestion`` only.
+    * A field that passed its self-check is never touched; adapters whose answer field is not
+      ``response_path`` (streams) are never touched. Nothing here raises.
+    """
+    out: Dict[str, Any] = {"config": config, "fix": None, "suggestion": None}
+    path = (framework or {}).get("response_path")
+    if not path or not isinstance(config, dict):
+        return out
+    adapter = config.get("adapter") or "direct_api"
+    if adapter not in ("direct_api", "websocket_direct"):
+        return out
+    cc = capture_check or {}
+    current = config.get("response_path")
+    label = (framework or {}).get("framework") or "the response envelope"
+    if cc.get("checked") and not cc.get("ok"):
+        if current == path:
+            return out
+        candidate = dict(config)
+        candidate["response_path"] = path
+        try:
+            vc = verify_config(candidate, ev, min_overlap=min_overlap)
+        except Exception:  # noqa: BLE001
+            vc = {"ok": False, "checked": False}
+        if vc.get("checked") and vc.get("ok"):
+            out["config"] = candidate
+            out["fix"] = {"field": "response_path", "from": current, "to": path, "overlap": vc.get("overlap"),
+                          "framework": label, "check": vc,
+                          "why": (f"the derived field {current!r} does not reproduce the captured reply; the response is "
+                                  f"shaped like {label}, whose reply sits at {path!r}, and that path does (overlap {vc.get('overlap')})")}
+        else:
+            out["suggestion"] = {"set": {"response_path": path}, "verified": False,
+                                 "confidence": (framework or {}).get("confidence"),
+                                 "why": (f"the derived field {current!r} does not reproduce the captured reply, and neither does the "
+                                         f"{label} path {path!r} (overlap {vc.get('overlap')}); read the capture before patching")}
+        return out
+    if not current and not cc.get("checked"):
+        out["suggestion"] = {"set": {"response_path": path}, "verified": False,
+                             "confidence": (framework or {}).get("confidence"),
+                             "why": f"derivation found no answer field; the response is shaped like {label}, whose reply usually sits at {path!r}"}
+    return out

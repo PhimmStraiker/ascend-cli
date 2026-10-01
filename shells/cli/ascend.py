@@ -4871,6 +4871,23 @@ def cmd_onboard(args):
             _ok(f"looks like a {_fw['framework']} — reply usually at {_fw.get('response_path')!r} "
                 f"(confidence {_fw.get('confidence')})")
             setattr(args, "_framework", _fw)
+        # THE HINT BECOMES A FIX WHEN THE CAPTURE PROVES IT. A derived answer field that failed its
+        # self-check is replaced by the shape's path only when replaying that path over the
+        # captured reply reproduces it; otherwise the path is offered as a patch, never applied.
+        try:
+            from runtime.discovery.verify import shape_fix
+            _sf = shape_fix(cfg, ev, _cc, _fw)
+        except Exception:  # noqa: BLE001
+            _sf = {"config": cfg, "fix": None, "suggestion": None}
+        if _sf.get("fix"):
+            cfg = _sf["config"]
+            _ok(f"answer field corrected from the envelope shape: {_sf['fix']['to']!r} reproduces the captured "
+                f"reply (overlap {_sf['fix']['overlap']}); derivation had {_sf['fix']['from']!r}")
+            setattr(args, "_capture_check", _sf["fix"].get("check"))
+            setattr(args, "_shape_fix", {k: v for k, v in _sf["fix"].items() if k != "check"})
+        elif _sf.get("suggestion"):
+            _ok(f"suggested patch: response_path={_sf['suggestion']['set']['response_path']!r} — {_sf['suggestion']['why']}")
+            setattr(args, "_suggested_patch", _sf["suggestion"])
         # BEFORE the config is written and before anything validates: the config carries `env:`
         # references and this is what they resolve against.
         _store_captured_credentials(res.get("secrets") or {}, cfg, args)
@@ -5065,6 +5082,8 @@ def cmd_onboard(args):
               "validated": True, "transport": via, "transport_reason": via_why,
               **({"capture_check": getattr(args, "_capture_check", None)} if getattr(args, "_capture_check", None) else {}),
               **({"framework_hint": getattr(args, "_framework", None)} if getattr(args, "_framework", None) else {}),
+              **({"shape_fix": getattr(args, "_shape_fix", None)} if getattr(args, "_shape_fix", None) else {}),
+              **({"suggested_patch": getattr(args, "_suggested_patch", None)} if getattr(args, "_suggested_patch", None) else {}),
               "reused": reused, "needs_bridge": via == "bridge",
               "key_stored": via == "bridge"}, args,
              human=(f"\ntarget '{label}' is ready\n"
