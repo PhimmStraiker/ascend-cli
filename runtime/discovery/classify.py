@@ -198,6 +198,69 @@ def _strip_query(url: str) -> str:
     return url.split("?", 1)[0]
 
 
+# Query-string parameters that are credentials. Dropping the whole query string was the previous
+# behaviour, and it broke two common shapes at once: an endpoint whose query is REQUIRED and
+# public (Azure OpenAI's `?api-version=`, Vertex's `?alt=sse`) registered without it and 4xx'd on
+# every probe; and an access code or API key carried as `?code=` / `?key=` was dropped silently,
+# so the derived config 401'd for no visible reason. The rule now is the same one the headers
+# follow: a public parameter stays on the endpoint; a credential-shaped one is withheld from the
+# config, its value goes to the 0600 store, and the config carries an `env:` reference that
+# `layers/auth.py` folds back into the query string at send time (`mode: api_key, in: query`).
+_SECRET_PARAM_NAMES = frozenset({
+    "code", "key", "apikey", "api_key", "api-key", "token", "access_token", "access-token",
+    "auth", "authorization", "sig", "signature", "secret", "password", "passwd", "pwd", "jwt",
+    "bearer", "session", "sid", "session_id", "sessionid", "session-id", "client_secret",
+    "subscription-key", "subscription_key", "x-api-key", "apikey", "appkey", "app_key",
+})
+_PLAIN_PARAM_NAMES = frozenset({
+    "api-version", "api_version", "version", "v", "alt", "format", "lang", "locale", "stream",
+    "model", "deployment", "id", "page", "limit", "offset", "q", "query", "type", "mode",
+})
+
+
+def _looks_secret_param(name: str, value: str) -> bool:
+    """Would baking this query parameter into a config on disk leak a credential?
+
+    Name first (a name is deliberate), then the entropy backstop for a name we did not
+    anticipate — scoped the same way `_looks_secret_header` scopes it, so an ordinary long public
+    value (a model id, a locale) is not withheld from a config that needs it.
+    """
+    n = (name or "").strip().lower()
+    if not n or n in _PLAIN_PARAM_NAMES:
+        return False
+    if n in _SECRET_PARAM_NAMES or _SECRETISH_NAME.search(n):
+        return True
+    v = (value or "").strip()
+    if _OPAQUE_VALUE.match(v) and len(v) >= 24:
+        classes = sum(bool(re.search(p, v)) for p in (r"[a-z]", r"[A-Z0-9]", r"[_.\-=+/]"))
+        return classes >= 2
+    return False
+
+
+def _split_query(url: str) -> Tuple[List[Tuple[str, str]], Dict[str, str]]:
+    """(public parameters in order, {credential parameter: value}) of a URL's query string."""
+    from urllib.parse import urlsplit, parse_qsl
+    plain: List[Tuple[str, str]] = []
+    secret: Dict[str, str] = {}
+    try:
+        pairs = parse_qsl(urlsplit(url).query, keep_blank_values=True)
+    except (ValueError, AttributeError):
+        return [], {}
+    for k, v in pairs:
+        if _looks_secret_param(k, v):
+            secret[k] = v
+        else:
+            plain.append((k, v))
+    return plain, secret
+
+
+def _endpoint_keeping(url: str, plain: List[Tuple[str, str]]) -> str:
+    """The endpoint with only its PUBLIC query parameters, in their original order."""
+    from urllib.parse import urlencode
+    base = _strip_query(url)
+    return f"{base}?{urlencode(plain)}" if plain else base
+
+
 def _norm_entry(request: Dict[str, Any], response: Dict[str, Any],
                 started: Optional[float] = None) -> Dict[str, Any]:
     """Normalize one request/response pair into the internal shape."""
@@ -634,8 +697,9 @@ def _looks_ndjson(body: str) -> bool:
 
 
 def _http_params(req: Dict[str, Any], resp: Dict[str, Any], stream: Optional[str]) -> Dict[str, Any]:
+    plain_q, secret_q = _split_query(req["url"])
     params: Dict[str, Any] = {
-        "endpoint": _strip_query(req["url"]),
+        "endpoint": _endpoint_keeping(req["url"], plain_q),
         "method": req["method"],
         "headers": _nonsecret_headers(req["headers"]),
         "body": _body_template(req),
@@ -648,6 +712,12 @@ def _http_params(req: Dict[str, Any], resp: Dict[str, Any], stream: Optional[str
         # returns, so a caller that dumps its result cannot print a credential by accident.
         params["secret_header_values"] = captured_secret_headers(req["headers"])
         params["secret_header_url"] = req.get("url") or ""
+    if secret_q:
+        # Same arrangement for a credential in the query string (`?code=`, `?key=`): names in the
+        # layer, values lifted out by `classify_evidence`, an `env:` reference in the config.
+        params["withheld_query"] = sorted(secret_q)
+        params["secret_query_values"] = dict(secret_q)
+        params["secret_header_url"] = params.get("secret_header_url") or (req.get("url") or "")
     if stream:
         # Derive the field mapping from the captured body rather than emitting a bare
         # {"format": "sse"}. Without text_path/token_types the adapter collects no frames and
@@ -1675,6 +1745,29 @@ def compose(classified: Dict[str, Any]) -> Dict[str, Any]:
                     f"mechanism is kept instead."),
         }
 
+    # THE CREDENTIAL THE CAPTURE SAW IN THE QUERY STRING. `?code=`, `?key=`, `?token=` — carried
+    # by the chat request itself, previously stripped with the rest of the query and never
+    # mentioned. Each becomes a static `api_key` part with `in: query`, which `layers/auth.py`
+    # folds back into the endpoint at send time, so the value lives in the store and the config
+    # holds a reference, exactly like a captured header. A live mechanism (oauth2 / csrf /
+    # multihop / minted) is left alone for the same reason as above.
+    _qvalues = tparams.get("secret_query_values") or {}
+    if _qvalues and not _dynamic and not config.get("_minted_credentials"):
+        _url = tparams.get("secret_header_url") or endpoint or ""
+        qparts = [{"type": "static", "mode": "api_key", "in": "query", "name": name,
+                   "value_ref": f"env:{secret_var_name(_url, 'query:' + name)}"}
+                  for name in sorted(_qvalues)]
+        existing = config.get("auth")
+        if isinstance(existing, list):
+            config["auth"] = [b for b in existing if _is_captured_static(b)] + qparts
+        elif _is_captured_static(existing):
+            config["auth"] = [existing] + qparts
+        else:
+            # Nothing captured beside it — including an INFERRED block whose reference nothing
+            # sets (`env:DISCOVERED_TOKEN`), which would fail the whole list at materialize time.
+            config["auth"] = qparts[0] if len(qparts) == 1 else qparts
+        config["_captured_credentials"] = sorted(set(config.get("_captured_credentials") or [])
+                                                 | {f"query:{n}" for n in _qvalues})
     # A minted credential already set its lifecycle (re-mint before every probe); the classified
     # lifecycle layer describes the static case and must not overwrite it.
     if not (config.get("_minted_credentials") and config.get("auth_lifecycle")):
@@ -1995,7 +2088,12 @@ def classify_evidence(evidence: Dict[str, Any]) -> Dict[str, Any]:
         url = tp.get("secret_header_url") or ""
         secrets = {secret_var_name(url, name): value
                    for name, value in tp["secret_header_values"].items()}
+    if tp.get("secret_query_values"):
+        url = tp.get("secret_header_url") or ""
+        secrets.update({secret_var_name(url, "query:" + name): value
+                        for name, value in tp["secret_query_values"].items()})
     tp.pop("secret_header_values", None)
+    tp.pop("secret_query_values", None)
     tp.pop("secret_header_url", None)
 
     unresolved = [name for name in LAYER_NAMES
@@ -2156,6 +2254,16 @@ def _minted_auth_block(minted: Dict[str, Dict[str, Any]], pairs: List[Dict[str, 
     attach.update(static_refs)
     return {"type": "derived_multihop", "steps": [step], "attach": {"headers": attach}}
 
+
+
+def _is_captured_static(block: Any) -> bool:
+    """A static auth block whose every reference points at the capture store (never a reference
+    nothing sets, like the inferred `env:DISCOVERED_TOKEN`)."""
+    if not isinstance(block, dict) or block.get("type") != "static":
+        return False
+    refs = list((block.get("headers") or {}).values()) if block.get("mode") == "headers" \
+        else [block.get("value_ref") or block.get("value")]
+    return bool(refs) and all(isinstance(r, str) and r.startswith("env:ASCEND_SECRET_") for r in refs)
 
 
 def secret_var_name(url: str, header: str) -> str:
