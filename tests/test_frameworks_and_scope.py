@@ -54,3 +54,64 @@ def test_no_capabilities_recommends_only_the_baseline_and_says_so():
     p = propose({})
     assert p["scope"] == [] and p["matched"] == []
     assert any("no agentic capabilities" in n for n in p["notes"])
+
+
+# --------------------------------------------------------------------------- resolve against a live catalog
+# Shaped like the live `/ascend/controls` payload (see test_controls_catalog.py): two lists,
+# categories carrying their members, controls carrying `deprecated`.
+_CATALOG = {
+    "controls": [
+        {"id": "sys_prompt_leak", "name": "System Prompt Leak", "category_id": "sys_prompt_leak"},
+        {"id": "indirect_prompt_injection", "name": "Indirect Prompt Injection", "category_id": "llm_evasion"},
+        {"id": "agentic_tmu", "name": "Agentic Tool Misuse", "category_id": "agent_vulnerabilities", "agentic": True},
+        {"id": "agentic_data_exfil", "name": "Agentic Data Exfiltration", "category_id": "agent_vulnerabilities", "agentic": True},
+        {"id": "tool_misuse", "name": "Tool Misuse", "category_id": "agent_vulnerabilities", "deprecated": True},
+        {"id": "email_address", "name": "Email Address", "category_id": "data_leak"},
+        {"id": "phone_number", "name": "Phone Number", "category_id": "data_leak"},
+        {"id": "business_risk", "name": "Business Risk", "category_id": "business_risk"},
+    ],
+    "categories": [
+        {"id": "sys_prompt_leak", "name": "System Prompt Leak", "tag": "Security"},
+        {"id": "llm_evasion", "name": "LLM Evasion", "tag": "Security"},
+        {"id": "agent_vulnerabilities", "name": "Agentic Risks", "tag": "Security"},
+        {"id": "data_leak", "name": "Data Leakage", "tag": "Security"},
+        {"id": "business_risk", "name": "Business Risk", "tag": "Trust"},
+    ],
+}
+
+
+def test_resolve_keeps_exact_ids_expands_categories_and_names_unknowns():
+    from scope import resolve
+    r = resolve(["sys_prompt_leak", "data_leak", "agentic_tmu", "no_such_control"], _CATALOG)
+    assert r["catalog_seen"]
+    assert "sys_prompt_leak" in r["controls"] and "agentic_tmu" in r["controls"]
+    assert {"email_address", "phone_number"} <= set(r["controls"])      # the category expanded
+    assert "tool_misuse" not in r["controls"]                           # deprecated never selected
+    assert r["unknown"] == ["no_such_control"]
+    kinds = {x["proposed"]: x["kind"] for x in r["resolved"]}
+    assert kinds == {"sys_prompt_leak": "control", "data_leak": "category", "agentic_tmu": "control",
+                     "no_such_control": "unknown"}
+
+
+def test_resolve_maps_the_proposal_vocabulary_through_aliases():
+    from scope import resolve
+    r = resolve(["jailbreak", "app_grounding"], _CATALOG)
+    via = {x["proposed"]: (x["kind"], x["ids"]) for x in r["resolved"]}
+    assert via["jailbreak"] == ("alias", ["indirect_prompt_injection"])        # stem prompt_injection
+    assert via["app_grounding"] == ("alias", ["business_risk"])
+    assert r["unknown"] == []
+
+
+def test_resolve_without_a_catalog_passes_names_through_and_says_so():
+    from scope import resolve
+    r = resolve(["data_leak"], None)
+    assert r["controls"] == ["data_leak"] and not r["catalog_seen"] and "unchanged" in r["note"]
+    r2 = resolve(["data_leak"], {"ok": True, "result": {"controls": [], "categories": []}})
+    assert not r2["catalog_seen"]
+
+
+def test_resolve_dedupes_across_proposals_and_reads_a_wrapped_result():
+    from scope import resolve
+    wrapped = {"ok": True, "result": _CATALOG}
+    r = resolve(["data_leak", "email_address"], wrapped)
+    assert r["controls"].count("email_address") == 1
