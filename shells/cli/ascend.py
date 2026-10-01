@@ -4843,6 +4843,34 @@ def cmd_onboard(args):
         _ok(f"transport {t.get('value')} (confidence {t.get('confidence')})")
         if res.get("unresolved"):
             _ok(f"unresolved layers: {res['unresolved']}")
+        # OFFLINE SELF-CHECK, before anything spends a live probe: does the derived answer field
+        # reproduce the reply the capture shows? Reported, never fatal — a wiring that works today
+        # is never second-guessed; one whose field reads a status line is named here instead of
+        # scoring every probe against the wrong text.
+        try:
+            from runtime.discovery.verify import verify_config
+            _cc = verify_config(cfg, ev)
+        except Exception:  # noqa: BLE001
+            _cc = {"ok": True, "checked": False}
+        if _cc.get("checked"):
+            if _cc.get("ok"):
+                _ok(f"answer field {_cc.get('field')!r} reproduces the captured reply (overlap {_cc.get('overlap')})")
+            else:
+                _ok(f"WARNING answer field check: {_cc.get('detail')}")
+                _ok(f"   next: {_cc.get('next')}")
+        setattr(args, "_capture_check", _cc if _cc.get("checked") else None)
+        # ADVISORY: what the response envelope looks like and where its reply usually sits. Never
+        # mutates the config — a note the operator and the model can use, and a patch suggestion
+        # when derivation found no response path at all.
+        try:
+            from runtime.discovery.frameworks import recognize
+            _fw = recognize(ev)
+        except Exception:  # noqa: BLE001
+            _fw = {"framework": None}
+        if _fw.get("framework"):
+            _ok(f"looks like a {_fw['framework']} — reply usually at {_fw.get('response_path')!r} "
+                f"(confidence {_fw.get('confidence')})")
+            setattr(args, "_framework", _fw)
         # BEFORE the config is written and before anything validates: the config carries `env:`
         # references and this is what they resolve against.
         _store_captured_credentials(res.get("secrets") or {}, cfg, args)
@@ -5035,6 +5063,8 @@ def cmd_onboard(args):
         _out({"target": label, "app_id": app_id, "config": cfg_name, "adapter": adapter,
               "path": str(cfg_path),
               "validated": True, "transport": via, "transport_reason": via_why,
+              **({"capture_check": getattr(args, "_capture_check", None)} if getattr(args, "_capture_check", None) else {}),
+              **({"framework_hint": getattr(args, "_framework", None)} if getattr(args, "_framework", None) else {}),
               "reused": reused, "needs_bridge": via == "bridge",
               "key_stored": via == "bridge"}, args,
              human=(f"\ntarget '{label}' is ready\n"
