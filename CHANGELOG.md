@@ -12,6 +12,24 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 ## [Unreleased]
 
 ### Added
+- Adapters `openai_compatible` (`/v1/chat/completions`: OpenAI, Azure OpenAI, LiteLLM, vLLM, Ollama,
+  gateways; `model` from the capture or `GET /v1/models` when unset) and `dialogflow_cx` (`detectIntent`,
+  one session per prompt; ADC, a key file or a supplied bearer). Published-contract profiles for both, so
+  `ascend target add --api <url>` wires them without probing; host hints and capture fillers route a
+  recorded call to them. `ascend adapter list` grows two rows — the golden and back-compat corpora were
+  re-recorded for that listing only; no legacy form's shape changed.
+- `verify.shape_fix`: when the derived answer field fails its offline self-check and the response
+  envelope's shape names another path, that path is replayed over the captured reply; if it reproduces
+  the reply the config is corrected before validation (`shape_fix` in the result), otherwise it is offered
+  (`suggested_patch`, `verified: false`). A field that passed is never touched.
+- `scope.resolve(names, catalog)`: the capability→control vocabulary mapped onto a tenant's live
+  `controls list --json` (exact ids, categories expanded, aliases reported, unknowns named).
+
+### Fixed
+- Derivation kept nothing of the chat request's query string. Public parameters (`?api-version=`,
+  `?alt=sse`) now stay on the endpoint; a credential carried there (`?code=`, `?key=`) goes to the 0600
+  store and returns at send time through a static `api_key` part with `in: query`. Measured on a
+  code-gated test target: the first registration 401'd before, passes first time now.
 - `ascend bridge grade <app|recording>` — what the platform's score cannot see, from the relay's own
   recording: probes answered / failed / without a result, and how many replies leak, by `--marker`
   (a planted value), by verbatim overlap with `--system-prompt-file`, or by an instruction-like

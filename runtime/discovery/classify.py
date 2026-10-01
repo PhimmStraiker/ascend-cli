@@ -1470,6 +1470,10 @@ _PRESET_HOST_HINTS = (
     ("reasoningengines", "vertex_ai"),
     (":streamquery", "vertex_ai"),
     ("connectparticipant", "amazon_connect"),
+    ("api.openai.com", "openai_compatible"),
+    ("openai.azure.com", "openai_compatible"),
+    ("dialogflow.googleapis.com", "dialogflow_cx"),
+    (":detectintent", "dialogflow_cx"),
 )
 
 
@@ -1543,7 +1547,62 @@ def _scrt2_config_from_evidence(ev: Dict[str, Any], endpoint: str) -> Dict[str, 
 # How each preset adapter fills its own config from the capture. A preset with no filler keeps the
 # old behaviour (endpoint hint only); the ones here derive what they saw so the agent wires them
 # without asking the operator for values already in the traffic.
-_PRESET_FILLERS = {"scrt2_direct": _scrt2_config_from_evidence}
+def _chat_request_json(ev: Dict[str, Any], endpoint: str) -> Dict[str, Any]:
+    """The JSON body of the captured request to `endpoint` (or the chat pair), {} when none."""
+    pairs = ev.get("pairs") or []
+    idx = ev.get("chat_pair_index")
+    ordered = ([pairs[idx]] if isinstance(idx, int) and 0 <= idx < len(pairs) else []) + list(pairs)
+    want = _strip_query(endpoint or "")
+    for p in ordered:
+        req = p.get("request") or {}
+        if want and _strip_query(str(req.get("url") or "")) != want:
+            continue
+        body = req.get("json")
+        if body is None:
+            raw = req.get("raw_body") or req.get("body")
+            if isinstance(raw, (dict, list)):
+                body = raw
+            elif isinstance(raw, str) and raw.strip().startswith("{"):
+                try:
+                    body = json.loads(raw)
+                except ValueError:
+                    body = None
+        if isinstance(body, dict):
+            return body
+    return {}
+
+
+def _openai_config_from_evidence(ev: Dict[str, Any], endpoint: str) -> Dict[str, Any]:
+    """An OpenAI-compatible chat completions config from the capture: the endpoint, the model the
+    page used, its system message when it carried one, and max_tokens. Credentials are handled
+    by the captured-header path like any other target."""
+    body = _chat_request_json(ev, endpoint)
+    cfg: Dict[str, Any] = {"endpoint": endpoint}
+    if isinstance(body.get("model"), str) and body["model"].strip():
+        cfg["model"] = body["model"].strip()
+    msgs = body.get("messages")
+    if isinstance(msgs, list):
+        for m in msgs:
+            if isinstance(m, dict) and m.get("role") == "system" and isinstance(m.get("content"), str) and len(m["content"]) < 4000:
+                cfg["system_prompt"] = m["content"]
+                break
+    if isinstance(body.get("max_tokens"), int):
+        cfg["max_tokens"] = body["max_tokens"]
+    return cfg
+
+
+def _dialogflow_config_from_evidence(ev: Dict[str, Any], endpoint: str) -> Dict[str, Any]:
+    body = _chat_request_json(ev, endpoint)
+    cfg: Dict[str, Any] = {"endpoint": endpoint}
+    qi = body.get("queryInput") if isinstance(body.get("queryInput"), dict) else {}
+    if isinstance(qi.get("languageCode"), str):
+        cfg["language_code"] = qi["languageCode"]
+    return cfg
+
+
+_PRESET_FILLERS = {"scrt2_direct": _scrt2_config_from_evidence,
+                   "openai_compatible": _openai_config_from_evidence,
+                   "dialogflow_cx": _dialogflow_config_from_evidence}
 
 
 def compose(classified: Dict[str, Any]) -> Dict[str, Any]:

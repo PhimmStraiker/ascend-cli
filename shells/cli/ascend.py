@@ -4726,14 +4726,16 @@ def cmd_onboard(args):
         _step(1, total, f"{prof.label} host — reading the contract it publishes")
         auth_headers, _q = _target_auth(args)
         try:
+            import inspect as _inspect
+            _extra = {"url": args.api} if "url" in _inspect.signature(prof.build).parameters else {}
             cfg, facts = prof.build(P.origin_of(args.api), workspace=getattr(args, "workspace", None),
                                     headers=auth_headers or {}, body_fields=_body_fields(args) or {},
                                     bearer=getattr(args, "bearer", None),
-                                    verify=not getattr(args, "insecure", False))
+                                    verify=not getattr(args, "insecure", False), **_extra)
         except ValueError as exc:
             _die(str(exc), error_code="target_needs_input",
                  hint=f"ascend target inspect {args.api}")
-        _ok(f"workspace {facts['workspace']} · {len(facts['tools'])} tools · answer at message")
+        _ok(f"workspace {facts['workspace']} · {len(facts['tools'])} tools · adapter {cfg.get('adapter')}")
         # What the target says about itself beats anything typed from memory.
         if not args.name and not chosen:
             args.name = facts["name"]

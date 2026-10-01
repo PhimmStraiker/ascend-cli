@@ -452,7 +452,71 @@ class CopilotStudio:
         return cfg, facts
 
 
-PROFILES = [Doppelganger, CopilotStudio]
+class OpenAICompatible:
+    """A server that speaks the OpenAI chat completions contract: OpenAI, Azure OpenAI, LiteLLM,
+    vLLM, Ollama, enterprise gateways. Detected by `GET {origin}/v1/models`: a model list, or an
+    OpenAI-shaped error object (401 without a key is the common case) both say the contract is
+    there. The chat URL is the one the operator gave when it already ends in `/chat/completions`
+    (Azure's deployment path, a gateway's prefix), else `{origin}/v1/chat/completions`."""
+    name = "openai_compatible"
+    label = "OpenAI-compatible API"
+
+    @staticmethod
+    def detect(origin: str, verify: bool = True) -> bool:
+        status, body = _get(f"{origin}/v1/models", verify=verify)
+        if status == 200 and isinstance(body, dict) and isinstance(body.get("data"), list):
+            return True
+        return status in (401, 403) and isinstance(body, dict) and isinstance(body.get("error"), (dict, str))
+
+    @classmethod
+    def build(cls, origin: str, *, workspace: Optional[str] = None, headers: Optional[Dict[str, str]] = None,
+              body_fields: Optional[Dict[str, Any]] = None, bearer: Optional[str] = None,
+              verify: bool = True, url: str = "") -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        from adapters.openai_compatible import chat_url  # noqa: PLC0415
+        endpoint = chat_url(url or origin)
+        cfg: Dict[str, Any] = {"adapter": "openai_compatible", "endpoint": endpoint, "verify_tls": verify,
+                               "_comment": "OpenAI-compatible chat completions; `model` is asked of the server when unset"}
+        if headers:
+            cfg["headers"] = dict(headers)
+        for key in ("model", "system_prompt", "max_tokens"):
+            if body_fields and body_fields.get(key) is not None:
+                cfg[key] = body_fields[key]
+        host = urlparse(origin).netloc.split(":")[0]
+        facts = {"workspace": host, "tools": [], "name": f"{host.split('.')[0]}-chat",
+                 "purpose": f"OpenAI-compatible chat completions at {endpoint}", "system_prompt": ""}
+        return cfg, facts
+
+
+class DialogflowCX:
+    """A Dialogflow CX agent, addressed by its agent URL; recognised from the host alone."""
+    name = "dialogflow_cx"
+    label = "Dialogflow CX"
+
+    @staticmethod
+    def detect(origin: str, verify: bool = True) -> bool:
+        host = urlparse(origin).netloc.split(":")[0].lower()
+        return host.endswith("dialogflow.googleapis.com")
+
+    @classmethod
+    def build(cls, origin: str, *, workspace: Optional[str] = None, headers: Optional[Dict[str, str]] = None,
+              body_fields: Optional[Dict[str, Any]] = None, bearer: Optional[str] = None,
+              verify: bool = True, url: str = "") -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        if not url or "/agents/" not in url:
+            raise ValueError("a Dialogflow CX target needs its agent URL "
+                             "(…/v3/projects/{p}/locations/{l}/agents/{a}); the origin alone names no agent")
+        cfg: Dict[str, Any] = {"adapter": "dialogflow_cx", "endpoint": url.split("?", 1)[0], "verify_tls": verify,
+                               "_comment": "Dialogflow CX detectIntent; one session per prompt"}
+        if headers:
+            cfg["headers"] = dict(headers)
+        if body_fields and body_fields.get("language_code"):
+            cfg["language_code"] = body_fields["language_code"]
+        agent = url.split("/agents/", 1)[1].split("/", 1)[0].split("?", 1)[0]
+        facts = {"workspace": urlparse(origin).netloc, "tools": [], "name": f"dialogflow-{agent[:12]}",
+                 "purpose": f"Dialogflow CX agent {agent}", "system_prompt": ""}
+        return cfg, facts
+
+
+PROFILES = [Doppelganger, CopilotStudio, OpenAICompatible, DialogflowCX]
 
 
 def detect(url: str, verify: bool = True):
