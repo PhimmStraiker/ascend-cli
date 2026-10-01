@@ -43,12 +43,15 @@ _CAP_RULES: List[Dict[str, Any]] = [
 ]
 
 
+def _canon(text: str) -> str:
+    # fold separators so 'user data', 'user-data' and 'user_data' all match the alias 'user_data'
+    return "".join(c if c.isalnum() else "_" for c in str(text).lower())
+
+
 def _flagged(capabilities: Dict[str, Any], aliases) -> bool:
     for key, val in (capabilities or {}).items():
-        k = str(key).lower()
-        if any(a in k for a in aliases) and val not in (None, False, 0, "", "false", "no", "none"):
+        if any(a in _canon(key) for a in aliases) and val not in (None, False, 0, "", "false", "no", "none"):
             return True
-    # a capabilities dict may also be a flat list of capability names
     return False
 
 
@@ -56,9 +59,9 @@ def _flagged_any(capabilities: Any, aliases) -> bool:
     if isinstance(capabilities, dict):
         return _flagged(capabilities, aliases)
     if isinstance(capabilities, (list, tuple, set)):
-        blob = " ".join(str(x).lower() for x in capabilities)
+        blob = "_".join(_canon(x) for x in capabilities)
         return any(a in blob for a in aliases)
-    return any(a in str(capabilities or "").lower() for a in aliases)
+    return any(a in _canon(capabilities) for a in aliases)
 
 
 def propose(capabilities: Any) -> Dict[str, Any]:
@@ -85,6 +88,8 @@ def propose(capabilities: Any) -> Dict[str, Any]:
                      "ask the operator what the target can do before widening")
     else:
         notes.append("capabilities matched: " + ", ".join(matched))
+    notes.append("proposed names are catalog categories or controls — confirm them against the live catalog "
+                 "before registering; a name the tenant does not carry is dropped, not invented")
     notes.append("a small run on each control proves interaction; widen only after the baseline is clean and "
                  "the answer rate is real — a single probe is never a coverage claim")
     return {"scope": scope, "baseline": baseline, "matched": matched, "notes": notes}
