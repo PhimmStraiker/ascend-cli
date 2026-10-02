@@ -12,6 +12,16 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 ## [Unreleased]
 
 ### Added
+- Adapter code you can hand over: `codegen.generate_adapter_module` now writes a self-contained, runnable
+  Python module (`python <name>.py "hello"`) for `direct_api`, `session_api`, `sse_stream`, `websocket_direct`
+  and `openai_compatible`, not only plain POST. Credentials never land in the file: headers, `auth` blocks
+  (bearer, api_key in header or query, basic, cookie, custom, multi-header) and OAuth2 grants resolve from
+  `env:` references at run time, a literal credential header is lifted to an environment name, query-string
+  credentials are cut from every URL (they had leaked a lab access code from a WebSocket URL), and Referer/
+  Origin lose their query strings. The docstring lists what to set. Proven live against the Target Lab: REST,
+  SSE and WebSocket modules answered with no credential in the file. Literals are Python (`True`, `None`),
+  not JSON. csrf and multi-hop auth still need the runtime and say so; browser and platform presets stay a
+  scaffold. Three generator tests updated to the new module shape.
 - Adapters `openai_compatible` (`/v1/chat/completions`: OpenAI, Azure OpenAI, LiteLLM, vLLM, Ollama,
   gateways; `model` from the capture or `GET /v1/models` when unset) and `dialogflow_cx` (`detectIntent`,
   one session per prompt; ADC, a key file or a supplied bearer). Published-contract profiles for both, so
