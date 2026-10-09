@@ -1288,6 +1288,147 @@ def _strategy_from_args(args):
     return out
 
 
+def cmd_app_tunnel_keys(args):
+    """List, add or remove the tunnel keys an app authorizes (`_tunnel_agent_keys`).
+
+    The list lives in the app's request_template, next to the prompt key, and the platform's PATCH
+    replaces the whole field — so the template is read, the one key changed, and every other key
+    sent back exactly as it was. The app is read back afterwards, because a PATCH that returned
+    is not a PATCH that landed. Each key line is validated here the way the engine validates it:
+    one of the accepted types, at most 20 of them.
+    """
+    T = _tunnel_mod()
+    AD = _adaptor_mod()
+    modes = [m for m in ("add", "remove", "list")
+             if getattr(args, m, None) not in (None, False)]
+    if len(modes) > 1:
+        _die("pass one of --add, --remove or --list")
+    mode = modes[0] if modes else "list"
+    c = _client(args)
+    app_id = _resolve_app(c, args.app, exact=True)
+    app = c.get_app(app_id)
+    if str(app.get("api_type") or "").lower() == "thin":
+        _die(f"{app.get('name')} ({app_id}) is a bridge app: its bridge client is its "
+             f"integration, and Ascend never dials it, so a tunnel key has nothing to authorize "
+             f"there.\n  List keys on a direct app whose URL is a tunnel name.",
+             code=EXIT_ERROR, error_code="bridge_app")
+    try:
+        tpl = AD.parse_template(app.get("request_template"))
+    except ValueError as e:
+        _die(f"the app's request_template is not a JSON object ({e}); fix it in the Console "
+             f"before editing its tunnel keys", code=EXIT_ERROR, error_code="bad_template")
+    stored = tpl.get(T.TEMPLATE_KEY)
+    if stored is not None and not isinstance(stored, list):
+        _die(f"{T.TEMPLATE_KEY} in the app's request_template is a {type(stored).__name__}, not a "
+             f"list; fix it in the Console first", code=EXIT_ERROR, error_code="bad_template")
+    keys = T.describe_keys(stored or [])
+    from discovery import egress
+    url = str(app.get("url") or "").strip()
+    routed, _real = egress.routed_name(url) if url else ("", "")
+    changed, touched = False, None
+
+    if mode == "add":
+        raw = args.add
+        if raw == "@local":
+            # No value: this machine's own tunnel key, exactly as `tunnel key` prints it.
+            runner = _tunnel_runner(args)
+            raw = _tunnel_read_key(args, T, runner)
+        try:
+            rec = T.parse_key_line(raw)
+        except T.KeyLineError as e:
+            _die(f"not a tunnel key: {e}", error_code="bad_key")
+        if any(k.get("agent_id") == rec["agent_id"] for k in keys):
+            touched = {**rec, "already": True}
+        else:
+            if len(keys) >= T.MAX_KEYS:
+                _die(f"{T.TEMPLATE_KEY} already holds {T.MAX_KEYS} keys, the most the engine "
+                     f"accepts; remove one first:  ascend app tunnel-keys {args.app} --remove "
+                     f"<agent id>", code=EXIT_ERROR, error_code="too_many_keys")
+            keys.append({**rec, "stored": rec["line"], "valid": True})
+            touched, changed = rec, True
+    elif mode == "remove":
+        want = str(args.remove).strip()
+        try:
+            want_id = T.parse_key_line(want)["agent_id"]
+        except T.KeyLineError:
+            want_id = want.lower() if re.fullmatch(r"[0-9a-f]{8}", want.lower()) else None
+        match = [k for k in keys if (want_id and k.get("agent_id") == want_id)
+                 or k.get("stored") == want or k.get("line") == want]
+        if not match:
+            listed = ", ".join(k.get("agent_id") or "?" for k in keys) or "none"
+            _die(f"{want} is not listed on {app.get('name') or app_id} (listed: {listed})",
+                 code=EXIT_ERROR, error_code="not_listed")
+        keys = [k for k in keys if k not in match]
+        touched, changed = match[0], True
+
+    if changed:
+        merged = {**tpl, T.TEMPLATE_KEY: [k["stored"] for k in keys]}
+        if not keys:
+            merged.pop(T.TEMPLATE_KEY)
+        _say(args, f"{'Adding' if mode == 'add' else 'Removing'} {touched['agent_id']} "
+                   f"{'on' if mode == 'add' else 'from'} {app.get('name') or app_id}...")
+        c.patch_app(app_id, {"request_template": json.dumps(merged, indent=2)})
+        app = c.get_app(app_id)
+        try:
+            after = AD.parse_template(app.get("request_template")).get(T.TEMPLATE_KEY) or []
+        except ValueError:
+            after = None
+        after_ids = {k.get("agent_id") for k in T.describe_keys(after or [])}
+        landed = (after is not None and
+                  (touched["agent_id"] in after_ids if mode == "add"
+                   else touched.get("agent_id") not in after_ids))
+        if not landed:
+            _out({"ok": False, "error": {"code": "store_unverified", "exit_code": EXIT_ERROR,
+                                         "hint": None,
+                                         "message": "the PATCH returned but reading the app back "
+                                                    "does not show the change"}},
+                 args, human="FAIL  the PATCH returned, but reading the app back does not show "
+                             "the change. Nothing is proven; check the app in the Console.")
+            raise SystemExit(EXIT_ERROR)
+        keys = T.describe_keys(after)
+
+    data = {"app": {"id": app_id, "name": app.get("name"), "url": url or None,
+                    "routed": routed or None},
+            "keys": [{"agent_id": k.get("agent_id"), "type": k.get("type"), "line": k["line"],
+                      "valid": k["valid"], **({"problem": k["problem"]} if not k["valid"] else {})}
+                     for k in keys],
+            "count": len(keys), "max": T.MAX_KEYS, "changed": changed, "mode": mode}
+    if touched:
+        data["added" if mode == "add" else "removed"] = {
+            "agent_id": touched["agent_id"], "type": touched["type"], "line": touched["line"],
+            "already_listed": bool(touched.get("already"))}
+    if args.json:
+        _out({"ok": True, "data": data}, args)
+        return
+    if touched and touched.get("already"):
+        _say(args, f"already listed: {touched['agent_id']} on {app.get('name') or app_id}",
+             done=True)
+    elif changed:
+        _say(args, f"{'added' if mode == 'add' else 'removed'} {touched['agent_id']} "
+                   f"{'on' if mode == 'add' else 'from'} {app.get('name') or app_id}", done=True)
+    print(f"  {app.get('name') or app_id}  {app_id}" + (f"   url {url}" if url else "   (no URL)"))
+    print(f"  {T.TEMPLATE_KEY} ({len(keys)} of {T.MAX_KEYS}):")
+    if not keys:
+        print("    none — the tunnel agent on the app's host is refused until its key is here:")
+        print(f"      ascend app tunnel-keys {args.app} --add \"$(ascend tunnel key)\"")
+    for k in keys:
+        mark = ""
+        if touched and k.get("agent_id") == touched.get("agent_id") and mode == "add":
+            mark = "   <- added" if changed else "   (already listed)"
+        line = k["line"]
+        short = line if len(line) <= 60 else f"{line[:44]}…{line[-12:]}"
+        if k["valid"]:
+            print(f"    {k['agent_id']}  {short}{mark}")
+        else:
+            print(f"    ????????  {short}   ! {k['problem']}")
+    if url and not routed:
+        print(f"  note: the app's URL is not a tunnel name; the keys take effect once it is "
+              f"https://<host>.{T.TUNNEL_SUFFIX}/<path>  (see: ascend tunnel url <host[:port]>)")
+    elif not url:
+        print(f"  note: the app has no URL yet; set it to the tunnel name plus the app's path "
+              f"(see: ascend tunnel url <host[:port]>)")
+
+
 def cmd_assess_diff(args):
     """Compare two assessments: what's newly failing, what got fixed, what regressed.
 
@@ -6804,6 +6945,335 @@ def cmd_relay_logs(args):
     _out({"app_id": app_id, "log": str(log), "tail": tail}, args, human=tail)
 
 
+# ----------------------------------------------------------------------------- tunnel
+def _tunnel_mod():
+    import tunnel as T     # runtime/tunnel.py — the agent's rules, the runner, the supervisor
+    return T
+
+
+def _tunnel_runner(args):
+    """Where the agent comes from, said out loud: `ascend-tunnel` on PATH, else the Docker image.
+    Neither available is a tool error that names the install paths."""
+    T = _tunnel_mod()
+    runner, notes = T.find_runner(getattr(args, "runner", None) or "auto")
+    if runner is None:
+        _die(T.no_runner_message(notes), code=EXIT_ERROR, error_code="no_tunnel_runner")
+    if runner["kind"] == "docker":
+        _say(args, f"using {runner['label']} ({'; '.join(notes) or 'as asked'})")
+        try:
+            if T.ensure_image(runner):
+                _say(args, f"pulled {runner['image']} (first use)")
+        except RuntimeError as e:
+            _die(str(e), code=EXIT_ERROR, error_code="docker_pull_failed")
+    else:
+        _say(args, f"using {runner['label']}")
+    return runner
+
+
+def _tunnel_config(args):
+    """The agent's configuration from the flags: the allow list validated the agent's way, the
+    environment resolved to an endpoint and a pinned host key, the state directory."""
+    T = _tunnel_mod()
+    try:
+        allow = T.parse_allow(args.allow or [])
+    except T.AllowError as e:
+        _die(str(e), error_code="bad_allow")
+    env = getattr(args, "env", None) or T.default_env(getattr(args, "base", None))
+    try:
+        ep = T.resolve_endpoint(env, getattr(args, "relay", None), getattr(args, "host_key", None))
+    except ValueError as e:
+        _die(str(e), error_code="bad_endpoint")
+    ca = getattr(args, "ca_file", None)
+    if ca and not Path(ca).is_file():
+        _die(f"--ca-file {ca}: no such file", error_code="bad_ca_file")
+    return {"org": str(args.org).strip(), "allow": allow, "env": env,
+            "endpoint": ep["endpoint"], "host_key": ep["host_key"],
+            "host_key_source": ep["host_key_source"],
+            "state_dir": T.agent_state_dir(getattr(args, "state_dir", None)),
+            "ca_file": str(Path(ca).resolve()) if ca else None}
+
+
+def _tunnel_read_key(args, T, runner, state_dir=None):
+    """`ascend-tunnel key`: the public key, exactly as the agent prints it. Never the private
+    half — the CLI does not open the agent's state directory; it asks the agent."""
+    sd = T.agent_state_dir(state_dir or getattr(args, "state_dir", None))
+    sd.mkdir(parents=True, exist_ok=True)
+    argv = T.build_argv(runner, "key", state_dir=sd)
+    rc, lines, err = T.run_lines(argv, timeout=120)
+    key = T.key_from_output("\n".join(lines))
+    if rc != 0 or not key:
+        tail = (err or "").strip().splitlines()
+        _die(f"the agent could not read or make its key (exit {rc})"
+             + (f": {tail[-1][:200]}" if tail else ""), code=EXIT_ERROR, error_code="tunnel_key")
+    return key
+
+
+def _tunnel_report(T, rec):
+    """The pieces of a tunnel's state a human and an agent both need: where it runs, what it
+    reaches, and the key to list."""
+    return {k: rec.get(k) for k in ("id", "org", "env", "pid", "state", "link", "endpoint",
+                                     "host_key_pinned", "allow", "app_urls", "key", "agent_id",
+                                     "runner", "state_dir", "log", "started_at")}
+
+
+def cmd_tunnel_check(args):
+    """Prove the path from this machine before running the agent: the agent's own `check`,
+    printed line for line. WAIT on the key line is the expected state until an app lists it."""
+    T = _tunnel_mod()
+    cfg = _tunnel_config(args)
+    runner = _tunnel_runner(args)
+    for n in T.docker_notes(runner, cfg["allow"]):
+        _warn(n)
+    cfg["state_dir"].mkdir(parents=True, exist_ok=True)
+    argv = T.build_argv(runner, "check", org=cfg["org"], allow=[f["entry"] for f in cfg["allow"]],
+                        endpoint=cfg["endpoint"], host_key=cfg["host_key"],
+                        state_dir=cfg["state_dir"], ca_file=cfg["ca_file"])
+    _say(args, f"Checking org {cfg['org']} ({cfg['env']}) -> {', '.join(f['entry'] for f in cfg['allow'])}...")
+    rc, lines, err = T.run_lines(argv, echo=None if args.json else sys.stdout)
+    parsed = T.parse_check_lines(lines)
+    if not parsed["lines"]:
+        # The agent said nothing in its own format: a flag it does not know, a missing image,
+        # a Docker error. Its stderr is the whole story.
+        tail = (err or "").strip() or "no output"
+        _die(f"the agent's check did not run (exit {rc}): {tail[-400:]}", code=EXIT_ERROR,
+             error_code="check_did_not_run")
+    passed = rc == 0 and parsed["failed"] == 0
+    data = {"runner": T.runner_public(runner), "org": cfg["org"], "env": cfg["env"],
+            "endpoint": cfg["endpoint"], "host_key_pinned": bool(cfg["host_key"]),
+            "proxy": T.proxy_in_use(), "allow": [f["entry"] for f in cfg["allow"]],
+            "app_urls": parsed["app_urls"] or [f["app_url"] for f in cfg["allow"]],
+            "key": parsed["key"], "agent_id": parsed["agent_id"], "state_dir": str(cfg["state_dir"]),
+            "lines": parsed["lines"], "counts": parsed["counts"], "failed": parsed["failed"],
+            "passed": passed, "waiting": parsed["waiting"], "listed": parsed["listed"],
+            "exit_code": rc}
+    if args.json:
+        env = {"ok": passed, "data": data}
+        if not passed:
+            env["error"] = {"code": "check_failed", "exit_code": EXIT_ERROR, "hint":
+                            "send the lines to support@straiker.ai",
+                            "message": f"{parsed['failed']} line(s) read FAIL"}
+        _out(env, args)
+        if not passed:
+            sys.exit(EXIT_ERROR)
+        return
+    print()
+    if not parsed["app_urls"]:
+        # The 0.1.0 agent's check prints no app URL line; the rule is deterministic, so say it.
+        for f in cfg["allow"]:
+            print(f"  app URL for {f['entry']}: {f['app_url']}/<path>   <- the app's URL, plus its path")
+    if passed and parsed["waiting"]:
+        print("  check passed. WAIT on the key line is expected: no app lists this agent's key yet.")
+        if parsed["key"]:
+            print(f"  list it:  ascend app tunnel-keys <app> --add '{parsed['key']}'")
+        print("  then run the agent:  ascend tunnel start --org "
+              f"{cfg['org']} {' '.join('--allow ' + f['entry'] for f in cfg['allow'])}"
+              + (f" --env {cfg['env']}" if cfg['env'] != T.DEFAULT_ENV else ""))
+    elif passed:
+        print("  check passed: every line PASS. Run the agent:  ascend tunnel start --org "
+              f"{cfg['org']} {' '.join('--allow ' + f['entry'] for f in cfg['allow'])}"
+              + (f" --env {cfg['env']}" if cfg['env'] != T.DEFAULT_ENV else ""))
+    else:
+        print(f"  check failed: {parsed['failed']} line(s) read FAIL. Send the lines above to "
+              f"support@straiker.ai.")
+    if not passed:
+        sys.exit(EXIT_ERROR)
+
+
+def cmd_tunnel_key(args):
+    """This machine's tunnel key — the public half, as the agent prints it. The private half stays
+    in the agent's state directory and is never read by the CLI."""
+    T = _tunnel_mod()
+    runner = _tunnel_runner(args)
+    sd = T.agent_state_dir(getattr(args, "state_dir", None))
+    key = _tunnel_read_key(args, T, runner, state_dir=sd)
+    try:
+        rec = T.parse_key_line(key)
+    except T.KeyLineError as e:
+        rec = {"type": None, "agent_id": None, "line": key, "blob": None}
+        _warn(f"the agent printed a key this CLI cannot parse ({e}); shown as printed")
+    data = {"key": key, "line": rec["line"], "type": rec["type"], "agent_id": rec["agent_id"],
+            "state_dir": str(sd), "runner": T.runner_public(runner)}
+    if args.json:
+        _out({"ok": True, "data": data}, args)
+        return
+    print(key)
+    _say(args, f"agent id {rec['agent_id'] or '?'}. List it on each app the agent serves:  "
+               f"ascend app tunnel-keys <app> --add '{key}'   (the key stays in {sd}; keep that "
+               f"directory, or the agent gets a new identity)")
+
+
+def cmd_tunnel_start(args):
+    """Run the agent: detached and supervised (pid, log and status under the CLI's state dir,
+    like a bridge), or in this terminal with --foreground."""
+    T = _tunnel_mod()
+    cfg = _tunnel_config(args)
+    runner = _tunnel_runner(args)
+    for n in T.docker_notes(runner, cfg["allow"]):
+        _warn(n)
+    allow_entries = [f["entry"] for f in cfg["allow"]]
+    if getattr(args, "foreground", False):
+        import subprocess as sp
+        cfg["state_dir"].mkdir(parents=True, exist_ok=True)
+        argv = T.build_argv(runner, "run", org=cfg["org"], allow=allow_entries,
+                            endpoint=cfg["endpoint"], host_key=cfg["host_key"],
+                            state_dir=cfg["state_dir"], ca_file=cfg["ca_file"])
+        _say(args, f"Running the agent in this terminal (Ctrl-C stops it): org {cfg['org']} "
+                   f"({cfg['env']}) -> {', '.join(allow_entries)}")
+        for f in cfg["allow"]:
+            _say(args, f"  app URL for {f['entry']}: {f['app_url']}/<path>")
+        try:
+            rc = sp.call(argv, env=dict(os.environ))
+        except KeyboardInterrupt:
+            rc = 130
+        sys.exit(rc)
+    _say(args, f"Starting the tunnel for org {cfg['org']} ({cfg['env']}) -> {', '.join(allow_entries)}...")
+    r = T.start(org=cfg["org"], env=cfg["env"], allow=cfg["allow"], runner=runner,
+                endpoint=cfg["endpoint"], host_key=cfg["host_key"], state_dir=cfg["state_dir"],
+                ca_file=cfg["ca_file"])
+    if r.get("error"):
+        hint = ""
+        if r.get("pid"):
+            hint = f"see it:  ascend tunnel ls   stop it:  ascend tunnel stop --org {cfg['org']}"
+        elif r.get("log"):
+            hint = f"log: {r['log']}"
+        _die(r["error"] + (f"\n  {hint}" if hint else ""), code=EXIT_ERROR,
+             error_code="tunnel_running" if r.get("pid") else "tunnel_start_failed")
+    ident = r.get("identity") or {}
+    data = {"id": r["id"], "pid": r["pid"], "log": r["log"], "runner": T.runner_public(runner),
+            "org": cfg["org"], "env": cfg["env"], "endpoint": cfg["endpoint"],
+            "host_key_pinned": bool(cfg["host_key"]), "proxy": T.proxy_in_use(),
+            "allow": allow_entries, "app_urls": [f["app_url"] for f in cfg["allow"]],
+            "key": ident.get("key"), "agent_id": ident.get("agent_id"),
+            "state_dir": str(cfg["state_dir"]), "container": r.get("container")}
+    if args.json:
+        _out({"ok": True, "data": data}, args)
+        return
+    _say(args, f"tunnel started: org {cfg['org']} ({cfg['env']})", done=True)
+    print(f"  started  org {cfg['org']} ({cfg['env']})  pid={r['pid']}  log={r['log']}")
+    if ident.get("key"):
+        print(f"  key      {ident['key']}   (agent id {ident.get('agent_id') or '?'})")
+    else:
+        print("  key      not printed yet — read it with:  ascend tunnel key")
+    for f in cfg["allow"]:
+        print(f"  app URL  {f['app_url']}/<path>   <- the app's URL for {f['entry']}, plus its path")
+    if not cfg["host_key"]:
+        print("  note     the Straiker side's host key is not pinned (none published for "
+              f"{cfg['env']}); pass --host-key when Straiker publishes one")
+    key_arg = f"'{ident['key']}'" if ident.get("key") else "\"$(ascend tunnel key)\""
+    print(f"\n  list the key on each app it serves:  ascend app tunnel-keys <app> --add {key_arg}")
+    print("  it survives this terminal closing.  check:  ascend tunnel ls   stop:  ascend tunnel stop")
+
+
+def _tunnel_rows(args, T, *, one=False, allow_all=False):
+    """The recorded tunnels a verb applies to: --org (and --env) narrow; --all takes every one;
+    nothing given takes the only one there is, and refuses to guess among several."""
+    rows = T.ls()
+    if not rows:
+        _die("no tunnels on this machine\n  start one:  ascend tunnel start --org <id> "
+             "--allow <host[:port]>", code=EXIT_ERROR, error_code="no_tunnels")
+    org, env = getattr(args, "org", None), getattr(args, "env", None)
+    if org or env:
+        rows = [r for r in rows if (not org or str(r.get("org")) == str(org))
+                and (not env or r.get("env") == env)]
+        if not rows:
+            _die(f"no tunnel recorded for org {org or '*'} ({env or 'any environment'}); "
+                 f"see:  ascend tunnel ls", code=EXIT_ERROR, error_code="no_tunnels")
+    elif allow_all and getattr(args, "all", False):
+        pass
+    elif len(rows) > 1 and (one or allow_all):
+        names = ", ".join(f"{r['org']} ({r['env']})" for r in rows)
+        _die(f"{len(rows)} tunnels are recorded ({names}): say which with --org <id> [--env <env>]"
+             + (", or --all" if allow_all else ""))
+    return rows
+
+
+def cmd_tunnel_ls(args):
+    """Every tunnel this machine has started: alive or not, and what its log says about the
+    link — up, waiting for an app to list its key, or reconnecting."""
+    T = _tunnel_mod()
+    rows = T.ls()
+    if args.json:
+        _out({"ok": True, "data": {"tunnels": [_tunnel_report(T, r) for r in rows]}}, args)
+        return
+    if not rows:
+        print("  no tunnels on this machine")
+        print("  start one:  ascend tunnel start --org <id> --allow <host[:port]>")
+        return
+    hdr = f"  {'STATE':9} {'LINK':13} {'PID':>6} {'ORG':10} {'ENV':6} {'RUNNER':7} UPTIME  ALLOW"
+    print(hdr)
+    print("  " + "-" * (len(hdr) - 2))
+    for r in rows:
+        up = ""
+        if r.get("started_at") and r["alive"]:
+            secs = int(time.time() - r["started_at"])
+            up = f"{secs//3600}h{(secs%3600)//60:02d}m" if secs >= 3600 else f"{secs//60}m{secs%60:02d}s"
+        mark = "*" if r["alive"] else " "
+        print(f"  {mark}{_ui.state(r['state'], width=8)} {str(r.get('link') or '-'):13} "
+              f"{str(r.get('pid') or '-'):>6} {str(r.get('org') or '-'):10} "
+              f"{str(r.get('env') or '-'):6} {str(r.get('runner') or '-'):7} {up:7} "
+              f"{', '.join(r.get('allow') or []) or '-'}")
+        for u in r.get("app_urls") or []:
+            print(f"      app URL {u}/<path>")
+        if r["alive"] and r.get("link") == "waiting":
+            key = r.get("key") or "$(ascend tunnel key)"
+            print(f"      ! no app lists this agent's key yet — it is refused until one does:  "
+                  f"ascend app tunnel-keys <app> --add '{key}'")
+        elif not r["alive"]:
+            print(f"      ! not running — log: {r['log']}")
+    print(f"\n  {sum(1 for r in rows if r['alive'])} running, "
+          f"{sum(1 for r in rows if not r['alive'])} not")
+
+
+def cmd_tunnel_stop(args):
+    T = _tunnel_mod()
+    rows = _tunnel_rows(args, T, allow_all=True)
+    _say(args, f"Stopping {len(rows)} tunnel(s)...")
+    out = [T.stop(r["id"], grace_s=args.grace) for r in rows]
+    _say(args, f"{sum(1 for r in out if r.get('stopped'))} stopped", done=True)
+    _out({"ok": True, "data": {"results": out}}, args, human="\n".join(
+        f"  {'stopped' if r.get('stopped') else 'not running'}  {r['id']}"
+        + (f"  ({r.get('how') or r.get('reason')})" if (r.get('how') or r.get('reason')) else "")
+        for r in out))
+
+
+def cmd_tunnel_logs(args):
+    T = _tunnel_mod()
+    row = _tunnel_rows(args, T, one=True)[0]
+    log = Path(row["log"])
+    if not log.exists():
+        _die(f"no log for {row['id']} at {log}", code=EXIT_ERROR, error_code="no_log")
+    if getattr(args, "follow", False):
+        import subprocess as sp
+        try:
+            sp.run(["tail", "-f", str(log)])
+        except KeyboardInterrupt:
+            pass
+        return
+    tail = log.read_text(errors="replace")[-20000:]
+    _out({"ok": True, "data": {"id": row["id"], "log": str(log), "tail": tail}}, args, human=tail)
+
+
+def cmd_tunnel_url(args):
+    """The URL rule for an app behind the tunnel, applied to one target. Offline."""
+    T = _tunnel_mod()
+    try:
+        r = T.url_rule(args.target, path=getattr(args, "path", None))
+    except T.AllowError as e:
+        _die(str(e), error_code="bad_target")
+    if args.json:
+        _out({"ok": True, "data": r}, args)
+        return
+    print(f"  URL      {r['url']}" + ("" if r["path"] else "   <- plus the app's own path"))
+    print(f"  allow    --allow {r['allow']}"
+          + ("   <- the port moved here; it is never in the URL" if r["port_moved"] else
+             ("   (port 443 when none is given)" if r["port"] == 443 and ":" not in str(args.target).split("://")[-1] else "")))
+    if r["port"] == 80:
+        print(f"  scheme   {r['scheme']}:// because the app speaks plain HTTP on port 80; any other port is https (wss)")
+    print("  rules")
+    for rule in r["rules"]:
+        print(f"    - {rule}")
+
+
 # ----------------------------------------------------------------------------- keys
 def cmd_keys_list(args):
     """Every stored bridge key (masked), and whether its app still exists."""
@@ -8906,10 +9376,12 @@ WHEN SOMETHING IS WRONG
 
 MORE
   adaptor · assess · chat · ci · control · controls · export · onboard
-  policy · reports · status · target · tenant · version
+  policy · reports · status · target · tenant · tunnel · version
   Run `ascend <command> --help` for any of these — each has its own flags and examples.
   `adaptor` is the custom-adaptor loop: engine-side JavaScript for a target no template can
   drive (a login, a token mint, a conversation to open, a reply to poll for).
+  `tunnel` reaches a private or local target: the open-source Ascend tunnel agent runs here,
+  and Ascend reaches the target at https://<host>.tun.straiker.ai/<path>.
 
 COMPATIBILITY
   app · adapter · keys · bridge
@@ -9296,6 +9768,37 @@ def build_parser():
     s.add_argument("--strategy", metavar="A,B", help="comma-separated attack strategies")
     s.add_argument("--strategy-type", choices=["recommended", "custom"])
     s.set_defaults(func=cmd_app_update)
+
+    # app tunnel-keys — the tunnel keys an app authorizes (request_template._tunnel_agent_keys)
+    s = ap.add_parser("tunnel-keys", parents=[GLOBALS], formatter_class=_Fmt,
+                      help="list, add or remove the tunnel keys an app authorizes",
+                      description=(
+                          "The tunnel keys an app authorizes: `_tunnel_agent_keys` in its "
+                          "request template, a list of up to 20 public keys, one per agent that "
+                          "serves the app. An agent is refused by Straiker until an app lists its "
+                          "key, and gets in within seconds once one does.\n\n"
+                          "The list lives next to the prompt key and the platform's PATCH replaces "
+                          "the whole template, so the template is read, the one key changed, and "
+                          "every other key sent back as it was. The app is read back afterwards "
+                          "and that is what gets printed. A key line is validated here the way the "
+                          "engine validates it: ssh-ed25519, ecdsa-sha2-nistp256 or "
+                          "ecdsa-sha2-nistp384, as the full line (`ssh-ed25519 AAAA…`) or the bare "
+                          "base64 the agent prints."),
+                      epilog=("examples:\n"
+                              "  ascend app tunnel-keys 'Support Bot'                      # list\n"
+                              "  ascend app tunnel-keys 'Support Bot' --add \"$(ascend tunnel key)\"\n"
+                              "  ascend app tunnel-keys 'Support Bot' --add                # this machine's key\n"
+                              "  ascend app tunnel-keys 'Support Bot' --add 'ssh-ed25519 AAAAC3Nza…'\n"
+                              "  ascend app tunnel-keys 'Support Bot' --remove 520de864     # by agent id\n"
+                              "  ascend app tunnel-keys 'Support Bot' --json"))
+    s.add_argument("app", help="app name or aapp_ id")
+    s.add_argument("--add", nargs="?", const="@local", metavar="KEY",
+                   help="list this key (the line the agent printed); with no value, this "
+                        "machine's own tunnel key. Already listed is a no-op")
+    s.add_argument("--remove", metavar="KEY|AGENT_ID",
+                   help="drop this key: the line, or the agent's 8-character id (`ascend tunnel key`)")
+    s.add_argument("--list", action="store_true", help="show the keys (the default)")
+    s.set_defaults(func=cmd_app_tunnel_keys)
 
     s = ap.add_parser("bind", parents=[GLOBALS], formatter_class=_Fmt,
                       help="record which Ascend app a config was registered as",
@@ -9928,6 +10431,167 @@ def build_parser():
     s.add_argument("--app", action="append",
                    help="only these apps (repeatable; name or aapp_ id). Default: every app on the tenant")
     s.set_defaults(func=cmd_bridge_sync)
+
+    # tunnel (the open-source Ascend tunnel agent, run from here)
+    tnp = sub.add_parser("tunnel", parents=[GLOBALS], formatter_class=_Fmt,
+                         help="reach a private or local target: run the Ascend tunnel agent here",
+                         description=(
+                             "Reach a private or local target: run the Ascend tunnel agent here.\n\n"
+                             "`ascend-tunnel` is Straiker's open-source agent "
+                             "(github.com/straiker-ai/ascend-tunnel). It runs on a machine that "
+                             "can reach the target, opens ONE outbound HTTPS connection to "
+                             "Straiker, and Ascend reaches the target through it at "
+                             "https://<host>.tun.straiker.ai/<path>. No inbound ports, no VPN, no "
+                             "DNS change; it dials only the hosts you --allow and sees only "
+                             "ciphertext. HTTPS_PROXY and NO_PROXY are honoured.\n\n"
+                             "This group drives the agent. `check` proves the path, `key` prints "
+                             "the agent's public key, `start` runs it detached (pid, log and "
+                             "status under the CLI's state dir, like a bridge), `url` states the "
+                             "URL rule for an app behind it, and `app tunnel-keys` lists the key "
+                             "on the app. The agent is `ascend-tunnel` on PATH, else the "
+                             "published Docker image with the agent's state directory as its "
+                             "volume; every verb says which it used.\n\n"
+                             "A tunnel carries a connection (L4): Ascend speaks to the target "
+                             "itself, through a request template or a hosted adaptor. The bridge "
+                             "carries a conversation (L7): it runs an adapter on this machine. "
+                             "Use the tunnel for a private address; use the bridge only for what "
+                             "a tunnel cannot reach (a login a person completes, a local CLI "
+                             "agent).")
+                         ).add_subparsers(dest="verb", required=True)
+
+    def _tunnel_agent_flags(s, *, targets=True):
+        if targets:
+            s.add_argument("--org", required=True, metavar="ID",
+                           help="your Straiker org id (the numeric tenant id)")
+            s.add_argument("--allow", action="append", metavar="HOST[:PORT]",
+                           help="a target the agent may reach: host, or host:port (443 when "
+                                "omitted). Repeatable; one entry per host")
+            s.add_argument("--env", choices=sorted(["dev", "stage", "prod"]), default=None,
+                           help="the Straiker environment the agent connects to; sets the "
+                                "endpoint and its pinned host key when one is published "
+                                "(default: follows --base / $STRAIKER_API_BASE)")
+            s.add_argument("--relay", metavar="WSS_URL",
+                           help="the Straiker endpoint the agent dials (wss://…), instead of the "
+                                "one --env selects")
+            s.add_argument("--host-key", metavar="'TYPE BASE64'",
+                           help="the endpoint's SSH host key to pin, when Straiker publishes it")
+            s.add_argument("--ca-file", metavar="PEM",
+                           help="an extra CA to trust besides the system store, e.g. a "
+                                "TLS-inspecting proxy's")
+        s.add_argument("--state-dir", metavar="DIR",
+                       help="where the agent keeps its key (default: $TUNNEL_STATE_DIR, else "
+                            "<state dir>/tunnel/agent). Keep it, or the agent gets a new identity")
+        s.add_argument("--runner", choices=["auto", "binary", "docker"], default="auto",
+                       help="where the agent comes from: ascend-tunnel on PATH, or the Docker "
+                            "image (auto: PATH first)")
+
+    s = tnp.add_parser("check", parents=[GLOBALS], formatter_class=_Fmt,
+                       help="prove the path from this machine: Straiker through any proxy, TLS, "
+                            "the key, each target",
+                       description=(
+                           "The agent's own `check`, printed line for line: the connection to "
+                           "Straiker through any HTTPS_PROXY, its TLS and host key, whether an "
+                           "app lists this agent's key, and whether each allowed target answers "
+                           "from this machine. Every line should read PASS, except WAIT on the "
+                           "key line until an app lists the key — that is the expected state "
+                           "before `app tunnel-keys --add`. A FAIL names what to fix; send the "
+                           "lines to support@straiker.ai if it is not obvious.\n\n"
+                           "Exit 0 when nothing failed (WAIT included), 1 on any FAIL."),
+                       epilog=("examples:\n"
+                               "  ascend tunnel check --org 1234 --allow chat.corp.internal\n"
+                               "  ascend tunnel check --org 1234 --allow api.corp.internal:8080 --env dev\n"
+                               "  ascend tunnel check --org 1234 --allow chat.corp.internal --json"))
+    _tunnel_agent_flags(s)
+    s.set_defaults(func=cmd_tunnel_check)
+    s = tnp.add_parser("key", parents=[GLOBALS], formatter_class=_Fmt,
+                       help="print this machine's tunnel key (the public half; generated on first use)",
+                       description=(
+                           "The agent's public key, as the agent prints it, to list on each app "
+                           "it serves (`ascend app tunnel-keys <app> --add`). Generated by the "
+                           "agent on first use and kept in its state directory; the private half "
+                           "never leaves that directory and this command never reads it."),
+                       epilog=("examples:\n"
+                               "  ascend tunnel key\n"
+                               "  ascend app tunnel-keys 'Support Bot' --add \"$(ascend tunnel key)\"\n"
+                               "  ascend tunnel key --json          # key, type and agent id"))
+    _tunnel_agent_flags(s, targets=False)
+    s.set_defaults(func=cmd_tunnel_key)
+    s = tnp.add_parser("start", parents=[GLOBALS], formatter_class=_Fmt,
+                       help="run the agent, detached and supervised (or --foreground)",
+                       description=(
+                           "Run the agent for one org, allowing the targets given. Detached by "
+                           "default: it survives this terminal, with its pid, log and status under "
+                           "the CLI's state dir, like a bridge; `tunnel ls` shows it and "
+                           "`tunnel stop` ends it. --foreground runs it in this terminal instead "
+                           "(Ctrl-C stops it), which is also the form for Windows.\n\n"
+                           "On start the agent prints its key and the URL each target is reached "
+                           "at; both are shown here. Until an app lists the key, Straiker refuses "
+                           "the agent and it retries every few seconds, so Test Connection in the "
+                           "Console works as soon as the key is listed. Keep the machine awake "
+                           "for the length of an assessment."),
+                       epilog=("examples:\n"
+                               "  ascend tunnel start --org 1234 --allow chat.corp.internal\n"
+                               "  ascend tunnel start --org 1234 --allow chat.corp.internal --allow api.corp.internal:8080\n"
+                               "  ascend tunnel start --org 1234 --allow chat.corp.internal --env dev --foreground\n"
+                               "  ascend tunnel start --org 1234 --allow chat.corp.internal --runner docker --json"))
+    _tunnel_agent_flags(s)
+    s.add_argument("--foreground", action="store_true",
+                   help="run in this terminal (output here, Ctrl-C stops it) instead of detaching")
+    s.set_defaults(func=cmd_tunnel_start)
+    s = tnp.add_parser("ls", parents=[GLOBALS], formatter_class=_Fmt,
+                       help="list the tunnels this machine runs, and whether each link is up",
+                       description=(
+                           "Every tunnel started from here: whether the agent is alive, and what "
+                           "its log last said about the link — up, waiting (no app lists its key "
+                           "yet; it is refused until one does), or reconnecting. Offline: nothing "
+                           "is asked of the platform."))
+    s.set_defaults(func=cmd_tunnel_ls)
+    s = tnp.add_parser("stop", parents=[GLOBALS], formatter_class=_Fmt,
+                       help="stop a tunnel (the only one, --org <id>, or --all)",
+                       epilog=("examples:\n"
+                               "  ascend tunnel stop                 # the only tunnel\n"
+                               "  ascend tunnel stop --org 1234 --env dev\n"
+                               "  ascend tunnel stop --all"))
+    s.add_argument("--org", metavar="ID", help="the tunnel for this org")
+    s.add_argument("--env", choices=sorted(["dev", "stage", "prod"]), default=None,
+                   help="narrow --org to one environment")
+    s.add_argument("--all", action="store_true", help="stop every tunnel")
+    s.add_argument("--grace", type=float, default=8.0, help="seconds before SIGKILL")
+    s.set_defaults(func=cmd_tunnel_stop)
+    s = tnp.add_parser("logs", parents=[GLOBALS], formatter_class=_Fmt,
+                       help="show a tunnel's log (the agent's JSON events)",
+                       description=(
+                           "The agent's output: one JSON event per line — identity (the key), "
+                           "waiting (refused: no app lists the key), connected / forward (the "
+                           "link is up), connection (one per connection through the tunnel, with "
+                           "bytes each way), disconnected (reconnecting with backoff)."),
+                       epilog=("examples:\n"
+                               "  ascend tunnel logs\n"
+                               "  ascend tunnel logs --org 1234 -f"))
+    s.add_argument("--org", metavar="ID", help="the tunnel for this org")
+    s.add_argument("--env", choices=sorted(["dev", "stage", "prod"]), default=None,
+                   help="narrow --org to one environment")
+    s.add_argument("--follow", "-f", action="store_true", help="tail live")
+    s.set_defaults(func=cmd_tunnel_logs)
+    s = tnp.add_parser("url", parents=[GLOBALS], formatter_class=_Fmt,
+                       help="the URL rule: what to put in the app's URL for a target behind the tunnel",
+                       description=(
+                           "The app's URL for a target behind the tunnel, and the allow entry that "
+                           "goes with it. The URL is https://<host>.tun.straiker.ai/<path> — the "
+                           "real host rides inside the name — and never carries a port: the port "
+                           "lives in the agent's allow list, one entry per host. http:// is for an "
+                           "app that speaks plain HTTP on port 80; wss:// for a WebSocket app. The "
+                           "host is a DNS name, never an IP address, since the name is what the "
+                           "agent dials. Offline; nothing is asked of the platform or the agent."),
+                       epilog=("examples:\n"
+                               "  ascend tunnel url chat.corp.internal\n"
+                               "  ascend tunnel url api.corp.internal:8080 --path /v1/chat\n"
+                               "  ascend tunnel url https://api.corp.internal:8080/v1/chat    # the app's real URL\n"
+                               "  ascend tunnel url ws://bot.corp.internal:9000/socket --json"))
+    s.add_argument("target", metavar="HOST[:PORT]|URL",
+                   help="the target as host[:port], or its real URL (its port and path are read from it)")
+    s.add_argument("--path", metavar="/PATH", help="the app's own path, appended to the tunnel name")
+    s.set_defaults(func=cmd_tunnel_url)
 
     # keys (the local bridge key store)
     kp = sub.add_parser("keys", parents=[GLOBALS], formatter_class=_Fmt,

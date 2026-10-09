@@ -1,0 +1,11 @@
+$ ascend tunnel url api.corp.internal:8080 --path /v1/chat
+--- exit 0
+--- stdout
+  URL      https://api.corp.internal.tun.straiker.ai/v1/chat
+  allow    --allow api.corp.internal:8080
+  rules
+    - the app's URL is https://<host>.tun.straiker.ai/<path>: the real host rides inside the name (http:// only for an app that speaks plain HTTP on port 80; wss:// for a WebSocket app)
+    - no port in the URL: the app's port lives in the agent's allow list (--allow host:port), one entry per host
+    - the host is a DNS name, never an IP address: the name is what the agent dials
+    - the agent's key must be listed on the app:  ascend app tunnel-keys <app> --add <key>
+--- stderr

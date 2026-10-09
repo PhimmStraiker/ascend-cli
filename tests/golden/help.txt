@@ -50,10 +50,12 @@ WHEN SOMETHING IS WRONG
 
 MORE
   adaptor · assess · chat · ci · control · controls · export · onboard
-  policy · reports · status · target · tenant · version
+  policy · reports · status · target · tenant · tunnel · version
   Run `ascend <command> --help` for any of these — each has its own flags and examples.
   `adaptor` is the custom-adaptor loop: engine-side JavaScript for a target no template can
   drive (a login, a token mint, a conversation to open, a reply to poll for).
+  `tunnel` reaches a private or local target: the open-source Ascend tunnel agent runs here,
+  and Ascend reaches the target at https://<host>.tun.straiker.ai/<path>.
 
 COMPATIBILITY
   app · adapter · keys · bridge

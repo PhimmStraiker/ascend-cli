@@ -32,8 +32,10 @@ from test_no_internal_codenames import INTERNAL  # noqa: E402  — the one list 
 # The word on its own. An identifier (`relay_state`, `ASCEND_RELAY_APP_ID`, `relays_running`) is
 # joined to its neighbours by an underscore or a letter and does not match.
 RELAY = re.compile(r"(?<![A-Za-z0-9_])relays?(?![A-Za-z0-9_])", re.I)
-#: String literals that ARE identifiers: the alias name, the JSON key, the state directory.
-IDENTIFIER_LITERALS = {"relay", "relays"}
+#: String literals that ARE identifiers: the alias name, the JSON key, the state directory —
+#: and `--relay`, the tunnel agent's own flag for the Straiker endpoint it dials, which
+#: `ascend tunnel` passes through by name (the flag's help text says "endpoint").
+IDENTIFIER_LITERALS = {"relay", "relays", "--relay"}
 
 
 def _internal_name_pattern(word):

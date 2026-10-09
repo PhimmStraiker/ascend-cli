@@ -17,6 +17,8 @@ left-hand column.
 | **the bridge** (process) | The CLI running that relay: it leases probes from Ascend and puts them through your adapter. The CLI **is** the bridge, baked in; there is no separate binary to install. Managed by `ascend bridge`. | relay (the old name; still works as an alias) |
 | **lease service** | The Straiker-side endpoint the bridge leases probes from and posts results to (`/v2/lease`, `/v2/result`). Always up; not something you run. Naming it separately is what stops "the bridge is down" from being ambiguous. | the bridge (it is the other end of it) |
 | **bridge key** (`tc-…`) | The credential the bridge presents. Returned **once**, when a bridge app is created. | thin key, thin API key, tc key, relay key |
+| **tunnel** | The L4 path to a private or local app: the open-source `ascend-tunnel` agent runs on a machine in your network, dials out to Straiker once over HTTPS, and Ascend reaches the app through it at `https://<host>.tun.straiker.ai/<path>` — speaking to the app itself, through a request template or a hosted adaptor. The agent dials only the hosts on its allow list and sees only ciphertext. Managed by `ascend tunnel`. | the bridge, proxy, agent (alone; that is the target) |
+| **tunnel key** | The public half of the key the tunnel agent generates on first start. Listed on an app as `_tunnel_agent_keys` (up to 20, one per agent serving the app); Straiker refuses the agent until an app lists it. `ascend tunnel key` prints it, `ascend app tunnel-keys` lists it. | agent key, public key (alone) |
 | **assessment** | One red-team run against one app. Has a status, a score, a severity, and probes. | run (as a noun) |
 | **probe** | One adversarial prompt sent to the target. An assessment is made of thousands. | test, attack (as a count) |
 | **control** | One check the platform can run: `phone_number`, `sys_prompt_leak`, `jailbreak`. 71 exist; `ascend controls list`. | rule, check |
@@ -31,6 +33,13 @@ defined above: the **app type** (an app the CLI relays for) and **the bridge** (
 itself). Read "a bridge app" as the type; "the bridge" or "start the bridge" as the process.
 `ascend assess run` on a bridge app auto-starts the bridge and it self-stops when
 the assessment reaches a terminal state. `ascend bridge` is the manual control surface.
+
+**A tunnel is not a bridge.** The tunnel is an L4 connection: the agent carries bytes between
+Straiker and one allowed `host:port`, and Ascend speaks to the app itself. The bridge is an L7
+connection: the CLI runs the adapter here and answers each probe. Reach for the tunnel when the
+only problem is that the address is private; reach for the bridge only for what a tunnel cannot
+carry (a login a person completes, a local CLI agent). An app behind a tunnel is an ordinary
+direct app whose URL is a tunnel name; nothing about it is "bridge".
 
 ## Controls vs the gate policy
 

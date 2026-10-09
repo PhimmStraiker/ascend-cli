@@ -355,7 +355,8 @@ Every command takes `--json`, `--token`, `--base`, `--bridge-base`.
 | **Add a target** | **`target add\|list\|show\|check\|rm`** |
 | Build an adapter | `map` · `adapter list\|show\|configs\|validate` · `chat` |
 | Build a custom adaptor (engine-side JavaScript) | `adaptor har\|shape\|spec\|scaffold\|gate\|test\|store\|verify` |
-| Register | `app create\|list\|get\|bind\|delete` · `keys list\|add\|rm\|prune` · `policy set\|push` |
+| Register | `app create\|list\|get\|update\|tunnel-keys\|bind\|delete` · `keys list\|add\|rm\|prune` · `policy set\|push` |
+| Reach a private target | `tunnel check\|key\|start\|ls\|stop\|logs\|url` — the open-source Ascend tunnel agent, run from here; the app's URL becomes `https://<host>.tun.straiker.ai/<path>` |
 | Run | `assess run\|watch\|pause\|resume\|list` · `onboard` · `bridge sync\|ls\|logs\|start\|stop` (auto-managed; `start` is advanced) |
 | Read results | `results` · `reports` · `export` · `ci` |
 | Operate | `status` · `version` |
