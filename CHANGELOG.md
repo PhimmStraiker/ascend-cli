@@ -11,6 +11,67 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ## [Unreleased]
 
+### Changed
+
+- **`target add` registers a hosted adaptor by default; the local bridge is deprecated.** Locally
+  run adapters are being retired. After the contract is derived and proven, `target add` now
+  generates one JavaScript adaptor from it (`runtime/discovery/codegen_js.py`: one generator each
+  for a direct request, an SSE/ndjson stream with an optional create step and a `{{CONV}}` path, a
+  WebSocket, a create-then-message session API whose id is minted once per conversation in
+  `host.state.getOrMint` and re-made once on a 401, and a create/send/poll transcript; the
+  onboarding scaffold for everything else), gates it through the engine, creates — or re-wires in
+  place — a DIRECT application whose URL is the transport's real address, whose headers carry the
+  literal credentials the adaptor needs, and whose `request_template` carries the prompt key, a
+  FRESH `_adaptor_src` (never the one stored before) and `_adaptor_domains` for every host beyond
+  the app's URL; then runs `adaptor test` through the engine, confirms the store by reading the
+  app back, runs `adaptor verify`, and prints `transport: adaptor` with the file it wrote beside
+  the config (`<config>.adaptor.js`). `--via api` keeps meaning a plain template app. `--via bridge`
+  keeps today's behaviour and is labelled deprecated; a Python `--module` adapter, a driven
+  browser and a login handshake no generated adaptor runs yet still fall to it (and say so). A
+  private address is refused under the default before any app exists, naming the tunnel and the
+  bridge as the ways out. The legacy `onboard` form keeps its direct-first/bridge rule. Every
+  generated source is held to the gate's own rules offline (`runtime/adaptor.py` `lint_source`)
+  and, where `node` is present, executed against a fake of the engine's host in the suite.
+- **The engine uuid is resolved by name.** `adaptor test|get|verify` and the new default take a
+  name or an `aapp_` id and join it to the Console's uuid through the Console's own
+  `listApplications` remote function with the PAT-exchanged token (`control/console.py`;
+  `--console-id` overrides). The `aapp_` id is still tried as given when the listing cannot be
+  read, and its 404 explained as before.
+- **`assess run` keeps watching after a connection error.** A transport error during the settle
+  window came out as `started: False` — the same answer as "the platform paused it" — so the
+  command returned and reported a healthy run as one that never started. It is now
+  `started: null` with `unconfirmed: true`; a waiting caller keeps polling and only a read
+  settles it. The settle window's comments and the stall diagnosis are re-derived from the
+  measured platform model: a run born paused goes `running -> paused` 15-85 s after creation, a
+  direct target that fails every probe is paused only after 5 consecutive failures and a ~180 s
+  cooldown (longer than the 45 s window, so `started: true` says nothing about the target), a 5xx
+  or a timeout is retried by the platform itself and a 4xx is not. An adaptor app's stall
+  diagnosis points at `ascend adaptor verify`, since the platform's call cannot be replayed here.
+- **The Python adapter export is the old flow.** `adapter build --code`, `codegen.py` and
+  `docs/BUILD_ADAPTER.md` keep working and are labelled the bridge's flow, pointing at
+  `ascend adaptor` and `docs/CUSTOM_ADAPTOR.md`.
+
+### Fixed
+
+- **Two environment-referenced credentials no longer crash registration.** `auth` is a list of
+  static blocks then, and three sites read `(cfg.get("auth") or {}).get("type")` — the transport
+  choice among them, so `target add` died with AttributeError after a successful validation.
+- **A direct app gets the transport's real address for every shape.** `_api_contract` read only
+  `endpoint`/`url`, so a stream, a socket, a session API or a polled transcript registered with no
+  URL. It now takes `base_url`+`chat_path`, `ws_url`, the message endpoint and `send.url`,
+  cut before any `{{CONV}}`/`{{SESSION_ID}}` placeholder (the adaptor renders that part itself).
+- **An adaptor app is never created with the `"none"` api_key fallback**, and an `env:` credential
+  reaches it: `_finalize_target_auth` moves such a credential out of the config's headers, so a
+  direct app built from the config never received it; on the adaptor path the resolved value is
+  placed on the application record and the output says which.
+- **A site that 401s every path is no longer called a Copilot Studio agent.** The profile
+  took any 401/403 at `/copilotstudio/directline/token` as the Entra-gated signal, so a plain
+  REST bot behind a whole-site access code (Straiker's own target lab) was profiled as Copilot
+  Studio and `target add` demanded an Entra token for it. The refusal counts only when a sibling
+  unknown path is not refused the same way; real tenants are still settled by their host alone.
+- **`{"type": "static", "mode": "headers"}` resolves.** The block `discovery.classify` writes for
+  a captured credential was refused by the static materializer as an unknown mode.
+
 ### Added
 
 - **`ascend adaptor`: the custom-adaptor loop, as CLI commands.** A custom *adaptor* is one
@@ -69,11 +130,13 @@ them is visible at a glance. A growing Regressions section is a process signal, 
   not a twin), a bridge app has its key fetched as `--app` always did. The result carries
   `reused: true`. A second application for the same target takes a different `--name`.
 - **`assess run` proves the run started.** `--no-wait` used to print a hard-coded `running`.
-  Measured against prod: a run whose target refuses the platform's calls answers `running` to the
-  resume and is back at `paused` 10-20 seconds later, with no reason recorded. The command now
-  watches a 45-second settle window and reports the status the platform actually holds, with
-  `started`, `auto_paused` and — when it did not start — a `diagnosis` made by replaying the
-  app's own contract against the target. Exit code is non-zero when the run did not start.
+  Measured against prod: a run that is born paused answers `running` to the resume and is back at
+  `paused` 15-85 seconds later, with no reason recorded. The command now watches a 45-second
+  settle window and reports the status the platform actually holds, with `started`,
+  `auto_paused` and — when it did not start — a `diagnosis` made by replaying the app's own
+  contract against the target. Exit code is non-zero when the run did not start. (A direct target
+  that fails every probe is paused only after the platform's ~180 s tolerance, outside this
+  window; see the Changed entry above.)
 - **`assess run` picks up an unfinished assessment instead of creating another** (`--new` forces a
   fresh one). Assessments cannot be deleted, so a retry used to leave a permanent orphan.
 - **`target inspect <url>`** — read-only look at a target before touching it: whether it publishes

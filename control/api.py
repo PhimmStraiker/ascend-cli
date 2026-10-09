@@ -89,8 +89,17 @@ TERMINAL_STATUSES = frozenset(
 
 
 
-# How long a just-resumed run is watched before it is called started. Measured: a run the target
-# refuses falls back to paused within 10-20 seconds.
+# How long a just-resumed run is watched before it is called started.
+#
+# What the window CAN see, measured on the current platform: a run that is born paused — a
+# bridge app nothing is leasing from, or a target refused by the platform's start-of-run check —
+# goes `running -> paused` 15-85 s after creation (34 s and 83 s on two bridge runs, 43-48 s on
+# two more). What it CANNOT see any more: a direct target that refuses or fails every probe. The
+# platform now tolerates 5 consecutive failed probes and then waits a ~180 s cooldown before it
+# pauses, so such a run reads `running` for well over three minutes. `started: True` therefore
+# means "the platform accepted the run and it was still running at the end of the window" — not
+# "the target answered". A pause that arrives later is reported by the poll as `stalled`, and the
+# diagnosis there is made against that model (`_diagnose_not_started` in the CLI).
 SETTLE_SECONDS = 45
 SETTLE_EVERY = 5
 
@@ -561,6 +570,31 @@ class AscendAPI:
                          json_body={"runBudgetSeconds": budget_s},
                          timeout=_adapter_run_timeout(budget_s))
 
+    def console_app_uuid(self, name: str, *, url: Optional[str] = None, attempts: int = 1,
+                         delay_s: float = 3.0) -> Optional[str]:
+        """The Console's uuid for the application called `name` — the id the engine's adaptor
+        routes take — joined through the Console's own listing with this client's token.
+
+        None when the listing does not name the app (a just-created one can take a few seconds
+        to appear, hence `attempts`) or cannot be read; the reason is kept on
+        `last_console_error` so the caller can say why it fell back to the platform id.
+        """
+        import console as _console
+        base = _console.console_base_for(self.base)
+        self.last_console_error = None
+        for i in range(max(1, int(attempts))):
+            try:
+                uid = _console.console_app_uuid(self._bearer(), name, url=url, base=base,
+                                                timeout=self.timeout, session=self._s)
+            except Exception as exc:  # noqa: BLE001 — the fallback (try the aapp_ id) still runs
+                self.last_console_error = f"{type(exc).__name__}: {str(exc)[:160]}"
+                uid = None
+            if uid:
+                return uid
+            if i + 1 < attempts:
+                time.sleep(delay_s)
+        return None
+
     # ---- assessments ---------------------------------------------------------
     def create_assessment(self, app_id: str, name: str) -> Any:
         """Start an assessment, and never report a failure that actually succeeded.
@@ -753,7 +787,12 @@ class AscendAPI:
             if recovered:
                 out.update({"recovered": True, "recovery_note": recovery_note,
                             "recovery_needs_action": False})
-            if not state.get("started") or not wait:
+            # `started` is False (the platform put it back to paused: do not wait), True (poll), or
+            # None (the settle window could not read it at all: a connection error after the
+            # assessment was created). A caller that asked to WAIT keeps watching on None — the
+            # run is on the platform and only a read can say what it is doing; returning here
+            # reported a healthy run as one that never started.
+            if not wait or state.get("started") is False:
                 return out
             resumes = {"n": 0}
 
@@ -820,23 +859,45 @@ class AscendAPI:
                         every: Optional[int] = None) -> Dict[str, Any]:
         """Watch a just-resumed run long enough to know whether it held.
 
-        Measured: a run whose target rejects the platform's calls answers `running` to the resume
-        and is back at `paused` 10-20 seconds later, with no reason recorded anywhere. Progress is
-        no use as a signal — a small run reports none at all until it completes. So the only
-        honest test is time: still `running` (or finished) after the settle window.
+        Measured: a run that is born paused (a bridge app nothing is leasing from, a target the
+        platform's start-of-run check refuses) answers `running` to the resume and is back at
+        `paused` 15-85 seconds later, with no reason recorded anywhere. A direct target that fails
+        every probe is NOT visible here any more: the platform tolerates 5 consecutive failures and
+        then a ~180 s cooldown before pausing, longer than this window (see SETTLE_SECONDS).
+        Progress is no use as a signal — a small run reports none at all until it completes. So
+        the only honest test is time: still `running` (or finished) after the settle window, and
+        `started: True` means exactly that and nothing about the target. A read that never
+        succeeds returns `started: None` with `unconfirmed: True`.
         """
         settle = SETTLE_SECONDS if settle is None else settle
         every = SETTLE_EVERY if every is None else every
         deadline = time.time() + settle
         seen: List[str] = []
         status = ""
+        state: Dict[str, Any] = {}
+        reads = 0
+        last_error: Optional[BaseException] = None
         while True:
-            state = self._state_of(app_id, aid) or {}
-            status = str(state.get("status", "")).lower()
-            seen.append(status)
-            if is_finished(state) or time.time() >= deadline:
+            try:
+                state = self.get_assessment(app_id, aid) or {}
+                reads += 1
+                status = str(state.get("status", "")).lower()
+                seen.append(status)
+            except Exception as exc:  # noqa: BLE001 — a transport blip is not a status
+                last_error = exc
+                state = {}
+            if (reads and is_finished(state)) or time.time() >= deadline:
                 break
             time.sleep(max(every, 0.01))
+        if not reads:
+            # Nothing could be read, so the run's state is UNKNOWN — which is not "did not
+            # start". Reporting it as a failed start made a connection error after the create
+            # look like a run that fell over, and `assess run` returned instead of watching a
+            # run that was very likely fine. The caller keeps polling (the poll tolerates
+            # transport errors) and only a read can settle it.
+            why = f"{type(last_error).__name__}: {str(last_error)[:160]}" if last_error else "no read"
+            return {"status": "unknown", "started": None, "auto_paused": False,
+                    "unconfirmed": True, "error": why}
         held = status == "running" or is_finished(state)
         return {"status": status or "unknown", "started": held,
                 "auto_paused": (not held) and "running" in seen and status == "paused"}

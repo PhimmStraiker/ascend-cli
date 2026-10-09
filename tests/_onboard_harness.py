@@ -34,27 +34,68 @@ def never_reached(*a, **k):
     raise AssertionError("the live hard gate was reached; it must not run for this target")
 
 
-class FakePlatform:
-    """The slice of the platform client `cmd_onboard` talks to, recording every write."""
+# What the engine's gate answers for a generated adaptor: the template value is what lands on the
+# app. "FRESH" is literal on purpose, so a test can tell a re-generated adaptor from a stored one.
+GATE_OK = {"ok": True, "origin": "inline", "templateKey": "_adaptor_src", "templateValue": "FRESH-ADAPTOR",
+           "digest": "0094886620bc", "sizes": {"bytes": 4000, "minifiedBytes": 1500, "encodedBytes": 2000},
+           "gate": {"ok": True, "violations": [], "caps": ["http.request"], "entries": ["sendTurn"]}}
+TURN_OK = {"n": 1, "status_code": 200, "ms": 612, "scored": "Hello! I can help with orders.",
+           "response": "Hello! I can help with orders.", "body": {"reply": "Hello! I can help with orders."}}
+CONSOLE_UUID = "01a1220c-0d0f-722a-a94b-59bb8a3c6276"
 
-    def __init__(self, existing=None):
+
+class FakePlatform:
+    """The slice of the platform client `cmd_onboard` talks to, recording every write — and, for
+    the adaptor default, the engine's routes (gate, test, verify) and the Console join."""
+
+    def __init__(self, existing=None, *, gate=None, test=None, verify=None, console_uuid=CONSOLE_UUID):
         self.existing = existing            # the app already registered under this name, or None
         self.patches, self.created = [], []
+        self.gate_out = GATE_OK if gate is None else gate
+        self.test_out = {"turns": [TURN_OK]} if test is None else test
+        self.verify_out = {"ok": True, "turns": [TURN_OK], "preflight": None} if verify is None else verify
+        self.console_uuid, self.last_console_error = console_uuid, None
+        self.gated, self.tested, self.verified, self.console_asked = [], [], [], []
+        self._records = {}                  # app id -> the record as the platform now holds it
 
     def find_app_by_name(self, name):
         return self.existing
 
     def get_app(self, app_id):
+        if app_id in self._records:
+            return dict(self._records[app_id])
         return dict(self.existing or {})
 
     def patch_app(self, app_id, patch):
         self.patches.append((app_id, json.loads(json.dumps(patch))))
+        base = self._records.get(app_id) or dict(self.existing or {})
+        self._records[app_id] = {**base, **json.loads(json.dumps(patch))}
         return {}
 
     def create_app(self, spec):
         self.created.append(json.loads(json.dumps(spec)))
-        return {"id": "aapp_new", "name": spec.get("name"), "api_type": spec.get("api_type"),
-                "thin_api_key": "tc-new" if spec.get("api_type") == "thin" else None}
+        app = {"id": "aapp_new", "name": spec.get("name"), "api_type": spec.get("api_type"),
+               "thin_api_key": "tc-new" if spec.get("api_type") == "thin" else None,
+               **{k: spec[k] for k in ("url", "request_template", "response_template", "headers") if k in spec}}
+        self._records[app["id"]] = app
+        return dict(app)
+
+    # --- the engine's adaptor routes and the Console join ---
+    def adapter_gate(self, source):
+        self.gated.append(source)
+        return self.gate_out
+
+    def adapter_test(self, source, app_id, prompts, budget):
+        self.tested.append((source, app_id, list(prompts), budget))
+        return self.test_out
+
+    def verify_app_adapter(self, app_id, budget):
+        self.verified.append((app_id, budget))
+        return self.verify_out
+
+    def console_app_uuid(self, name, *, url=None, attempts=1, delay_s=0):
+        self.console_asked.append((name, url))
+        return self.console_uuid
 
     def validate_controls(self, ids):
         return {"valid": list(ids), "warnings": [], "unknown": []}
@@ -95,6 +136,10 @@ def run_target_add(monkeypatch, tmp_path, cfg, platform, *, gate="answers", **ar
     monkeypatch.setattr(ascend, "_load_named_config", lambda name: json.loads(path.read_text()))
     monkeypatch.setattr(ascend, "_client", lambda args: platform)
     monkeypatch.setattr(ascend, "_bind_config", lambda *a, **k: True)
+    # the generated adaptor lands beside the config: keep it inside tmp_path
+    monkeypatch.setattr(ascend, "_write_adaptor_file",
+                        lambda cfg_path, cfg_name, source: (tmp_path / f"{cfg_name}.adaptor.js").write_text(source)
+                        and (tmp_path / f"{cfg_name}.adaptor.js"))
     monkeypatch.setattr(ascend, "_guard_egress", lambda url, args: None)
     monkeypatch.setattr(ascend, "_upgrade_streaming_shape", lambda cfg, vres, args, V: (cfg, vres))
     monkeypatch.setattr(ascend, "_guard_constant_response", lambda *a, **k: None)

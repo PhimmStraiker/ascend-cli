@@ -207,6 +207,14 @@ def reply_shape(response_template: Any) -> Optional[Dict[str, str]]:
                 found = find(x, f"{path}.{k}" if path else k)
                 if found is not None:
                     return found
+        elif isinstance(v, list):
+            # `{"choices": [{"message": {"content": "{{RESPONSE}}"}}]}` is the mirror
+            # `target add` writes for an answer at choices.0.message.content; the statement has
+            # to put the array back, or the engine's template matches nothing in the reply.
+            for i, x in enumerate(v):
+                found = find(x, f"{path}.{i}" if path else str(i))
+                if found is not None:
+                    return found
         elif isinstance(v, str) and "RESPONSE" in v:
             return path
         return None
@@ -216,8 +224,59 @@ def reply_shape(response_template: Any) -> Optional[Dict[str, str]]:
         return None
     js = "text"
     for part in reversed(where.split(".")):
-        js = f"{{ {part}: {js} }}"
+        js = f"[ {js} ]" if part.isdigit() else f"{{ {part}: {js} }}"
     return {"path": where, "statement": f"return {{ status_code: 200, body: {js} }};"}
+
+
+# ----------------------------------------------------------------------------- the local lint
+# What the publish gate refuses (docs/CUSTOM_ADAPTOR.md, "Rules the gate enforces"): the host is
+# synchronous and sandboxed, so these identifiers are either a false affordance (`await` on a
+# non-promise resolves immediately) or a capability that does not exist in the isolate. Checked
+# on the source with comments stripped, because the JSDoc typedef legitimately says
+# `import("./host")`. The engine's gate is the authority; this is the free check that runs before
+# a network round trip, and the one the generated adaptors are tested against.
+GATE_BANNED = ("async", "await", "Promise", "fetch", "XMLHttpRequest", "require", "import",
+               "eval", "Function", "setTimeout", "setInterval", "setImmediate", "console",
+               "process", "globalThis", "window", "document")
+# Members the gate denies on any object: the prototype chain is how a sandboxed script reaches
+# what it was not given. Measured: a generated adaptor was refused for `Object.prototype.toString`.
+GATE_DENIED_MEMBERS = (".prototype", ".__proto__", ".constructor")
+_SEND_TURN = re.compile(r"\bfunction\s+sendTurn\s*\(")
+_EXPORTED = re.compile(r"^\s*(export|module\.exports)\b", re.M)
+
+
+def strip_comments(source: str) -> str:
+    """The source minus /* */ and // comments; string contents are kept (a banned word in a
+    string is still refused by the gate's identifier check only when it is an identifier, but a
+    generated file has no reason to say it anywhere)."""
+    out = re.sub(r"/\*.*?\*/", "", source or "", flags=re.S)
+    return re.sub(r"//[^\n]*", "", out)
+
+
+def lint_source(source: str) -> List[str]:
+    """Problems the publish gate would refuse this source for, as one line each; [] when clean.
+
+    Mirrors the gate's rules on the operator's side: the banned identifiers, exactly one
+    `function sendTurn(`, and no `export`/`module.exports` (the file is one plain script).
+    """
+    problems: List[str] = []
+    code = strip_comments(source)
+    for word in GATE_BANNED:
+        m = re.search(rf"\b{re.escape(word)}\b", code)
+        if m:
+            line = code.count("\n", 0, m.start()) + 1
+            problems.append(f"{word}: not available inside the isolate (line {line})")
+    for member in GATE_DENIED_MEMBERS:
+        m = re.search(re.escape(member) + r"\b", code)
+        if m:
+            line = code.count("\n", 0, m.start()) + 1
+            problems.append(f"{member}: a denied member inside the isolate (line {line})")
+    n = len(_SEND_TURN.findall(code))
+    if n != 1:
+        problems.append(f"exactly one `function sendTurn(turn, host)` is required; found {n}")
+    if _EXPORTED.search(code):
+        problems.append("no `export` or `module.exports`: the adaptor is one plain script")
+    return problems
 
 
 # ----------------------------------------------------------------------------- what a detector sees

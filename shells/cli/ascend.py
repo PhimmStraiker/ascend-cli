@@ -458,12 +458,37 @@ def _spec_from_config(args, api):
     # Carried out so cmd_app_create can refuse an app type that cannot honour it. An OAuth2 or
     # CSRF target registered with `--type api` got an app carrying only static headers -- the
     # platform then called the target directly and 401'd on every probe, with nothing having warned.
-    out["_auth_type"] = (cfg.get("auth") or {}).get("type")
+    out["_auth_type"] = _auth_type(cfg)
     return out
 
 
 # Auth kinds resolved locally by runtime/layers/auth.py. The platform cannot run them.
 DYNAMIC_AUTH_KINDS = ("oauth2", "csrf", "derived_multihop")
+# Adapters that can only ever run on this machine: a Python module the operator wrote, and a
+# driven browser. Nothing generated can stand in for them, so they are the two shapes the (deprecated)
+# bridge still carries by default.
+LOCAL_ONLY_ADAPTERS = ("custom", "browser")
+BRIDGE_DEPRECATION = ("the local bridge is deprecated: a hosted adaptor on a direct app is the "
+                      "default, and nothing then runs on this machine")
+
+
+def _auth_type(cfg):
+    """The auth kind a config authenticates with, whether `auth` is one block or a LIST.
+
+    Two environment-referenced credentials (a passcode header AND a bearer, the ordinary field
+    case) are written as a list of static blocks since 1.1.3, and `(cfg.get("auth") or
+    {}).get("type")` raised AttributeError on that list at three sites — the transport choice
+    among them, so `target add` died after a successful validation. A list is static unless one
+    of its blocks is a handshake.
+    """
+    auth = (cfg or {}).get("auth")
+    if isinstance(auth, list):
+        kinds = [str(b.get("type") or "") for b in auth if isinstance(b, dict)]
+        dynamic = [k for k in kinds if k in DYNAMIC_AUTH_KINDS]
+        return dynamic[0] if dynamic else (kinds[0] if kinds else None)
+    if isinstance(auth, dict):
+        return auth.get("type")
+    return None
 _PRIVATE_SUFFIXES = (".local", ".internal", ".lan", ".home", ".corp", ".localhost", ".test")
 
 # Names Straiker reaches itself. A tunnel or private-link host under one of these suffixes is
@@ -531,15 +556,24 @@ def _is_public_host(url: str) -> bool:
 
 
 def _choose_transport(args, adapter, cfg):
-    """api or bridge, and the reason in words. Direct first; a bridge only when it has to be.
+    """adaptor, api or bridge, and the reason in words.
 
-    A bridge is a process somebody must keep alive for the whole run, on a machine that must stay
-    awake, and when it is not answering the run scores as if nothing was wrong. So it is the last
-    resort: used when the platform cannot reach the target, cannot speak its protocol, or the
-    operator asked for it by name.
+    The default (`target add`, `--via auto`) is a hosted ADAPTOR: JavaScript generated from the
+    proven contract, gated and run by the engine on a direct app, so nothing runs on this machine
+    for the whole assessment. `--via api` is a plain template app (the platform renders the
+    request itself; only a public JSON endpoint with static auth can be one). `--via bridge` is
+    the deprecated local path: a process somebody must keep alive for the whole run, on a machine
+    that must stay awake, and when it is not answering the run scores as if nothing was wrong. It
+    is still what carries the two adapters nothing generated can replace (a Python module, a
+    driven browser) and a login handshake no generated adaptor runs yet.
+
+    The legacy `onboard` form has no `--via` and keeps its pre-adaptor rule: direct when the
+    platform can speak the contract, a bridge otherwise.
     """
-    want = (getattr(args, "via", None) or "auto").lower()
-    endpoint = cfg.get("endpoint") or cfg.get("url") or ""
+    from runtime.discovery import codegen_js as _cj
+    want = (getattr(args, "via", None) or "legacy").lower()
+    shaped = {**cfg, "adapter": adapter or cfg.get("adapter") or "direct_api"}
+    endpoint = _cj.raw_url(shaped) or cfg.get("endpoint") or cfg.get("url") or ""
     if _routed_by_straiker(endpoint):
         # Not a choice. The name does not resolve on this machine, so a bridge here could never
         # reach it; the platform calling the target itself is the only way probes can arrive.
@@ -549,13 +583,32 @@ def _choose_transport(args, adapter, cfg):
                  hint="omit --via; the platform reaches this name itself")
         return "api", ROUTED_NOTE
     speaks = (adapter or "direct_api") in ("direct_api", "api")
-    public = _is_public_host(endpoint)
     # A direct app carries static headers and one api_key and nothing else. A target that logs in
     # with a handshake needs the local auth layer to run it, which only a bridge goes through.
-    handshake = (cfg.get("auth") or {}).get("type")
+    handshake = _auth_type(cfg)
     static_auth = handshake not in DYNAMIC_AUTH_KINDS
     if want == "bridge":
-        return "bridge", "requested with --via bridge"
+        return "bridge", f"requested with --via bridge ({BRIDGE_DEPRECATION})"
+    if want == "auto":
+        if (adapter or "") in LOCAL_ONLY_ADAPTERS:
+            return "bridge", (f"the '{adapter}' adapter runs only on this machine, so a bridge "
+                              f"carries it ({BRIDGE_DEPRECATION})")
+        if not static_auth:
+            return "bridge", (f"it authenticates with a {handshake!r} handshake, which no generated "
+                              f"adaptor runs yet; a bridge carries it ({BRIDGE_DEPRECATION}) — or "
+                              f"write the adaptor by hand: ascend adaptor scaffold")
+        if not _is_public_host(endpoint):
+            # The engine runs the adaptor, and it cannot dial a private address: the adaptor's
+            # test would fail after the app was created. Refuse before anything exists, with the
+            # two ways a private target still reaches the platform.
+            _die(f"{endpoint or 'this target'} is not reachable from Straiker's cloud, so a hosted "
+                 f"adaptor cannot reach it either.\n"
+                 f"  reach it through a tunnel (a .tun.straiker.ai name), or for now:\n"
+                 f"    ascend target add ... --via bridge      ({BRIDGE_DEPRECATION})",
+                 error_code="adaptor_target_private")
+        return "adaptor", ("a hosted adaptor generated from this contract: the platform runs it, "
+                           "nothing runs on this machine")
+    public = _is_public_host(endpoint)
     if speaks and public and static_auth:
         return "api", "the platform can reach this endpoint and speak its contract itself"
     why = (f"the '{adapter}' adapter is not something the platform can speak natively"
@@ -592,15 +645,24 @@ def _lift_api_key(cfg) -> str:
 
 
 def _api_contract(cfg):
-    """A proven adapter config as the fields a direct (`api`) application is made of."""
+    """A proven adapter config as the fields a direct (`api`) application is made of.
+
+    The address is the transport's real one, however the adapter spells it: `endpoint` for a
+    direct target, `base_url` + `chat_path` for a stream, `ws_url` for a socket, the message
+    endpoint for a session API, `send.url` for a polled transcript. Reading only `endpoint`/`url`
+    gave every other shape an application with no URL.
+    """
+    from runtime.discovery import codegen_js as _cj
     out = {}
-    url = cfg.get("url") or cfg.get("endpoint")
+    url = _cj.app_url(cfg)
     if url:
         out["url"] = url
     headers = dict(cfg.get("headers") or {})
     headers.setdefault("Content-Type", "application/json")
     out["headers"] = headers
     body = cfg.get("body") or cfg.get("request_body")
+    if body is None and _cj.shape_of(cfg) != "direct_api":
+        body = _cj.body_template(cfg)
     if isinstance(body, dict):
         if "{{PROMPT}}" in json.dumps(body):
             out["request_template"] = body
@@ -2119,6 +2181,11 @@ def cmd_assess_run(args):
         res = {**res, "diagnosis": _diagnose_not_started(c, appid, res)}
     elif isinstance(res, dict) and res.get("stalled"):
         res = {**res, "diagnosis": _diagnose_not_started(c, appid, res)}
+    elif isinstance(res, dict) and res.get("unconfirmed"):
+        # The run exists; its status could not be read during the settle window (a connection
+        # error after the create). Not a failed start, and not a proven one either.
+        print(f"  note: assessment {res.get('assessment_id')} was created, but its status could not "
+              f"be read ({res.get('error')}); follow it with `ascend assess watch`.", file=sys.stderr)
     elif isinstance(res, dict) and res.get("assessment_id"):
         verb = "picked up the unfinished run" if res.get("reused_assessment") else "assessment started"
         _say(args, f"{verb}  ({res['assessment_id']})", done=True)
@@ -2170,20 +2237,39 @@ def cmd_assess_run(args):
 def _diagnose_not_started(c, appid, res) -> str:
     """Why a run fell back to paused, tested rather than guessed.
 
-    The platform records no reason, so reproduce its call from here: send the app's own contract
-    one benign prompt. A direct app whose target rejects that is the whole explanation.
+    Measured on the current platform: a run that never starts is paused 15-85 s after creation
+    (a bridge app nothing is leasing from, or a target refused by the start-of-run check). A run
+    that STALLS mid-flight is a different model: the platform tolerates 5 consecutive failed probes
+    and then waits a ~180 s cooldown before it pauses, so the pause lands three minutes after the
+    target started failing. A 5xx or a timeout is retried by the platform itself, with backoff; a
+    400/401/403/404 or a credential error is never auto-resolved and stays paused until it is
+    fixed and the run resumed. The platform records none of this on the assessment, so the
+    diagnosis reproduces its call from here where it can (a template app), and for an adaptor app
+    points at the engine's own verifier, since the platform's call cannot be replayed from here.
     """
     import api
     try:
         app = c.get_app(appid) or {}
     except Exception:
         app = {}
+    stalled = bool((res or {}).get("stalled"))
+    model = (("the run paused after the platform's failure tolerance ran out — 5 consecutive "
+              "failed probes, then a ~180 s cooldown — so the target started failing about three "
+              "minutes before the pause. ") if stalled else "")
     if api.needs_bridge(app):
-        return ("this is a bridge app, and the platform pauses a run nothing is answering. Check "
-                "`ascend bridge ls` — a bridge must be alive with lease counters moving.")
+        return (model + "this is a bridge app, and the platform pauses a run nothing is answering. "
+                "Check `ascend bridge ls` — a bridge must be alive with lease counters moving.")
+    tpl = app.get("request_template")
+    tpl_text = tpl if isinstance(tpl, str) else json.dumps(tpl or {})
+    if "_adaptor_src" in tpl_text:
+        return (model + "this app is driven by a hosted adaptor, so the platform's call cannot be "
+                "replayed from here. Re-prove the stored adaptor through the engine:  "
+                f"ascend adaptor verify --app '{app.get('name') or appid}'   — a 5xx or a timeout "
+                "there is retried by the platform on its own; a 400/401/403 is a contract or "
+                "credential fault to fix, then `ascend assess resume`.")
     url = app.get("url")
     if not url:
-        return "the application has no url, so the platform has nothing to call"
+        return model + "the application has no url, so the platform has nothing to call"
     try:
         import requests
         body = app.get("request_template") or "{}"
@@ -2199,12 +2285,18 @@ def _diagnose_not_started(c, appid, res) -> str:
                     f"to refresh the contract")
         r = requests.post(url, data=body.encode(), headers=hdrs, timeout=45)
         if r.status_code >= 400:
-            return (f"the target answers the app's own contract with HTTP {r.status_code} "
-                    f"({r.text[:140]!r}) — the platform got the same and paused the run. Fix the "
-                    f"credential or body with `ascend target add` (it updates this app in place).")
-        return (f"the target accepts the contract from here (HTTP {r.status_code}), so the refusal "
-                f"is specific to the platform's side — an allow-list, a WAF, or a rate limit on "
-                f"Straiker's egress. The run can be resumed once that is cleared.")
+            return (model + f"the target answers the app's own contract with HTTP {r.status_code} "
+                    f"({r.text[:140]!r}) — the platform got the same"
+                    + (" and, after its tolerance, paused the run" if stalled else " and paused the run")
+                    + ". Fix the credential or body with `ascend target add` (it updates this app "
+                      "in place), then `ascend assess resume`."
+                    + (" A 5xx or a timeout is retried by the platform on its own; a 4xx is not."
+                       if stalled else ""))
+        return (model + f"the target accepts the contract from here (HTTP {r.status_code}), so the "
+                f"refusal is specific to the platform's side — an allow-list, a WAF, or a rate "
+                f"limit on Straiker's egress"
+                + (", or a transient failure the platform will retry itself" if stalled else "")
+                + ". The run can be resumed once that is cleared.")
     except Exception as exc:
         return f"could not replay the contract from here ({type(exc).__name__}: {str(exc)[:120]})"
 
@@ -3669,6 +3761,9 @@ def _finish_code_adapter(cfg, vres, args, source, V):
     config that might. Both files are kept on failure so a human, or `--agent`, can finish them.
     """
     from runtime.discovery import codegen
+    print("[code] note: a Python adapter module is the OLD flow — it runs on this machine behind the "
+          "bridge, which is deprecated. The default `ascend target add` generates a hosted adaptor "
+          "instead (docs/CUSTOM_ADAPTOR.md).", file=sys.stderr)
     if not args.out:
         _die("--code needs --out <name>: the adapter module is written as <name>.py beside <name>.json")
     # `--out` used to be reduced to its STEM here, so `--code --out ./build/bot.json` silently
@@ -4585,6 +4680,7 @@ def cmd_onboard(args):
             existing_ref, reused = found.get("id"), True
     via, via_why = _choose_transport(args, adapter, cfg)
     tc = None
+    adaptor_out = None
     if existing_ref:
         # Adopt an application that already exists in the Console instead of creating a second
         # one. This is the common shape of a stalled engagement: the app was configured in the
@@ -4596,7 +4692,17 @@ def cmd_onboard(args):
         _ok(f"{'already registered — reusing' if reused else 'adopting existing app'} "
             f"{app_id} ({app.get('name') or existing_ref})")
         is_bridge = api.needs_bridge(app)
-        if not is_bridge:
+        if not is_bridge and via == "adaptor":
+            # A direct app re-added under the default is re-wired as an adaptor app: its URL,
+            # headers and templates are refreshed, and the adaptor is FRESH — never the one that
+            # was stored, which may be the placeholder, a hand-written one for a contract that
+            # has since changed, or an older generation of this file.
+            _ok(f"adaptor — {via_why}")
+            app, adaptor_out = _register_adaptor_app(c, args, cfg, adapter, app_name, existing=app,
+                                                     controls=controls, cfg_name=cfg_name,
+                                                     cfg_path=cfg_path)
+            app_id = app.get("id") or app_id
+        elif not is_bridge:
             via = "api"
             # A direct app IS its contract, so re-wiring the same target refreshes it in place.
             # That is what makes a fixed header or a rotated key an update rather than a fork.
@@ -4618,6 +4724,12 @@ def cmd_onboard(args):
             app = {**app, **(c.patch_app(app_id, patch) or {})}
             _ok("contract refreshed on the existing app")
         else:
+            if via == "adaptor":
+                # The app that exists is a bridge app, and an api_type cannot be changed in place.
+                # The default cannot apply to it; say so instead of quietly keeping a bridge.
+                _ok(f"note: {app_id} is a bridge app, which cannot carry a hosted adaptor; keeping "
+                    f"the bridge for it ({BRIDGE_DEPRECATION}). Register the target under a new "
+                    f"--name to move it off the bridge.")
             via = "bridge"
             tc = app.get("thin_api_key")
             if not tc:
@@ -4644,7 +4756,13 @@ def cmd_onboard(args):
         # registering nothing at all. Reported by @ryan-straiker in #36.
         controls = _resolve_all_controls(c, args, controls)
         _refuse_duplicate_app_name(c, app_name, cfg_name)
-        if via == "api":
+        if via == "adaptor":
+            _ok(f"adaptor — {via_why}")
+            app, adaptor_out = _register_adaptor_app(c, args, cfg, adapter, app_name, existing=None,
+                                                     controls=controls, cfg_name=cfg_name,
+                                                     cfg_path=cfg_path)
+            app_id = app.get("id")
+        elif via == "api":
             _ok(f"direct — {via_why}")
             spec = api.build_api_spec(
                 name=app_name, system_prompt=args.system_prompt or name,
@@ -4685,21 +4803,36 @@ def cmd_onboard(args):
     # assessment now is a separate decision (`target add --run`, or `ascend assess run`).
     if getattr(args, "stop_after_register", False):
         label = app.get("name") or args.name or name
-        _out({"target": label, "app_id": app_id, "config": cfg_name, "adapter": adapter,
-              "path": str(cfg_path),
-              "validated": not routed, "transport": via, "transport_reason": via_why,
-              "reused": reused, "needs_bridge": via == "bridge",
-              "key_stored": via == "bridge"}, args,
-             human=(f"\ntarget '{label}' is ready\n"
-                    f"  app       {app_id}\n"
-                    f"  adapter   {adapter}   (config '{cfg_name}', "
-                    f"{ROUTED_NOTE if routed else 'proven against the live target'})\n"
-                    f"  run it    ascend assess run --app '{label}'\n"
-                    f"  talk to it ascend chat '{label}'\n"
-                    f"  re-check  ascend target check '{label}'"))
+        result = {"target": label, "app_id": app_id, "config": cfg_name, "adapter": adapter,
+                  "path": str(cfg_path),
+                  "validated": not routed, "transport": via, "transport_reason": via_why,
+                  "reused": reused, "needs_bridge": via == "bridge",
+                  "key_stored": via == "bridge"}
+        lines = [f"\ntarget '{label}' is ready", f"  app       {app_id}"]
+        if adaptor_out:
+            result["adaptor"] = adaptor_out
+            result["console_id"] = adaptor_out.get("console_id")
+            proof = ", ".join(k for k in ("gated", "tested", "stored", "verified") if adaptor_out.get(k))
+            lines[-1] += f"   (engine uuid {adaptor_out.get('console_id') or 'unresolved'})"
+            lines.append(f"  adaptor   {adaptor_out.get('shape')} · {adaptor_out.get('source')}"
+                         f"   ({proof or 'unproven'})")
+            lines.append("  transport adaptor — the platform runs it; nothing runs on this machine")
+        else:
+            lines.append(f"  adapter   {adapter}   (config '{cfg_name}', "
+                         f"{ROUTED_NOTE if routed else 'proven against the live target'})")
+            if via == "bridge":
+                lines.append(f"  transport bridge — {BRIDGE_DEPRECATION}")
+        lines += [f"  run it    ascend assess run --app '{label}'",
+                  f"  talk to it ascend chat '{label}'",
+                  f"  re-check  ascend target check '{label}'"]
+        _out(result, args, human="\n".join(lines))
+        if adaptor_out and not adaptor_out.get("verified"):
+            # Registered, but the engine never proved the stored adaptor: a pipeline must not read
+            # this as a target ready to assess.
+            sys.exit(EXIT_ERROR)
         return
 
-    if via == "api":
+    if via in ("api", "adaptor"):
         # Nothing to serve locally — the platform calls the target itself.
         args.app, args.name = [app_id], getattr(args, "assessment_name", None) or f"{app_name} · first run"
         return cmd_assess_run(args)
@@ -4742,6 +4875,226 @@ def cmd_onboard(args):
           "bridge": {k: ensure.get(k) for k in ("ensured", "started", "reused", "pid")}}, args,
          human="the bridge is detached and serving; this command can exit. "
                f"Follow the run with:  ascend assess watch --app {app_id} --assessment {aid}")
+
+
+def _write_adaptor_file(cfg_path, cfg_name, source):
+    """The generated adaptor, beside its config (`<name>.adaptor.js`, 0600): the file an operator
+    edits and re-stores with `ascend adaptor store`. Never raises; returns the path or None."""
+    try:
+        base = Path(cfg_path) if cfg_path else (config_dir() / f"{cfg_name}.json")
+        path = base.with_name(f"{cfg_name}.adaptor.js")
+        _write_private(path, source)
+        return path
+    except Exception:
+        return None
+
+
+def _adaptor_app_headers(cfg, args):
+    """The literal headers a direct app driven by a hosted adaptor must carry.
+
+    `_finalize_target_auth` moves every environment-referenced credential out of the config's
+    headers and into its `auth` block, so the file never holds a value — and a direct app built
+    from that config therefore never received the credential at all. The engine cannot read this
+    machine's environment, so for the adaptor path the resolved values go on the application
+    record itself, which is what the platform's own `Test connection` does. Said out loud in the
+    output: the names returned here are the credentials that now live on the record.
+
+    Returns (headers, moved_names, query_params).
+    """
+    from dispatch import merge_auth
+    headers = dict(cfg.get("headers") or {})
+    moved, params = [], {}
+    if cfg.get("auth"):
+        merged = merge_auth(cfg, timeout_s=min(float(getattr(args, "timeout", 20) or 20), 20.0),
+                            verify_tls=not getattr(args, "insecure", False))
+        if merged.get("_auth_error"):
+            _die(f"the credential this target needs could not be resolved: {merged['_auth_error']}\n"
+                 f"  export the variable the config references in this shell, or pass the value "
+                 f"with --header / --api-key / --bearer and re-run",
+                 code=EXIT_ERROR, error_code="auth_unresolved")
+        for k, v in (merged.get("headers") or {}).items():
+            if headers.get(k) != v:
+                moved.append(k)
+            headers[k] = v
+        cookies = merged.get("cookies") or {}
+        if cookies:
+            headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
+            moved.append("Cookie")
+        params = dict(merged.get("params") or {})
+        moved += [k for k in params if k not in moved]
+    headers.setdefault("Content-Type", "application/json")
+    return headers, moved, params
+
+
+def _register_adaptor_app(c, args, cfg, adapter, app_name, *, existing, controls, cfg_name, cfg_path):
+    """The default registration: a direct app driven by an adaptor generated from the proven
+    contract — generated, gated through the engine, created (or re-wired in place), tested
+    through the engine against the real target, confirmed stored, and verified from the stored
+    bytes. Returns (app, adaptor record). Exits on the first step that does not hold, with the
+    app left in whatever state the steps before it reached and the output saying which.
+    """
+    import api
+    from runtime.discovery import codegen_js as _cj
+    AD = _adaptor_mod()
+    plan = _cj.plan({**cfg, "adapter": adapter or cfg.get("adapter") or "direct_api"})
+    src = plan["source"]
+    js_path = _write_adaptor_file(cfg_path, cfg_name, src)
+    record = {"shape": plan["shape"], "source": str(js_path) if js_path else None,
+              "finished": plan["finished"], "domains": plan["domains"], "console_id": None,
+              "gated": False, "tested": False, "stored": False, "verified": False,
+              "credentials_on_app": []}
+    problems = AD.lint_source(src)
+    if problems:
+        _die("the generated adaptor would be refused by the gate:\n  " + "\n  ".join(problems)
+             + (f"\n  the source is at {js_path}" if js_path else ""),
+             code=EXIT_ERROR, error_code="adaptor_lint")
+    _ok(f"adaptor {plan['shape']} generated → {js_path or '(not written)'}")
+    if not plan["finished"]:
+        _warn(f"no generator covers the '{adapter}' adapter: the adaptor is the onboarding "
+              f"scaffold with the captured request in its header. Finish sendTurn() in "
+              f"{js_path}, then `ascend adaptor test` and `ascend adaptor store` it.")
+
+    # 1. gate — static, through the engine
+    gated = c.adapter_gate(src)
+    if not gated.get("ok"):
+        _gate_refused(gated, args, "the generated adaptor was refused by the gate; nothing was registered")
+    key = gated.get("templateKey") or AD.TEMPLATE_KEY
+    value = gated.get("templateValue")
+    if not value:
+        _die("the gate passed but returned no template value to store", code=EXIT_ERROR)
+    record.update({"gated": True, "digest": gated.get("digest"),
+                   "preflight": AD.preflight_note(gated.get("gate") or {})})
+    _ok(f"gate PASS · digest {gated.get('digest')} · preflight: {record['preflight'] or 'n/a'}")
+
+    # 2. the application: URL = the transport's real address, headers = the literal credentials,
+    #    template = the prompt key + a FRESH _adaptor_src (+ _adaptor_domains, parameters)
+    headers, moved, params = _adaptor_app_headers(cfg, args)
+    url = plan["url"]
+    if params:
+        from urllib.parse import urlencode
+        url += ("&" if "?" in url else "?") + urlencode(params)
+    template = {**plan["request_template"], **plan["params"], key: value}
+    if plan["domains"]:
+        template["_adaptor_domains"] = plan["domains"]
+    api_key = _lift_api_key({**cfg, "headers": headers})
+    api_key = None if api_key == "none" else api_key     # the "none" fallback never reaches an adaptor app
+    if existing:
+        app_id = existing.get("id")
+        patch = {"url": url, "headers": headers, "response_template": plan["response_template"],
+                 "request_template": _keep_platform_template_keys(existing.get("request_template"), template)}
+        if not plan["domains"]:
+            patch["request_template"].pop("_adaptor_domains", None)   # the capture decides, not the old record
+        if api_key:
+            patch["api_key"] = api_key
+        if controls:
+            patch.update({"control_type": "custom", "control_ids": controls})
+        if args.system_prompt:
+            patch["system_prompt"] = args.system_prompt
+        if getattr(args, "size", None):
+            patch["assessment_size"] = args.size
+        if getattr(args, "qpm", None):
+            patch["max_queries_per_minute"] = args.qpm
+        app = {**existing, **(c.patch_app(app_id, patch) or {})}
+        _ok(f"contract and adaptor refreshed on the existing app {app_id}")
+    else:
+        spec = api.build_api_spec(
+            name=app_name, system_prompt=args.system_prompt or app_name, control_ids=controls,
+            assessment_size=args.size, qpm=args.qpm, url=url, request_template=template,
+            response_template=plan["response_template"], headers=headers, api_key=api_key)
+        spec["business_purpose"] = (getattr(args, "purpose", None) or args.system_prompt or app_name)[:500]
+        app = c.create_app(spec)
+        app_id = app.get("id")
+        _ok(f"app {app_id}")
+    record["stored"] = True          # the create/patch carried it; read back below
+    record["credentials_on_app"] = moved
+    if moved:
+        _ok(f"credential(s) {', '.join(moved)} placed on the application record: the platform sends "
+            f"them to the target; the config file keeps only the references")
+
+    # 3. the engine's id for this app, through the Console's own listing
+    console_id = getattr(args, "console_id", None)
+    if console_id and not AD.is_engine_uuid(console_id):
+        _die("--console-id must be the engine's application uuid (…/applications/ascend/<uuid> in "
+             "the Console URL)")
+    uuid = console_id or c.console_app_uuid(app.get("name") or app_name, url=plan["url"],
+                                             attempts=8, delay_s=3.0)
+    if not uuid:
+        why = getattr(c, "last_console_error", None)
+        _warn(f"could not resolve the engine uuid of {app.get('name') or app_name!r} through the "
+              f"Console{f' ({why})' if why else ''}; the engine steps (test, verify) were skipped.\n"
+              f"    prove it yourself:  ascend adaptor verify --app <uuid from the Console URL>")
+        return app, record
+    record["console_id"] = uuid
+
+    # 4. test — the generated source, through the engine, against the real target
+    budget = AD.DEFAULT_BUDGET_S
+    _ok(f"testing the adaptor through the engine ({budget:g}s budget; one real turn)")
+    try:
+        tested = c.adapter_test(src, uuid, [args.prompt or AD.DEFAULT_PROMPT], budget)
+    except api.AscendAPIError as e:
+        _adaptor_route_error(e, uuid)
+    verdict = AD.summarize_run(tested)
+    for line in _render_turns(tested):
+        _ok(line)
+    if not verdict["ok"]:
+        hint = (f"ascend adaptor test {js_path} --app '{app.get('name') or app_name}'   # iterate, then store"
+                if js_path else "ascend adaptor test <file> --app <name>")
+        if not plan["finished"]:
+            hint = f"finish sendTurn() in {js_path}, then:  " + hint
+        _out({"ok": False, "data": {"app_id": app_id, "console_id": uuid, "adaptor": record, "run": tested},
+              "error": {"code": "adaptor_test_failed", "message": "; ".join(verdict["problems"]),
+                        "hint": hint, "exit_code": EXIT_ERROR}},
+             args, human=("NOT DONE  the generated adaptor did not produce a real answer:\n  - "
+                          + "\n  - ".join(verdict["problems"])
+                          + f"\n  the app {app_id} exists and carries this adaptor; fix and re-prove it:\n    {hint}"))
+        raise SystemExit(EXIT_ERROR)
+    record["tested"] = True
+
+    # 5. store — the create/patch already carried the bytes; confirm by reading back, PATCH if not
+    after = c.get_app(app_id) or {}
+    try:
+        stored_tpl = AD.parse_template(after.get("request_template"))
+    except ValueError:
+        stored_tpl = {}
+    if stored_tpl.get(key) != value:
+        merged, _notes = AD.merge_source(stored_tpl or template, key, value)
+        c.patch_app(app_id, {"request_template": json.dumps(merged, indent=2)})
+        after = c.get_app(app_id) or {}
+        try:
+            stored_tpl = AD.parse_template(after.get("request_template"))
+        except ValueError:
+            stored_tpl = {}
+    if stored_tpl.get(key) != value:
+        record["stored"] = False
+        _out({"ok": False, "data": {"app_id": app_id, "console_id": uuid, "adaptor": record},
+              "error": {"code": "store_unverified", "exit_code": EXIT_ERROR, "hint": None,
+                        "message": "reading the app back does not show the adaptor"}},
+             args, human=f"FAIL  reading {app_id} back does not show the adaptor under {key}; "
+                         f"nothing is proven. Check the app in the Console.")
+        raise SystemExit(EXIT_ERROR)
+    _ok(f"stored · {key} confirmed on {app_id}")
+
+    # 6. verify — what is STORED, run by the engine: the only proof the bytes landed
+    try:
+        verified = c.verify_app_adapter(uuid, budget)
+    except api.AscendAPIError as e:
+        _adaptor_route_error(e, uuid)
+    v2 = AD.summarize_run(verified)
+    if not v2["ok"]:
+        _out({"ok": False, "data": {"app_id": app_id, "console_id": uuid, "adaptor": record, "run": verified},
+              "error": {"code": "verify_failed", "message": "; ".join(v2["problems"]), "hint": None,
+                        "exit_code": EXIT_ERROR}},
+             args, human=("FAIL  the stored adaptor did not verify:\n  - " + "\n  - ".join(v2["problems"])
+                          + f"\n  the app {app_id} exists; re-run:  ascend adaptor verify --app "
+                            f"'{app.get('name') or app_name}'"))
+        raise SystemExit(EXIT_ERROR)
+    record["verified"] = True
+    turns = v2.get("turns") or []
+    first = turns[0] if turns else {}
+    pre = v2.get("preflight") or {}
+    _ok(f"verify PASS · preflight {pre.get('status_code') if pre.get('defined') else 'n/a'} · "
+        f"turn {first.get('status_code')} {first.get('ms')}ms")
+    return app, record
 
 
 # ----------------------------------------------------------------------------- results
@@ -4925,7 +5278,7 @@ def cmd_target_show(args):
            "adapter": rec.get("adapter") or cfg.get("adapter"),
            "endpoint": cfg.get("endpoint") or cfg.get("url") or cfg.get("message_endpoint"),
            "key": C.mask(rec.get("thin_api_key")),
-           "auth": (cfg.get("auth") or {}).get("type"),
+           "auth": _auth_type(cfg),
            "auth_lifecycle": (cfg.get("auth_lifecycle") or {}).get("type"),
            "verified_answer": (probe.get("verified_answer") or "")[:160] or None}
     if cfg_missing:
@@ -7506,21 +7859,43 @@ def _adaptor_budget(args):
     return budget
 
 
-def _adaptor_engine_ref(c, ref):
+def _adaptor_engine_ref(c, ref, console_id=None):
     """The id to put on an engine adaptor route (`get`, `test`, `verify`).
 
-    An engine uuid (the one in the Console URL) is used as given. A name or an `aapp_` id is
-    resolved through the platform — so a typo is caught here, with a did-you-mean — and then tried
-    on the route anyway: the engine answers 404 for an id it cannot read, and `_adaptor_route_error`
-    turns that into the explanation. Trying rather than refusing by shape means the day the
-    gateway resolves `aapp_` ids on these routes, nothing here has to change.
+    `--console-id` wins. An engine uuid (the one in the Console URL) is used as given. A name or
+    an `aapp_` id is resolved through the platform — so a typo is caught here, with a
+    did-you-mean — then joined to the engine uuid through the Console's own listing. When that
+    listing cannot be read the `aapp_` id is tried on the route anyway: the engine answers 404
+    for an id it cannot read, and `_adaptor_route_error` turns that into the explanation.
     """
+    AD = _adaptor_mod()
+    if console_id:
+        if not AD.is_engine_uuid(console_id):
+            _die("--console-id must be the engine's application uuid "
+                 "(…/applications/ascend/<uuid> in the Console URL)")
+        return console_id
     if not ref:
-        _die("no application given: pass --app <engine uuid from the Console URL> "
-             "(or a name / aapp_ id, which the engine may not be able to read)")
-    if _adaptor_mod().is_engine_uuid(ref):
+        _die("no application given: pass --app <name | aapp_id | engine uuid from the Console URL>")
+    if AD.is_engine_uuid(ref):
         return ref
-    return _resolve_app(c, ref)
+    app_id = _resolve_app(c, ref)
+    # The one join between the two id spaces: the Console's own listing, read with this PAT's
+    # token. A name or aapp_ id resolves to the engine uuid here; when the listing cannot be read
+    # the aapp_ id is tried as before, and its 404 is explained by shape.
+    try:
+        app = c.get_app(app_id) or {}
+    except Exception:
+        app = {}
+    app_name = app.get("name") or ("" if str(ref).startswith("aapp_") else ref)
+    uuid = c.console_app_uuid(app_name, url=app.get("url")) if app_name else None
+    if uuid:
+        print(f"  note: {ref!r} is {app_id}; the engine knows it as {uuid} (resolved through the Console)",
+              file=sys.stderr)
+        return uuid
+    why = getattr(c, "last_console_error", None)
+    print(f"  note: the Console's listing did not resolve {ref!r} to an engine uuid"
+          f"{f' ({why})' if why else ''}; trying {app_id} as given", file=sys.stderr)
+    return app_id
 
 
 def _adaptor_route_error(exc, app_id):
@@ -7690,7 +8065,7 @@ def cmd_adaptor_test(args):
     c = _client(args)
     src = _adaptor_source(args.file)
     budget = _adaptor_budget(args)
-    app_id = _adaptor_engine_ref(c, args.app)
+    app_id = _adaptor_engine_ref(c, args.app, getattr(args, "console_id", None))
     prompts = list(args.prompt or [AD.DEFAULT_PROMPT])
     _say(args, f"Running {args.file} against the target of {app_id}: {len(prompts)} prompt(s), "
                f"{budget:g}s budget. Each turn is a real conversation with a real system.")
@@ -7722,7 +8097,7 @@ def cmd_adaptor_verify(args):
     AD = _adaptor_mod()
     c = _client(args)
     budget = _adaptor_budget(args)
-    app_id = _adaptor_engine_ref(c, args.app)
+    app_id = _adaptor_engine_ref(c, args.app, getattr(args, "console_id", None))
     _say(args, f"Running the adaptor stored on {app_id} against its target ({budget:g}s budget)...")
     import api
     try:
@@ -7747,7 +8122,7 @@ def cmd_adaptor_verify(args):
 def cmd_adaptor_get(args):
     """What the engine resolves for the app: origin, digest, and the stored source."""
     c = _client(args)
-    app_id = _adaptor_engine_ref(c, args.app)
+    app_id = _adaptor_engine_ref(c, args.app, getattr(args, "console_id", None))
     import api
     try:
         out = c.get_app_adapter(app_id)
@@ -8777,9 +9152,14 @@ def build_parser():
     # New in the idempotent/direct-first flow. Deliberately NOT on the legacy `onboard` form,
     # whose help text customers script against.
     s.add_argument("--via", choices=["auto", "api", "bridge"], default="auto",
-                   help="how probes reach the target. auto (default): direct when the platform can "
-                        "reach the endpoint and speak its contract, a bridge only when it cannot. "
-                        "api: direct or fail. bridge: force a local bridge.")
+                   help="how probes reach the target. auto (default): a hosted adaptor generated from "
+                        "the proven contract, gated, stored on a direct app and verified through the "
+                        "engine — nothing runs on this machine. api: a plain template app (no "
+                        "adaptor), or fail. bridge: DEPRECATED — a local bridge process you keep "
+                        "alive for the whole run.")
+    s.add_argument("--console-id", metavar="UUID",
+                   help="the engine's application uuid (from the Console URL) for the adaptor steps, "
+                        "when the Console's listing cannot resolve the app by name")
     s.add_argument("--workspace", metavar="SLUG",
                    help="which agent to target, on a host that serves several (see `target inspect`)")
     s.add_argument("--no-profile", action="store_true",
@@ -9147,6 +9527,9 @@ def build_parser():
                    help="a prompt to send, one turn each (repeatable; default: one benign hello)")
     s.add_argument("--budget", type=float, default=120.0,
                    help="seconds the whole run may take (max 240)")
+    s.add_argument("--console-id", metavar="UUID",
+                   help="the engine's application uuid (from the Console URL); wins over --app when "
+                        "the Console's listing cannot resolve a name or aapp_ id")
     s.set_defaults(func=cmd_adaptor_test)
     s = adx.add_parser("store", parents=[GLOBALS], formatter_class=_Fmt,
                        help="gate the file and write it onto the app's request_template",
@@ -9168,6 +9551,9 @@ def build_parser():
     s.add_argument("--app", required=True, metavar="UUID|NAME|aapp_id",
                    help="the engine's application uuid (from the Console URL); a name or aapp_ id "
                         "is tried and explained if the engine cannot read it")
+    s.add_argument("--console-id", metavar="UUID",
+                   help="the engine's application uuid (from the Console URL); wins over --app when "
+                        "the Console's listing cannot resolve a name or aapp_ id")
     s.set_defaults(func=cmd_adaptor_get)
     s = adx.add_parser("verify", parents=[GLOBALS], formatter_class=_Fmt,
                        help="run what is STORED on the app: the only proof the bytes landed",
@@ -9181,6 +9567,9 @@ def build_parser():
                         "is tried and explained if the engine cannot read it")
     s.add_argument("--budget", type=float, default=120.0,
                    help="seconds the whole run may take (max 240)")
+    s.add_argument("--console-id", metavar="UUID",
+                   help="the engine's application uuid (from the Console URL); wins over --app when "
+                        "the Console's listing cannot resolve a name or aapp_ id")
     s.set_defaults(func=cmd_adaptor_verify)
     s = adx.add_parser("shape", parents=[GLOBALS], formatter_class=_Fmt,
                        help="the reply shape the app's response_template expects (read it first)",

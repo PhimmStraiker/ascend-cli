@@ -44,12 +44,18 @@ class Recorder:
     """Everything the commands can ask of the platform, recorded; replies are canned."""
 
     def __init__(self, *, gate=GATE_OK, app=APP, test=None, verify=None, adapter=None,
-                 lose_patch=False):
+                 lose_patch=False, console_uuid=None, console_error=None):
         self.gate_out, self.app, self.test_out = gate, dict(app) if app else None, test
         self.verify_out, self.adapter_out, self.lose_patch = verify, adapter, lose_patch
         self.gated, self.tested, self.verified, self.got, self.patched, self.listed = \
             [], [], [], [], [], 0
         self.spec_out = {"filename": "host.d.ts", "bytes": 9, "source": "// spec\n"}
+        # The Console join: what `console_app_uuid` answers for a name, and the calls made to it.
+        self.console_uuid, self.last_console_error, self.console_asked = console_uuid, console_error, []
+
+    def console_app_uuid(self, name, *, url=None, attempts=1, delay_s=0):
+        self.console_asked.append((name, url))
+        return self.console_uuid
 
     def adapter_spec(self):
         return self.spec_out
@@ -302,6 +308,41 @@ class TestTheTwoIdSpaces:
         rec = Recorder(adapter=ENGINE_404)
         assert exits_with(monkeypatch, rec, "adaptor", "get", "--app", "Support Bot") == 3
         assert rec.listed == 1 and rec.got == ["aapp_1"]
+        assert rec.console_asked == [("Support Bot", "https://chat.example.com/v1")], \
+            "the Console's listing was consulted, by name and url, before falling back"
+
+    def test_a_name_is_joined_to_the_engine_uuid_through_the_console(self, monkeypatch, capsys):
+        """The one join between the two id spaces: the Console's listApplications."""
+        rec = Recorder(adapter={"origin": "inline", "digest": "d"}, console_uuid=UUID)
+        run(monkeypatch, rec, "adaptor", "get", "--app", "Support Bot")
+        assert rec.got == [UUID]
+        assert "resolved through the Console" in capsys.readouterr().err
+
+    def test_an_aapp_id_is_joined_too(self, monkeypatch):
+        rec = Recorder(adapter={"origin": "inline"}, console_uuid=UUID)
+        run(monkeypatch, rec, "adaptor", "get", "--app", "aapp_1")
+        assert rec.console_asked == [("Support Bot", "https://chat.example.com/v1")] and rec.got == [UUID]
+
+    def test_console_id_wins_over_everything(self, monkeypatch):
+        rec = Recorder(adapter={"origin": "inline"}, console_uuid="3f2a9c1e-7b4d-4e8f-9a0b-000000000000")
+        run(monkeypatch, rec, "adaptor", "get", "--app", "Support Bot", "--console-id", UUID)
+        assert rec.got == [UUID] and rec.console_asked == []
+
+    def test_a_console_id_that_is_not_a_uuid_is_a_usage_error(self, monkeypatch):
+        assert exits_with(monkeypatch, Recorder(), "adaptor", "verify", "--app", UUID, "--console-id", "aapp_1") == 3
+
+    def test_the_fallback_says_why_the_console_did_not_answer(self, monkeypatch, capsys):
+        rec = Recorder(adapter=ENGINE_404, console_error="ConsoleError: the Console answered 403")
+        assert exits_with(monkeypatch, rec, "adaptor", "get", "--app", "Support Bot") == 3
+        assert "the Console answered 403" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("verb,needs", [("test", ["a.js"]), ("verify", [])])
+    def test_test_and_verify_resolve_the_same_way(self, monkeypatch, verb, needs, js):
+        rec = Recorder(test={"turns": [TURN_OK]}, verify={"ok": True, "turns": [TURN_OK]}, console_uuid=UUID)
+        argv = ["adaptor", verb] + ([js] if needs else []) + ["--app", "Support Bot"]
+        run(monkeypatch, rec, *argv)
+        ids = [t[1] for t in rec.tested] + [v[0] for v in rec.verified]
+        assert ids == [UUID]
 
     def test_a_uuid_the_engine_cannot_read_is_not_found_or_not_yours(self, monkeypatch, capsys):
         rec = Recorder(adapter=api.AscendAPIError(

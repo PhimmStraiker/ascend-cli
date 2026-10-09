@@ -15,8 +15,8 @@ usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] t
        [--size {small,medium,large}] [--qpm QPM] [--prompt PROMPT] [--settle SETTLE] [--headless]
        [--manual] [--timeout TIMEOUT] [--dry-run] [--force] [--wait] [--detail]
        [--interval INTERVAL] [--timeout-assess TIMEOUT_ASSESS] [--assessment-name ASSESSMENT_NAME]
-       [-v] [--run] [--via {auto,api,bridge}] [--workspace SLUG] [--no-profile]
-       [--purpose PURPOSE]
+       [-v] [--run] [--via {auto,api,bridge}] [--console-id UUID] [--workspace SLUG]
+       [--no-profile] [--purpose PURPOSE]
        [source]
 
 positional arguments:
@@ -144,9 +144,14 @@ options:
   -v, --verbose         debug logging for the bridge (default: False)
   --run                 continue into an assessment once the target is registered (default: False)
   --via {auto,api,bridge}
-                        how probes reach the target. auto (default): direct when the platform can
-                        reach the endpoint and speak its contract, a bridge only when it cannot.
-                        api: direct or fail. bridge: force a local bridge. (default: auto)
+                        how probes reach the target. auto (default): a hosted adaptor generated
+                        from the proven contract, gated, stored on a direct app and verified
+                        through the engine — nothing runs on this machine. api: a plain template
+                        app (no adaptor), or fail. bridge: DEPRECATED — a local bridge process you
+                        keep alive for the whole run. (default: auto)
+  --console-id UUID     the engine's application uuid (from the Console URL) for the adaptor
+                        steps, when the Console's listing cannot resolve the app by name (default:
+                        None)
   --workspace SLUG      which agent to target, on a host that serves several (see `target
                         inspect`) (default: None)
   --no-profile          ignore a contract the target publishes and probe the endpoint instead

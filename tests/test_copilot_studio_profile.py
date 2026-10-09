@@ -166,6 +166,23 @@ class TestFamilyDetection:
         monkeypatch.setattr(profiles, "_get", lambda *a, **kw: (404, None))
         assert CS.detect("https://bot.example.com") is False
 
+    def test_a_host_that_refuses_every_path_is_not_claimed(self, monkeypatch):
+        """A passcode gate in front of a whole site 401s the token path AND everything else.
+        Measured: a plain REST lab bot was called an Entra-gated Copilot Studio agent, and
+        `target add` demanded an Entra token for it."""
+        monkeypatch.setattr(profiles, "_get", lambda *a, **kw: (401, {"error": "access code required"}))
+        assert CS.detect("https://lab.example.com") is False
+
+    def test_a_refusal_specific_to_the_token_path_still_counts(self, monkeypatch):
+        seen = []
+
+        def fake_get(url, headers=None, verify=True):
+            seen.append(url)
+            return (401, None) if "/copilotstudio/directline/token" in url and "not-here" not in url else (404, None)
+        monkeypatch.setattr(profiles, "_get", fake_get)
+        assert CS.detect("https://bot.example.com") is True
+        assert len(seen) == 2, "one GET for the token path, one for the sibling"
+
     def test_adding_this_profile_did_not_capture_the_existing_one(self, monkeypatch):
         """Both profiles are consulted in order; a new one must not shadow the old."""
         def fake_get(url, headers=None, verify=True):
@@ -346,11 +363,25 @@ class TestTheContractActuallyWorks:
 
 # --------------------------------------------------------------- where it has to run
 class TestTransport:
-    """Whether the platform can call this itself, measured against the CLI's own rule."""
+    """Whether the platform can call this itself, measured against the CLI's own rule.
 
-    def _args(self):
+    `via=None` is the legacy `onboard` form (direct when the platform speaks the contract, a
+    bridge otherwise). `target add`'s default is a hosted adaptor the engine runs; for these two
+    shapes see `test_under_the_default_both_are_hosted_adaptors`."""
+
+    def _args(self, via=None):
         import types
-        return types.SimpleNamespace(via="auto")
+        return types.SimpleNamespace(via=via)
+
+    def test_under_the_default_both_are_hosted_adaptors(self):
+        """The engine runs the adaptor: `session_api` has a generator, `copilot_studio` gets the
+        scaffold to finish — neither needs a relay on this machine."""
+        for adapter in ("copilot_studio", "session_api"):
+            via, why = ascend._choose_transport(
+                self._args(via="auto"), adapter, {"endpoint": "https://8.8.8.8/x",
+                                                  "session_endpoint": "https://8.8.8.8/s",
+                                                  "message_endpoint": "https://8.8.8.8/x"})
+            assert via == "adaptor" and "nothing runs on this machine" in why
 
     def test_direct_line_cannot_be_a_direct_application_today(self):
         """Four hops and a poll loop. `copilot_studio` is not a protocol the platform

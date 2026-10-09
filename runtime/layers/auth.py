@@ -306,6 +306,13 @@ class AuthProvider:
             val = resolve_secret_ref(cfg.get("value_ref") or cfg.get("value"))
             template = cfg.get("template", "{{VALUE}}")
             mat.headers[cfg.get("name", "Authorization")] = template.replace("{{VALUE}}", val)
+        elif mode == "headers":
+            # The block `discovery.classify` writes for a credential a capture presented: every
+            # header by name, each value an `env:` reference, replayed verbatim. It was emitted
+            # for years and resolved nowhere, so a captured credential could never authenticate
+            # a run.
+            for name, ref in (cfg.get("headers") or {}).items():
+                mat.headers[str(name)] = resolve_secret_ref(ref)
         else:
             raise AuthError(f"unknown static auth mode {mode!r}")
         return mat

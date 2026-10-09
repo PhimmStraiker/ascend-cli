@@ -100,8 +100,87 @@ class TestApiContract:
         assert 'cfg.get("response_path")' not in body
 
 
-# ------------------------------------------------------------------ direct first, bridge last
+# ------------------------------------------------------------------ the default: a hosted adaptor
+class TestDefaultIsAHostedAdaptor:
+    """`target add` (via=auto) registers a direct app driven by generated JavaScript the engine
+    runs; the bridge is the explicit, deprecated path. The owner's decision: locally run adapters
+    are retired, so a public JSON endpoint, a stream, a socket and a session API all go the same
+    way, and only what nothing generated can replace still falls to a bridge."""
+
+    def _args(self, **kw):
+        return types.SimpleNamespace(**{"via": "auto", **kw})
+
+    @pytest.mark.parametrize("adapter,cfg", [
+        ("direct_api", {"endpoint": "https://8.8.8.8/c"}),
+        ("direct_api", {"endpoint": "https://8.8.8.8/c", "auth": {"type": "static"}}),
+        ("sse_stream", {"base_url": "https://8.8.8.8", "chat_path": "/stream"}),
+        ("websocket_direct", {"ws_url": "wss://8.8.8.8/ws"}),
+        ("session_api", {"session_endpoint": "https://8.8.8.8/s", "message_endpoint": "https://8.8.8.8/m"}),
+        ("session_poll", {"create": {"url": "https://8.8.8.8/c"}, "send": {"url": "https://8.8.8.8/c/{{CONV}}/m"},
+                          "poll": {"url": "https://8.8.8.8/c/{{CONV}}"}}),
+        ("copilot_studio", {"endpoint": "https://8.8.8.8/x"}),      # no generator: the scaffold, still hosted
+    ])
+    def test_every_shape_the_platform_can_reach_is_an_adaptor(self, adapter, cfg):
+        via, why = ascend._choose_transport(self._args(), adapter, cfg)
+        assert via == "adaptor" and "nothing runs on this machine" in why
+
+    def test_two_env_referenced_credentials_are_a_list_and_do_not_crash(self):
+        """`(cfg.get("auth") or {}).get("type")` raised AttributeError on the list form."""
+        cfg = {"endpoint": "https://8.8.8.8/c",
+               "auth": [{"type": "static", "mode": "custom", "name": "x-code", "value_ref": "env:A"},
+                        {"type": "static", "mode": "bearer", "value_ref": "env:B"}]}
+        assert ascend._auth_type(cfg) == "static"
+        assert ascend._choose_transport(self._args(), "direct_api", cfg)[0] == "adaptor"
+        assert ascend._auth_type({**cfg, "auth": [cfg["auth"][0], {"type": "oauth2"}]}) == "oauth2"
+        assert ascend._auth_type({}) is None and ascend._auth_type({"auth": {"type": "csrf"}}) == "csrf"
+
+    @pytest.mark.parametrize("adapter", ["custom", "browser"])
+    def test_what_only_this_machine_can_run_still_takes_the_bridge_and_says_it_is_deprecated(self, adapter):
+        via, why = ascend._choose_transport(self._args(), adapter, {"endpoint": "https://8.8.8.8/c"})
+        assert via == "bridge" and adapter in why and "deprecated" in why
+
+    @pytest.mark.parametrize("kind", ["oauth2", "csrf", "derived_multihop"])
+    def test_a_login_handshake_no_generator_runs_falls_to_the_bridge_with_the_way_out(self, kind):
+        via, why = ascend._choose_transport(self._args(), "direct_api",
+                                            {"endpoint": "https://8.8.8.8/c", "auth": {"type": kind}})
+        assert via == "bridge" and kind in why and "adaptor scaffold" in why
+
+    def test_a_private_address_is_refused_before_any_app_exists(self, monkeypatch):
+        """The engine cannot reach it, so a hosted adaptor would only ever fail its test; say so
+        now, with the two ways out, instead of creating an app that cannot work."""
+        monkeypatch.setattr(sys, "argv", ["ascend", "--json"])
+        with pytest.raises(SystemExit):
+            ascend._choose_transport(self._args(json=True), "direct_api", {"endpoint": "http://127.0.0.1:1/c"})
+
+    def test_an_explicit_bridge_is_honoured_and_labelled_deprecated(self):
+        via, why = ascend._choose_transport(self._args(via="bridge"), "direct_api", {"endpoint": "https://8.8.8.8/c"})
+        assert via == "bridge" and "deprecated" in why
+
+    def test_an_explicit_plain_template_app_keeps_its_meaning(self):
+        via, why = ascend._choose_transport(self._args(via="api"), "direct_api", {"endpoint": "https://8.8.8.8/c"})
+        assert via == "api" and "speak its contract itself" in why
+        with pytest.raises(SystemExit):
+            ascend._choose_transport(self._args(via="api", json=True), "sse_stream",
+                                     {"base_url": "https://8.8.8.8", "chat_path": "/s"})
+
+    def test_the_contract_address_follows_the_shape(self):
+        """`_api_contract` read only endpoint/url, so every other shape registered with no URL."""
+        assert ascend._api_contract({"adapter": "sse_stream", "base_url": "https://h", "chat_path": "/sse/chat",
+                                     "request_template": {"message": "{{PROMPT}}"}})["url"] == "https://h/sse/chat"
+        assert ascend._api_contract({"adapter": "websocket_direct", "ws_url": "wss://h/ws"})["url"] == "wss://h/ws"
+        assert ascend._api_contract({"adapter": "session_api", "session_endpoint": "https://h/s",
+                                     "message_endpoint": "https://h/m"})["url"] == "https://h/m"
+        assert ascend._api_contract({"adapter": "session_poll", "create": {"url": "https://h/c"},
+                                     "send": {"url": "https://h/c/{{CONV}}/m"}, "poll": {"url": "https://h/c/{{CONV}}"}
+                                     })["url"] == "https://h/c"
+        sse = ascend._api_contract({"adapter": "sse_stream", "base_url": "https://h", "chat_path": "/x",
+                                    "request_template": {"q": "{{PROMPT}}"}})
+        assert sse["request_template"] == {"q": "{{PROMPT}}"}
+
+
+# ------------------------------------------------------------------ the legacy form: direct first, bridge last
 class TestTransport:
+    """`onboard` has no --via; it keeps the pre-adaptor rule (via=None here)."""
     @pytest.mark.parametrize("url", [
         "http://127.0.0.1:8899/chat", "http://localhost:3000", "http://10.1.2.3/api",
         "https://192.168.1.20/chat", "http://172.16.0.9/x", "https://bot.internal/chat",
@@ -118,7 +197,7 @@ class TestTransport:
         assert ascend._is_public_host("https://does-not-exist.invalid/chat") is False
 
     def _args(self, **kw):
-        return types.SimpleNamespace(**{"via": "auto", **kw})
+        return types.SimpleNamespace(**{"via": None, **kw})
 
     def test_a_public_json_endpoint_goes_direct(self):
         via, _ = ascend._choose_transport(self._args(), "direct_api", {"endpoint": "https://8.8.8.8/c"})

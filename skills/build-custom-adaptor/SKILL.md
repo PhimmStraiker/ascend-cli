@@ -31,8 +31,12 @@ point at `target add` / `assess run` / the Console.
    is short.
 2. **The app**: `ascend target list`; yours has the target as its URL. Keep **both** ids:
    the name or `aapp_…` for `store`/`shape`, the engine uuid from the Console URL
-   (`…/applications/ascend/<uuid>`) for `get`/`test`/`verify`. They cannot be converted into each
-   other; the CLI explains the mix-up when the engine answers "could not be read".
+   (`…/applications/ascend/<uuid>`) for `get`/`test`/`verify`. Give those three a name or an
+   `aapp_` id and the CLI joins it to the uuid through the Console's own listing (and says so);
+   `--console-id <uuid>` overrides when that listing cannot be read, and the CLI explains the
+   mix-up when the engine answers "could not be read". Note that `ascend target add` now
+   generates, stores and verifies an adaptor by default (`<config>.adaptor.js`): this skill is
+   for finishing or replacing one.
 3. **The reply shape**: `ascend adaptor shape --app <app>` prints the app's `response_template`
    and the exact `return` statement to write. Read it before writing a line. An app carrying
    `v0:passthrough` is waiting for its real adaptor; an app on the retired `https://custom-adaptor`
