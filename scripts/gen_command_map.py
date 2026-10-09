@@ -68,7 +68,11 @@ def _flag_rows(parser):
         # `is` comparisons, not `in (None, False)`: in Python `0 == False`, so an int default of
         # 0 (e.g. --limit 0 meaning "no cap") would silently render as "no default".
         default = a.default
-        if default is None or default is False or default == [] or default == "":
+        # argparse.SUPPRESS is "no attribute unless given" — a sentinel, not a value. Rendered
+        # literally it puts `==SUPPRESS==` in the Default column (first seen on `control create
+        # --evasions`, which has to tell "none" apart from "nothing said").
+        if (default is None or default is False or default == [] or default == ""
+                or default is argparse.SUPPRESS):
             default = ""
         elif isinstance(a, argparse._AppendAction):
             default = ""
