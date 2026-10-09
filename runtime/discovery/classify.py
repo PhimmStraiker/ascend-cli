@@ -85,6 +85,39 @@ def _looks_secret_header(name_lower: str, value: str) -> bool:
         classes = sum(bool(re.search(p, v)) for p in (r"[a-z]", r"[A-Z0-9]", r"[_.\-=+/]"))
         return classes >= 2
     return False
+
+
+# Query-string parameters that carry a credential. A Target Lab access code rides as `?code=`, a
+# Gemini key as `?key=`, an API Gateway socket as `?token=`: the URL is then a secret, and every
+# place that prints one — the engine's host-call trace, the probe echo — has to know this list.
+# Mirrors `_looks_secret_header`: name first, entropy backstop, and a short allow-list so an
+# ordinary long public value (a model id, a locale) is not masked for no reason.
+_SECRET_PARAM_NAMES = frozenset({
+    "code", "key", "apikey", "api_key", "api-key", "token", "access_token", "access-token",
+    "auth", "authorization", "sig", "signature", "secret", "password", "passwd", "pwd", "jwt",
+    "bearer", "session", "sid", "session_id", "sessionid", "session-id", "client_secret",
+    "subscription-key", "subscription_key", "x-api-key", "appkey", "app_key", "passcode",
+})
+_PLAIN_PARAM_NAMES = frozenset({
+    "api-version", "api_version", "version", "v", "alt", "format", "lang", "locale", "stream",
+    "model", "deployment", "id", "page", "limit", "offset", "q", "query", "type", "mode",
+})
+
+
+def _looks_secret_param(name: str, value: str) -> bool:
+    """Would printing (or baking in) this query parameter leak a credential?"""
+    n = (name or "").strip().lower()
+    if not n or n in _PLAIN_PARAM_NAMES:
+        return False
+    if n in _SECRET_PARAM_NAMES or _SECRETISH_NAME.search(n):
+        return True
+    v = (value or "").strip()
+    if _OPAQUE_VALUE.match(v) and len(v) >= 24:
+        classes = sum(bool(re.search(p, v)) for p in (r"[a-z]", r"[A-Z0-9]", r"[_.\-=+/]"))
+        return classes >= 2
+    return False
+
+
 _ID_FIELDS = (
     "id", "sessionId", "session_id", "conversationId", "conversation_id",
     "threadId", "thread_id", "chatId", "chat_id", "ticketId", "ticket_id",
@@ -1216,6 +1249,20 @@ def classify_session(ev: Dict[str, Any], chat_idx: Optional[int]) -> Dict[str, A
                                    "message_endpoint": _strip_query(msg_req["url"]),
                                    "message_body": _body_template(msg_req)}}
 
+    # token-flow: a value an earlier response PRODUCED that a later request CARRIES IN A HEADER.
+    #
+    # The id-flow above only looks for the minted value in the next request's URL or body. A
+    # target that mints a per-conversation token and expects it back as `x-conv-token` (or as a
+    # bearer) was therefore classified `stateless`, the capture's token was replayed as a static
+    # credential, and the registration stopped answering the moment that token expired — hours,
+    # on the Target Lab's /session widget. MEASURED: the generated adaptor replayed the captured
+    # X-Conv-Token; the lane's token from 18:29 was a 401 by 22:02. The chain is the same one
+    # `har_chains` reports ("a value a response produced, carried by a later request"); here it
+    # becomes the create step of a session adapter, so the adaptor mints the token itself.
+    flow = _header_carried_session(pairs, chat_idx, chat_host)
+    if flow:
+        return flow
+
     # warmup: an early greeting turn distinct from the scored prompt.
     chat_prompt = _request_has_prompt(pairs[chat_idx]["request"])
     for i, p in enumerate(pairs):
@@ -1238,6 +1285,83 @@ def classify_session(ev: Dict[str, Any], chat_idx: Optional[int]) -> Dict[str, A
 
     return {"value": "stateless", "confidence": 0.7,
             "evidence": "each request independent; no id-flow or warmup", "params": {}}
+
+
+# The shortest value that can be a minted token; shorter strings ("ok", "en-US") recur by
+# coincidence and would invent a session step. Same floor as `har_chains._MIN_CHAIN_LEN`.
+_MIN_TOKEN_LEN = 16
+
+
+def _header_carried_session(pairs: List[Dict[str, Any]], chat_idx: int,
+                            chat_host: str) -> Optional[Dict[str, Any]]:
+    """The mint-then-send chain where the minted value travels in a request HEADER.
+
+    Returns a `create_session` layer result whose params carry `session_header` (the header the
+    message call presents the token in) and `session_header_value` (its template — `Bearer
+    {{SESSION_ID}}` when the capture showed a prefix, else the bare value), or None when no
+    earlier response of the chat's own host produced a value a later request carried that way.
+    """
+    scored = pairs[chat_idx]["request"]
+
+    def _carries(req: Dict[str, Any], val: str) -> Optional[Tuple[str, str]]:
+        for hname, hval in (req.get("headers") or {}).items():
+            if hname.startswith(":") or hname in _NEVER_SECRET or not isinstance(hval, str):
+                continue
+            if val == hval or val in hval:
+                return hname, hval
+        return None
+
+    for i, p in enumerate(pairs):
+        if i >= chat_idx or _host_of(p["request"]["url"]) != chat_host:
+            continue
+        rj = p["response"]["json"]
+        if not isinstance(rj, (dict, list)):
+            continue
+        produced = [(field, val) for field, val in _iter_string_leaves(rj) if len(val) >= _MIN_TOKEN_LEN]
+        if not produced:
+            continue
+        for j in range(i + 1, len(pairs)):
+            later = pairs[j]["request"]
+            if _host_of(later["url"]) != chat_host or _same_endpoint(later, p["request"]):
+                continue
+            for field, val in produced:
+                hit = _carries(later, val)
+                if not hit:
+                    continue
+                hname, hval = hit
+                # Template the probe from the SCORED turn when it carries the token (it is the
+                # real message); otherwise from the first turn that did.
+                msg_req = scored if _carries(scored, val) else later
+                # A greeting-first bot: an earlier same-endpoint turn that carried the token but no
+                # real message is a session opener, so the scored probe needs a throwaway first.
+                warmup = None
+                for k in range(chat_idx):
+                    q = pairs[k]["request"]
+                    if (_host_of(q["url"]) == chat_host and _same_endpoint(q, scored)
+                            and _carries(q, val) and _request_has_prompt(q) is None):
+                        warmup = "hi"
+                        break
+                mint = p["request"]
+                mint_body = mint.get("json") if isinstance(mint.get("json"), (dict, list)) else {}
+                return {"value": "create_session", "confidence": 0.8,
+                        "evidence": (f"{field}={val[:4]}… from step {i} is carried in header "
+                                     f"{_canonical_header(hname)} of step {j}"),
+                        "params": {"session_endpoint": _strip_query(mint["url"]),
+                                   "session_method": mint.get("method", "POST"),
+                                   "session_body": mint_body,
+                                   "session_extract": field,
+                                   "session_response": "json",
+                                   "session_header": _canonical_header(hname),
+                                   "session_header_value": hval.replace(val, "{{SESSION_ID}}"),
+                                   "key_path": None,
+                                   # No `id_value` here, deliberately: for the id-flow it is a
+                                   # conversation id, for this flow it is the TOKEN, and the layers
+                                   # are what `--json` prints. The message body never carries it,
+                                   # so there is nothing to template from it.
+                                   "warmup_message": warmup,
+                                   "message_endpoint": _strip_query(msg_req["url"]),
+                                   "message_body": _body_template(msg_req)}}
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -1736,7 +1860,7 @@ def _session_api_from_session(session: Dict[str, Any], tparams: Dict[str, Any]) 
                 tparams.get("body", {"message": "{{PROMPT}}"}), p.get("id_value")),
             "response_path": tparams.get("response_path", "messages.0.message"),
         }
-    return {
+    out = {
         "session_endpoint": p.get("session_endpoint", ""),
         "session_extract": p.get("session_extract", "sessionId"),
         "session_variable": "SESSION_ID",
@@ -1746,6 +1870,17 @@ def _session_api_from_session(session: Dict[str, Any], tparams: Dict[str, Any]) 
             p.get("id_value") or p.get("session_id_value")),
         "response_path": tparams.get("response_path", "messages.0.message"),
     }
+    if p.get("session_header"):
+        # The minted value rides in a header of the message call (`x-conv-token`, a bearer), not
+        # in its URL or body. Both adapters (runtime/adapters/session_api.py and the generated
+        # JavaScript) render `session_header_value` with the fresh id and send it under this name.
+        out["session_header"] = p["session_header"]
+        out["session_header_value"] = p.get("session_header_value") or "{{SESSION_ID}}"
+        if p.get("session_method") and str(p["session_method"]).upper() != "POST":
+            out["session_method"] = str(p["session_method"]).upper()
+        if p.get("session_body"):
+            out["session_body"] = p["session_body"]
+    return out
 
 
 def _session_poll_from_poll(tparams: Dict[str, Any]) -> Dict[str, Any]:
@@ -1827,6 +1962,22 @@ def classify_evidence(evidence: Dict[str, Any]) -> Dict[str, Any]:
     auth = classify_auth(ev, chat_idx)
     lifecycle = classify_auth_lifecycle(ev, chat_idx, auth)
     session = classify_session(ev, chat_idx)
+    carrier = (session.get("params") or {}).get("session_header")
+    if carrier:
+        # The header the session layer just explained is minted per conversation by the adapter.
+        # Leaving it in `secret_header_values` would ALSO freeze the captured token into a static
+        # auth block (and the 0600 store) — the exact replay the session shape exists to avoid —
+        # and leaving it in `withheld_headers` would tell the operator to re-supply a value the
+        # adaptor mints itself.
+        tp0 = transport.get("params") or {}
+        for key in ("secret_header_values", "withheld_headers"):
+            held = tp0.get(key)
+            if isinstance(held, dict):
+                tp0[key] = {k: v for k, v in held.items() if k.lower() != carrier.lower()}
+            elif isinstance(held, list):
+                tp0[key] = [k for k in held if k.lower() != carrier.lower()]
+            if not tp0.get(key):
+                tp0.pop(key, None)
     identity = classify_identity(ev, chat_idx)
     rate = classify_rate(ev, session)
 

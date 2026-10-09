@@ -88,7 +88,25 @@ def resolve_secret_ref(ref: Any, *, allow_literal: bool = False) -> str:
         name = ref[len("env:"):]
         val = os.environ.get(name)
         if val is None or val == "":
-            raise AuthError(f"environment variable {name!r} is not set (referenced by {ref!r})")
+            # Fall back to the tenant-scoped 0600 store. A credential captured from a browser
+            # session (or a HAR) has to survive the process that captured it: the validation gate,
+            # the registration and `adapter validate` all run later, often from another command,
+            # and an environment variable exported in the capture's shell reaches none of them.
+            # MEASURED on a Target Lab HAR: the importer wrote `env:ASCEND_SECRET_…_COOKIE` and
+            # validation died on the next line because nothing had ever set it. The environment
+            # still WINS, so an operator can override a stale captured credential for one run
+            # without editing anything. Import is local because `layers` must stay importable
+            # with no tenant state at all — `target_secrets` reads `~/.ascend`.
+            try:
+                import target_secrets as _store  # noqa: PLC0415
+                val = _store.get(name)
+            except Exception:                    # noqa: BLE001 - a missing store is not an error
+                val = None
+        if val is None or val == "":
+            raise AuthError(
+                f"environment variable {name!r} is not set (referenced by {ref!r}) and this "
+                f"tenant's credential store has no value for it. If it was captured from a "
+                f"session it may have expired — re-capture the target, or export {name}.")
         return val
     if ref.startswith("literal:"):
         if not allow_literal:
