@@ -43,6 +43,7 @@ skills compose with the existing ones without changing anything below them.
 |---|---|---|
 | **onboard-target** | `target add <thing>`, then composes the skills below | end-to-end sequencing; a live-probe gate before launch |
 | **build-adapter** | `adapter build --har\|--url\|--api\|--curl\|--spec` → `adapter validate` (also `adapter list\|show\|configs\|layers`) | resolves only the low-confidence layers the classifier flags |
+| **build-custom-adaptor** | `adaptor har` → `adaptor shape` → `adaptor spec\|scaffold` → `adaptor gate` → `adaptor test` → `adaptor store` → `adaptor verify` | reads the session chain, writes the engine-side JavaScript, corrects it one change per test until the `scored :` line is a real answer (see `docs/CUSTOM_ADAPTOR.md`) |
 | **run-assessment** | `target check` → `assess run` / `assess watch` / `assess results` | control choice, monitoring, lifecycle-correct execution |
 | **triage-findings** | `results <export.csv> --values` (`--json`) | FP triage + auth-gating severity recalc via `agent/TRIAGE.md` |
 

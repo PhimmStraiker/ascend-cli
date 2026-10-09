@@ -17,5 +17,5 @@ def test_command_map_is_not_stale():
 
 def test_map_covers_the_new_fleet_groups():
     md = (REPO / "docs" / "COMMAND_MAP.md").read_text()
-    for group in ("bridge", "keys", "tenant", "map", "reports", "status"):
+    for group in ("bridge", "keys", "tenant", "map", "reports", "status", "adaptor"):
         assert f"ascend {group}" in md, f"{group} missing from the generated map"

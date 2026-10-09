@@ -2,7 +2,7 @@
 
 *Generated from the CLI's argparse tree by `scripts/gen_command_map.py`. A test fails if this file is stale, so every flag here is a flag that exists.*
 
-22 command groups · 61 commands. Sections follow `ascend --help`.
+23 command groups · 70 commands. Sections follow `ascend --help`.
 
 ## Flags every command accepts
 
@@ -124,6 +124,160 @@ HARD GATE: run one prompt through a config against the live target
 | `--timeout` | `TIMEOUT` | `60.0` | — |
 
 > example: ascend adapter validate --config mybot --prompt 'hello' --expect 'Bot'
+
+## `ascend adaptor`
+
+write, gate, test and store a custom adaptor: engine-side JavaScript for one app
+
+### `ascend adaptor gate`
+
+static check: will this file be allowed to run? (no target, fast)
+
+- **`file`** (required) — the adaptor source (.js)
+
+
+```bash
+ascend adaptor gate my_adaptor.js
+ascend adaptor gate my_adaptor.js --json    # includes templateValue
+```
+
+> exit 2 when refused; each violation names kind, detail and line.
+
+### `ascend adaptor get`
+
+what the engine resolves for the app: origin, digest, stored source
+
+
+| Flag | Value | Default | What it does |
+|---|---|---|---|
+| `--app` **(required)** | `UUID|NAME|aapp_id` | — | the engine's application uuid (from the Console URL); a name or aapp_ id is tried and explained if the engine cannot read it |
+
+```bash
+ascend adaptor get --app <uuid>
+```
+
+### `ascend adaptor har`
+
+read a HAR of the target: the session chain is the adaptor's step list
+
+- **`file`** (required) — a HAR export (DevTools -> Network -> Save all as HAR)
+
+
+| Flag | Value | Default | What it does |
+|---|---|---|---|
+| `--bodies` | — | — | also show JSON body shapes (keys and types) |
+| `--ignore` | `REGEX` | `\.(png|jpe?g|gif|svg|css|woff2?|ico|map)(\?|$)` | URLs to drop |
+
+```bash
+ascend adaptor har customer.har
+ascend adaptor har customer.har --bodies    # + JSON body shapes
+```
+
+> Offline. Values are redacted and bodies reduced to shapes, so the output can be pasted into a chat. A HAR holds a live session: delete it when done.
+
+### `ascend adaptor scaffold`
+
+print the onboarding adaptor (or --example, the worked thin one)
+
+
+| Flag | Value | Default | What it does |
+|---|---|---|---|
+| `--out` | `FILE` | — | write it here instead of stdout |
+| `--example` | — | — | the worked thin adaptor (one POST, no session) instead of the scaffold |
+| `--force` | — | — | overwrite an existing --out file |
+
+```bash
+ascend adaptor scaffold --out my_adaptor.js
+ascend adaptor scaffold --example > chattie.js
+```
+
+> The scaffold reports 200 whenever the target ANSWERED - a 401 or a login page included - because at onboarding that reply is the spec for the adaptor you are about to write.
+
+### `ascend adaptor shape`
+
+the reply shape the app's response_template expects (read it first)
+
+
+| Flag | Value | Default | What it does |
+|---|---|---|---|
+| `--app` **(required)** | `NAME|aapp_id` | — | the application (platform side: a name or aapp_ id) |
+
+```bash
+ascend adaptor shape --app 'My Bot'
+```
+
+> The engine applies the response_template to whatever the adaptor returns. A reply of the wrong shape does not error: a detector scores the stringified wrapper instead of the answer.
+
+### `ascend adaptor spec`
+
+print host.d.ts: the complete capability surface inside the isolate
+
+
+| Flag | Value | Default | What it does |
+|---|---|---|---|
+| `--out` | `FILE` | — | write it here instead of stdout |
+
+```bash
+ascend adaptor spec > host.d.ts
+ascend adaptor spec --out host.d.ts
+```
+
+### `ascend adaptor store`
+
+gate the file and write it onto the app's request_template
+
+- **`file`** (required) — the adaptor source (.js)
+
+
+| Flag | Value | Default | What it does |
+|---|---|---|---|
+| `--app` **(required)** | `NAME|aapp_id` | — | the application (platform side: a name or aapp_ id) |
+| `--dry-run` | — | — | gate and show the merged template; write nothing |
+
+```bash
+ascend adaptor store my_adaptor.js --app 'My Bot' --dry-run   # see the merge
+ascend adaptor store my_adaptor.js --app 'My Bot'
+```
+
+> Gated first; refused on any violation. Only _adaptor_src changes - every other key in the template is sent back as it was - and the write is read back before it is reported.
+
+### `ascend adaptor test`
+
+run the file against the app's real target and show every host call
+
+- **`file`** (required) — the adaptor source (.js)
+
+
+| Flag | Value | Default | What it does |
+|---|---|---|---|
+| `--app` **(required)** | `UUID|NAME|aapp_id` | — | the engine's application uuid (from the Console URL); a name or aapp_ id is tried and explained if the engine cannot read it |
+| `--prompt` *(repeatable)* | `TEXT` | — | a prompt to send, one turn each (repeatable; default: one benign hello) |
+| `--budget` | `BUDGET` | `120.0` | seconds the whole run may take (max 240) |
+
+```bash
+ascend adaptor test my_adaptor.js --app <uuid>
+ascend adaptor test my_adaptor.js --app <uuid> \
+      --prompt 'how do I reset it?' --prompt 'and my password?'
+```
+
+> Read `scored :` first: it is what a detector will see. Each turn is a real conversation with a real system, so change one thing per test.
+
+### `ascend adaptor verify`
+
+run what is STORED on the app: the only proof the bytes landed
+
+
+| Flag | Value | Default | What it does |
+|---|---|---|---|
+| `--app` **(required)** | `UUID|NAME|aapp_id` | — | the engine's application uuid (from the Console URL); a name or aapp_ id is tried and explained if the engine cannot read it |
+| `--budget` | `BUDGET` | `120.0` | seconds the whole run may take (max 240) |
+
+```bash
+ascend adaptor verify --app <uuid>
+ascend adaptor verify --app <uuid> --budget 60
+```
+
+> Runs the stored adaptor, not the file on your disk. If it fails after `test` passed, the stored bytes differ from the file you tested.
 
 ## `ascend app`
 

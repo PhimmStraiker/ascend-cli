@@ -39,6 +39,8 @@ CASES = {
     "help_assess_watch":  ["assess", "watch", "--help"],
     "help_bridge":        ["bridge", "--help"],
     "help_adapter":       ["adapter", "--help"],
+    "help_adaptor":       ["adaptor", "--help"],
+    "help_adaptor_store": ["adaptor", "store", "--help"],
     "help_results":       ["results", "--help"],
     "help_status":        ["status", "--help"],
     "adapter_list":       ["adapter", "list"],

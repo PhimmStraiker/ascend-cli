@@ -281,6 +281,12 @@ def send_prompt(prompt: str) -> str:
 scaffold carrying the real captured request with a clear TODO; open it in a coding agent, finish
 `send_prompt`, and validate. The bridge runs a code adapter exactly like a built-in one.
 
+Everything above runs on **your** side, behind the bridge. When the platform must call the target
+directly (an `api` app) and a template cannot express the flow, the answer is a custom **adaptor**:
+one JavaScript file the Ascend engine runs, stored on the app and built with `ascend adaptor`. It is
+a different thing with a different spelling; [CUSTOM_ADAPTOR.md](CUSTOM_ADAPTOR.md) has the
+procedure and the table that says which to reach for.
+
 ## Multi-turn, session, and documented APIs
 
 **A conversational / multi-turn API** (one that makes you *create a conversation* first, then POST
