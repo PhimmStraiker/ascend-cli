@@ -175,7 +175,7 @@ Create an Ascend application. The platform supports four target types; one of th
 
 ```bash
 ascend app create --name 'My Bot' --controls sys_prompt_leak
-      a bridge app (the default) — `ascend assess run` starts the relay for you
+      a bridge app (the default) — `ascend assess run` starts the bridge for you
 ascend app create --type api --name 'Public Bot' --config mybot \
       --target-api-key $KEY
       Ascend calls the target itself; url/templates/headers come from the config
@@ -335,7 +335,7 @@ create->pause->resume->poll an assessment
 | `--recon-only` | — | — | run reconnaissance only — no attack probes (same as `ascend recon run`) |
 | `--recon-controls` | `IDS` | — | recon control ids for --with-recon/--recon-only (default: the whole recon catalog; see `ascend recon controls`) |
 | `--detail` | — | — | show key findings per control when the run completes |
-| `--conversation` | `per-probe|sequential` | — | how the relay threads probes into conversations. per-probe (default): each probe is its own conversation -- what a single-shot control means. sequential: consecutive probes share one conversation, for multi-turn controls; bounded by the config's conversation.max_turns (default 10) |
+| `--conversation` | `per-probe|sequential` | — | how the bridge threads probes into conversations. per-probe (default): each probe is its own conversation -- what a single-shot control means. sequential: consecutive probes share one conversation, for multi-turn controls; bounded by the config's conversation.max_turns (default 10) |
 
 ```bash
 ascend assess run --app 'My Bot' --name 'run 1'
@@ -415,7 +415,7 @@ start a detached bridge per app (key comes from the local store)
 | `--wait-ms` | `WAIT_MS` | — | — |
 | `--idle-timeout` | `IDLE_TIMEOUT` | — | seconds a paused, already-probed bridge waits before self-stopping. 0 never idle-stops (the default); the bridge stops when the run reaches a terminal state. $ASCEND_BRIDGE_IDLE_TIMEOUT sets this default for auto-managed runs. |
 | `--foreground` | — | — | run ONE bridge in this terminal (logs here, Ctrl-C stops it) instead of detaching — for debugging an adapter. Needs --config. |
-| `--capture` | `PATH` | — | write a jsonl transcript of every probe/result envelope the relay handles (same as `runtime start --capture`) |
+| `--capture` | `PATH` | — | write a jsonl transcript of every probe/result envelope the bridge handles (same as `runtime start --capture`) |
 
 ```bash
 ascend bridge start --all-running        # serve every live assessment
@@ -895,7 +895,7 @@ ascend results transcript.jsonl --follow      # live probe view
 
 ### `ascend runtime start`
 
-lease probes and relay them to a target via an adapter (see `bridge start --foreground`)
+lease probes and forward them to a target via an adapter (see `bridge start --foreground`)
 
 
 | Flag | Value | Default | What it does |
@@ -907,7 +907,7 @@ lease probes and relay them to a target via an adapter (see `bridge start --fore
 | `--app` | `APP` | — | resolve the bridge key from the local key store for this app |
 | `--consumer` | `CONSUMER` | — | bridge consumer id (parallel bridges MUST differ; auto per app) |
 | `--log-file` | `LOG_FILE` | — | write bridge logs here instead of stderr |
-| `--status-file` | `STATUS_FILE` | — | force heartbeat+stats publishing for a relay that cannot be resolved to an app id (supervised children pass this; when the app IS known the heartbeat is published under it automatically) |
+| `--status-file` | `STATUS_FILE` | — | force heartbeat+stats publishing for a bridge that cannot be resolved to an app id (supervised children pass this; when the app IS known the heartbeat is published under it automatically) |
 | `--qpm` | `QPM` | — | queries per minute against the target |
 | `--max-workers` | `MAX_WORKERS` | — | concurrency (auto: 1 for stateful targets) |
 | `--capture` | `CAPTURE` | — | jsonl file to record probe/result envelopes |
@@ -1005,7 +1005,7 @@ onboard a target from a URL, a cURL/HAR file, or a saved config
 | `--assessment-name` | `ASSESSMENT_NAME` | — | assessment name (default: '<app> run 1') |
 | `-v`, `--verbose` | — | — | debug logging for the bridge |
 | `--run` | — | — | continue into an assessment once the target is registered |
-| `--via` | `auto|api|bridge` | `auto` | how probes reach the target. auto (default): direct when the platform can reach the endpoint and speak its contract, a bridge only when it cannot. api: direct or fail. bridge: force a local relay. |
+| `--via` | `auto|api|bridge` | `auto` | how probes reach the target. auto (default): direct when the platform can reach the endpoint and speak its contract, a bridge only when it cannot. api: direct or fail. bridge: force a local bridge. |
 | `--workspace` | `SLUG` | — | which agent to target, on a host that serves several (see `target inspect`) |
 | `--no-profile` | — | — | ignore a contract the target publishes and probe the endpoint instead |
 | `--purpose` | `PURPOSE` | — | one line on what the agent is for (business purpose) |

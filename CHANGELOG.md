@@ -13,6 +13,22 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ### Added
 
+- **Routed names are settled before DNS.** A target under `.tun.straiker.ai` or `.pl.straiker.ai`
+  is reached by Straiker itself: nothing runs on the operator's machine, and the name never
+  resolves in public DNS. `target inspect`, `target check` and `target add` now recognise the
+  suffix before any lookup and say `reached by Straiker: nothing runs on this machine` instead of
+  reading a resolver miss as a private address. `target add` registers such a target as a direct
+  app and never proposes a bridge (`--via bridge` is refused with the same reason); its local hard
+  gate is skipped with that note, since the platform proves the target on its first probe, and the
+  result carries `validated: false`. `target inspect` returns `routed_by_straiker`; `target check`
+  exits 0 with `checked: false` and no `ok` claim rather than an unreachable error. Probing one
+  from here (`target add <url>`) stops with the note and asks for a cURL/HAR or saved config.
+- **Re-registering a direct app keeps the platform's own template keys.** When `target add` lands
+  on an application that already exists, it refreshes the `request_template` from the new capture.
+  Keys the assessment engine writes for itself (`_adaptor_*`, `_adapter_*`, `_tunnel_*`, `_iris_*`)
+  are never in a capture, so the refresh used to erase them; they are now carried over from the
+  stored template unless the capture sets them itself.
+
 - **`target add` goes direct first, and a bridge only when it has to.** Registration always created
   a bridge app, even for a public JSON endpoint the platform could call itself — so every target
   needed a local process kept alive for the whole run. It now registers a direct (`api`) app when
@@ -43,6 +59,16 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 - **`ASCEND_TARGET_AUTH_FILE`** — target credentials handed over in a 0600 JSON file
   (`headers` / `body_fields` / `query`) instead of on a command line, where every process on the
   machine can read them. A file other users can read is refused. Explicit flags still win.
+
+### Changed
+
+- **One word for the thing that forwards probes: bridge.** Help text and printed output no longer
+  say "relay" — the noun is `bridge`, the verb is `forwards`. Identifiers are untouched: the hidden
+  `ascend relay` alias, the `relays` JSON key, `ASCEND_RELAY_APP_ID` and the state file names all
+  work as before. Two frozen legacy help screens change wording only, and the back-compat corpus was
+  re-recorded for exactly those lines: `app create --help` (`starts the relay for you` ->
+  `starts the bridge for you`) and `relay start --help` (`--capture … the relay handles` ->
+  `the bridge handles`).
 
 ### Fixed
 

@@ -52,7 +52,7 @@ class TenantMismatch(Exception):
         msg += ("  Working two tenants from one CLI is how customer data gets crossed, so it is "
                 "refused.\n"
                 "  To move:  ascend tenant switch --confirm   "
-                "(clears stored keys; requires no relays running)\n"
+                "(clears stored keys; requires no bridges running)\n"
                 "  To check: ascend tenant show")
         super().__init__(msg)
 

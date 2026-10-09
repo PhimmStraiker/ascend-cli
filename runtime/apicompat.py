@@ -28,9 +28,9 @@ DEPENDENCIES: Tuple[Tuple[str, str, str, str], ...] = (
     ("AscendApplication", "name", "name -> id resolution and every table", "high"),
     ("AscendApplication", "api_type", "thin vs api routing, shown in tables", "info"),
     ("AscendApplication", "thin_api_key", "shown ONCE at create; without it a thin app can "
-                                          "never be served by a relay", "critical"),
+                                          "never be served by a bridge", "critical"),
     ("AscendAssessment", "id", "addressing a run", "critical"),
-    ("AscendAssessment", "status", "liveness, the NO-RELAY alarm, watch/poll termination",
+    ("AscendAssessment", "status", "liveness, the no-bridge alarm, watch/poll termination",
      "critical"),
     ("AscendAssessment", "progress", "progress display only", "info"),
     ("AscendAssessment", "score", "reports + gates", "high"),

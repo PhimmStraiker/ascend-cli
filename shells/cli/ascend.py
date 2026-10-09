@@ -466,18 +466,54 @@ def _spec_from_config(args, api):
 DYNAMIC_AUTH_KINDS = ("oauth2", "csrf", "derived_multihop")
 _PRIVATE_SUFFIXES = (".local", ".internal", ".lan", ".home", ".corp", ".localhost", ".test")
 
+# Names Straiker reaches itself. A tunnel or private-link host under one of these suffixes is
+# terminated inside the platform: nothing runs on the operator's machine, and the name never
+# resolves in public DNS. Recognised BEFORE any lookup, because a resolver miss reads as "private —
+# needs a bridge", and a bridge on this machine could never reach the name either.
+ROUTED_SUFFIXES = (".tun.straiker.ai", ".pl.straiker.ai")
+ROUTED_NOTE = "reached by Straiker: nothing runs on this machine"
+
+
+def _host_of(url) -> str:
+    """The lowercase hostname of a URL or bare host; '' when there is none."""
+    from urllib.parse import urlparse
+    try:
+        return (urlparse(url if "//" in str(url) else f"//{url}").hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def _routed_by_straiker(url) -> bool:
+    """Whether this address is one the platform reaches itself (ROUTED_SUFFIXES). Never looks up."""
+    return _host_of(url).endswith(ROUTED_SUFFIXES)
+
+
+def _refuse_routed_probe(url):
+    """Stop before probing a routed name. It cannot be reached from here, and the honest message
+    is that — not a resolver error. Its contract has to come from evidence instead."""
+    if _routed_by_straiker(url):
+        _die(f"{_host_of(url)}: {ROUTED_NOTE}, so its contract cannot be probed from here.\n"
+             f"  describe the request instead:  ascend target add ./request.curl --name '<target>'"
+             f"   (or --har <file>, or a saved --config)",
+             error_code="routed_target_needs_contract")
+
 
 def _is_public_host(url: str) -> bool:
     """Whether Straiker's cloud could plausibly reach this address.
 
     Every resolved address must be globally routable. A name that does not resolve from here is
     treated as private: the failure mode of guessing "public" is a run that pauses itself with no
-    explanation, while guessing "private" costs only a relay.
+    explanation, while guessing "private" costs only a bridge.
+
+    A name under ROUTED_SUFFIXES is settled before any lookup: the platform terminates it and it
+    does not resolve from here, so asking the resolver would only ever answer "private".
     """
     import ipaddress
     import socket
     from urllib.parse import urlparse
     host = (urlparse(url if "//" in str(url) else f"//{url}").hostname or "").lower()
+    if host.endswith(ROUTED_SUFFIXES):
+        return True
     if not host or host == "localhost" or host.endswith(_PRIVATE_SUFFIXES):
         return False
     try:
@@ -504,6 +540,14 @@ def _choose_transport(args, adapter, cfg):
     """
     want = (getattr(args, "via", None) or "auto").lower()
     endpoint = cfg.get("endpoint") or cfg.get("url") or ""
+    if _routed_by_straiker(endpoint):
+        # Not a choice. The name does not resolve on this machine, so a bridge here could never
+        # reach it; the platform calling the target itself is the only way probes can arrive.
+        if want == "bridge":
+            _die(f"--via bridge is not possible here: {_host_of(endpoint)} is {ROUTED_NOTE}",
+                 error_code="bridge_not_possible",
+                 hint="omit --via; the platform reaches this name itself")
+        return "api", ROUTED_NOTE
     speaks = (adapter or "direct_api") in ("direct_api", "api")
     public = _is_public_host(endpoint)
     # A direct app carries static headers and one api_key and nothing else. A target that logs in
@@ -516,7 +560,7 @@ def _choose_transport(args, adapter, cfg):
         return "api", "the platform can reach this endpoint and speak its contract itself"
     why = (f"the '{adapter}' adapter is not something the platform can speak natively"
            if not speaks else
-           f"it authenticates with a {handshake!r} handshake, which only a local relay can run"
+           f"it authenticates with a {handshake!r} handshake, which only a local bridge can run"
            if not static_auth else
            f"{endpoint or 'this target'} is not reachable from Straiker's cloud")
     if want == "api":
@@ -570,10 +614,44 @@ def _api_contract(cfg):
     return out
 
 
+# Keys in a stored request_template that the platform wrote for itself. The assessment engine
+# records its adapter source, tunnel agent keys and its own bookkeeping under these prefixes and
+# strips them before anything reaches the target. A capture of the target's real client can never
+# contain them, so a re-registration that sent the capture alone would erase the wiring the
+# platform put there — silently, with the app still reporting a valid contract.
+PLATFORM_TEMPLATE_PREFIXES = ("_adaptor_", "_adapter_", "_tunnel_", "_iris_")
+
+
+def _template_dict(tpl):
+    """A request_template as a dict, whether it is one or the wire's JSON string; else None."""
+    if isinstance(tpl, str):
+        try:
+            tpl = json.loads(tpl)
+        except ValueError:
+            return None
+    return tpl if isinstance(tpl, dict) else None
+
+
+def _keep_platform_template_keys(stored, fresh):
+    """`fresh`, plus every platform-owned key in `stored` that `fresh` does not set itself.
+
+    The capture decides the contract — a key it sets wins — and only the platform's own keys
+    survive from the stored template; an operator field the new capture dropped stays dropped.
+    """
+    s, f = _template_dict(stored), _template_dict(fresh)
+    if not s or f is None:
+        return fresh
+    carried = {k: v for k, v in s.items()
+               if k.startswith(PLATFORM_TEMPLATE_PREFIXES) and k not in f}
+    return {**f, **carried} if carried else fresh
+
+
 def _profile_for(args):
     """The published-contract profile for this target, looked up once per invocation."""
     if getattr(args, "no_profile", False):
         return None
+    if _routed_by_straiker(getattr(args, "api", None) or ""):
+        return None       # not reachable from here: detecting a profile would only try a lookup
     if not hasattr(args, "_profile_cache"):
         try:
             from runtime.discovery import profiles as P
@@ -622,17 +700,25 @@ def cmd_target_inspect(args):
     from runtime.discovery import profiles as P
     url = args.source
     verify = not getattr(args, "insecure", False)
-    prof = P.detect(url, verify=verify)
+    routed = _routed_by_straiker(url)
+    # A routed name cannot be reached from here, so there is no contract to read off it and no
+    # lookup to attempt: everything that would touch the target is skipped. The platform's own
+    # records (what is already registered) are still consulted.
+    prof = None if routed else P.detect(url, verify=verify)
     auth_headers, _q = _target_auth(args)
     if prof:
         out = prof.inspect(P.origin_of(url), auth_headers or {}, verify=verify)
         out["published_contract"] = True
     else:
         out = {"profile": None, "published_contract": False, "origin": P.origin_of(url),
-               "note": ("This target does not publish a contract. Onboard it from evidence: a HAR "
-                        "or cURL of its real client is best, a browser capture next, a bare "
-                        "endpoint probe last.")}
+               "note": ((f"{ROUTED_NOTE} — the platform calls this target itself. Onboard it "
+                         f"from a cURL/HAR of its real client or a saved config; it cannot be "
+                         f"probed from here.") if routed else
+                        ("This target does not publish a contract. Onboard it from evidence: a HAR "
+                         "or cURL of its real client is best, a browser capture next, a bare "
+                         "endpoint probe last."))}
     out["reachable_from_cloud"] = _is_public_host(url)
+    out["routed_by_straiker"] = routed
     out["transport"] = ("api" if out["reachable_from_cloud"] else "bridge")
     try:
         c = _client(args)
@@ -644,7 +730,7 @@ def cmd_target_inspect(args):
         out["already_registered"] = None
     human = [f"{out.get('label') or 'unrecognised target'}  {out['origin']}",
              f"  transport   {out['transport']}"
-             f" ({'reachable from Straiker' if out['reachable_from_cloud'] else 'private — needs a relay'})"]
+             f" ({ROUTED_NOTE if routed else 'reachable from Straiker' if out['reachable_from_cloud'] else 'private — needs a bridge'})"]
     for n in out.get("needs") or []:
         human.append(f"  needs       {n['name']} ({n['kind']}) — {n['why']}")
     for w in out.get("workspaces") or []:
@@ -984,7 +1070,7 @@ def cmd_app_create(args):
         print(f"tc_key:  {tc}   (put in $STRAIKER_BRIDGE_API_KEY — shown ONCE)")
         if stored:
             print("         stored locally too:  ascend keys list")
-        print(f"bridge:  auto-managed — `ascend assess run --app {args.name!r}` starts the relay "
+        print(f"bridge:  auto-managed — `ascend assess run --app {args.name!r}` starts the bridge "
               f"and stops it when the run ends")
         print(f"         (or pre-start one:  ascend bridge start --app {args.name!r})")
     else:
@@ -1539,7 +1625,7 @@ def _reclaim_wedged_relay(S, app_id):
     pid = S.read_pid(app_id)
     rec = S.read_status(app_id) or {}
     if rec.get("state") == "fatal" or rec.get("fatal_error"):
-        return {"error": (f"relay pid {pid} is alive but reported a fatal error and is not serving: "
+        return {"error": (f"bridge pid {pid} is alive but reported a fatal error and is not serving: "
                           f"{rec.get('fatal_error') or 'unknown'}. Fix the cause, then "
                           f"`ascend bridge stop --app <name>` and `ascend bridge start --app <name>`")}
     st = S.stop(app_id, grace_s=3.0)
@@ -1552,7 +1638,7 @@ def _ensure_note(res):
         return "bridge: already serving this app — reused."
     if res.get("started"):
         if res.get("reclaimed"):
-            return (f"bridge: relay pid {res['reclaimed']} was alive but had stopped answering — "
+            return (f"bridge: pid {res['reclaimed']} was alive but had stopped answering — "
                     f"replaced (pid {res.get('pid')}); it self-stops when the run ends.")
         return f"bridge: started for this run (pid {res.get('pid')}); it self-stops when the run ends."
     if res.get("skip") or res.get("error"):
@@ -1726,7 +1812,7 @@ def _supervise_bridge(c, app, *, assessment_id=None, args=None, owned=None):
             if owned is not None:
                 owned["started"] = True
             if r.get("reclaimed"):
-                return (f"bridge relay pid {r['reclaimed']} was alive but had stopped answering — "
+                return (f"bridge pid {r['reclaimed']} was alive but had stopped answering — "
                         f"replaced (pid {r.get('pid')})")
             return f"bridge went down mid-run — restarted (pid {r.get('pid')})"
         if r.get("skip") or r.get("error"):
@@ -2094,7 +2180,7 @@ def _diagnose_not_started(c, appid, res) -> str:
         app = {}
     if api.needs_bridge(app):
         return ("this is a bridge app, and the platform pauses a run nothing is answering. Check "
-                "`ascend bridge ls` — a relay must be alive with lease counters moving.")
+                "`ascend bridge ls` — a bridge must be alive with lease counters moving.")
     url = app.get("url")
     if not url:
         return "the application has no url, so the platform has nothing to call"
@@ -2363,7 +2449,7 @@ def _false_pass_warning(a, app_id=None):
     if ev is not None and (ev.get("answered") or 0) > 0:
         return None
     if ev is not None and (ev.get("answered") or 0) == 0 and (ev.get("delivered") or 0) == 0:
-        return ("  !! this machine's relay answered 0 probes for this run — the target was never\n"
+        return ("  !! this machine's bridge answered 0 probes for this run — the target was never\n"
                 "     reached, so a clean score here measured NOTHING. This is a FALSE PASS.\n"
                 "     check:  ascend bridge logs --app <name>   ·   docs/ASSESSMENT_LIFECYCLE.md")
     total = a.get("total")
@@ -2373,9 +2459,9 @@ def _false_pass_warning(a, app_id=None):
         tiny = False
     clean = not a.get("failed") or str(a.get("severity", "")).lower() == "low"
     if tiny and clean:
-        return ("  !! %s probe(s) on a clean result, and this machine has no relay record for the\n"
+        return ("  !! %s probe(s) on a clean result, and this machine has no bridge record for the\n"
                 "     run, so it cannot be confirmed here that the target answered. If the app is\n"
-                "     bridge-based and the relay was down, unanswered probes score as no findings\n"
+                "     bridge-based and the bridge was down, unanswered probes score as no findings\n"
                 "     (a FALSE PASS).  check:  ascend bridge ls" % total)
     return None
 
@@ -2420,7 +2506,7 @@ def cmd_assess_results(args):
                 "sequential": "consecutive probes shared one conversation (multi-turn)"}
         human = (f"{human}\n  answered   {ev.get('answered', 0)} probe(s) answered by the target"
                  f"  ·  {ev.get('delivered', 0)} delivered  ·  {ev.get('failed', 0)} failed"
-                 f"   (this machine's relay)"
+                 f"   (this machine's bridge)"
                  f"\n  conversation   {ev.get('conversation')} — {_pol.get(ev.get('conversation'), '')}")
     warn = _false_pass_warning(a, app_id)
     if args.json:
@@ -3032,8 +3118,8 @@ def _guard_egress(url, args):
     """The SSRF/metadata guard, before the first request leaves this machine. Loopback and private
     ranges are allowed (that is where most targets under development live); link-local and cloud
     metadata hosts are refused unless --allow-internal. Never raises for an empty url."""
-    if not url:
-        return None
+    if not url or _routed_by_straiker(url):
+        return None       # a routed name is terminated by the platform; no request leaves here
     from runtime.discovery.egress import check_egress
     blocked = check_egress(url, allow_internal=getattr(args, "allow_internal", False))
     if blocked:
@@ -4298,6 +4384,7 @@ def cmd_onboard(args):
         cfg_path, cfg_name = _write_named_config(cfg, cfg_name, exact=True)
     elif getattr(args, "api", None):
         # the simple-contract one-liner: one probe, no browser, no adapter to author
+        _refuse_routed_probe(args.api)
         _step(1, total, f"probing {args.api}")
         _guard_egress(args.api, args)
         from runtime.discovery.probe import probe_api, build_config
@@ -4316,6 +4403,7 @@ def cmd_onboard(args):
         cfg = _finalize_target_auth(build_config(res), args)
         cfg_path, cfg_name = _write_named_config(cfg, cfg_name, exact=named_exactly)
     elif getattr(args, "ws", None):
+        _refuse_routed_probe(args.ws)
         _step(1, total, f"probing {args.ws}")
         _guard_egress(args.ws, args)
         from runtime.discovery.probe import probe_ws, build_ws_config
@@ -4360,6 +4448,7 @@ def cmd_onboard(args):
     else:
         _step(1, total, f"capturing the contract from {args.url or args.har}")
         if args.url:
+            _refuse_routed_probe(args.url)
             _guard_egress(args.url, args)
             from runtime.discovery.capture import capture_url
             ev = capture_url(args.url, prompt=args.prompt, headless=args.headless,
@@ -4432,31 +4521,41 @@ def cmd_onboard(args):
 
     # 2. hard gate -------------------------------------------------------------
     _step(2, total, "validating the config against the live target")
-    _guard_egress(cfg.get("endpoint") or cfg.get("url"), args)
     from runtime.discovery import validate as V
-    vres = V.validate_config(adapter, cfg, args.prompt, None, timeout_s=args.timeout)
-    if not vres.get("ok"):
-        _die(f"the adapter could not talk to the target: {vres.get('error')}\n"
-             f"  fix {cfg_path} and re-run, or use "
-             f"`ascend adapter validate --config {cfg_name}` to iterate.",
-             code=EXIT_ERROR)
-    # The streaming check has to run on EVERY source, not only the probing one. `adapter build`
-    # called it; onboarding validates separately and did not, so `target add <curl>` / `--har` on
-    # a streaming target wrote a direct_api config whose "answer" was the raw frames — it passed
-    # this very gate, because a 200 with a non-empty body looks like success. The same target
-    # added by `--api` came out correct, so which evidence you happened to use silently decided
-    # whether the assessment measured anything.
-    cfg, vres = _upgrade_streaming_shape(cfg, vres, args, V)
-    if cfg.get("adapter") and cfg["adapter"] != adapter:
-        adapter = cfg["adapter"]
-        _write_named_config(cfg, cfg_name, exact=True)   # same file; name already settled
-    _ok(f"target replied: {str(vres.get('response'))[:80]!r}")
-    _guard_constant_response(adapter, cfg, vres, args, V, cfg_name=cfg_name, cfg_path=cfg_path)
+    _target_url = cfg.get("endpoint") or cfg.get("url")
+    routed = _routed_by_straiker(_target_url)
+    if routed:
+        # The gate cannot run from here: the name is terminated by the platform and does not
+        # resolve on this machine, so a lookup would only report it as unreachable. Said as what
+        # it is; the platform proves the target on its first probe.
+        _ok(f"{_host_of(_target_url)}: {ROUTED_NOTE} — the platform proves this target on its "
+            f"first probe")
+        vres = {"ok": None, "checked": False, "routed": True}
+    else:
+        _guard_egress(_target_url, args)
+        vres = V.validate_config(adapter, cfg, args.prompt, None, timeout_s=args.timeout)
+        if not vres.get("ok"):
+            _die(f"the adapter could not talk to the target: {vres.get('error')}\n"
+                 f"  fix {cfg_path} and re-run, or use "
+                 f"`ascend adapter validate --config {cfg_name}` to iterate.",
+                 code=EXIT_ERROR)
+        # The streaming check has to run on EVERY source, not only the probing one. `adapter
+        # build` called it; onboarding validates separately and did not, so `target add <curl>` /
+        # `--har` on a streaming target wrote a direct_api config whose "answer" was the raw frames
+        # — it passed this very gate, because a 200 with a non-empty body looks like success. The
+        # same target added by `--api` came out correct, so which evidence you happened to use
+        # silently decided whether the assessment measured anything.
+        cfg, vres = _upgrade_streaming_shape(cfg, vres, args, V)
+        if cfg.get("adapter") and cfg["adapter"] != adapter:
+            adapter = cfg["adapter"]
+            _write_named_config(cfg, cfg_name, exact=True)   # same file; name already settled
+        _ok(f"target replied: {str(vres.get('response'))[:80]!r}")
+        _guard_constant_response(adapter, cfg, vres, args, V, cfg_name=cfg_name, cfg_path=cfg_path)
 
     if args.dry_run:
         if getattr(args, "json", False):
             _out({"config": cfg_name, "path": str(cfg_path),
-                  "adapter": adapter, "validated": True, "dry_run": True}, args)
+                  "adapter": adapter, "validated": not routed, "dry_run": True}, args)
         else:
             print(f"\ndry run: config ready at {cfg_path}", file=sys.stderr)
         return
@@ -4502,6 +4601,12 @@ def cmd_onboard(args):
             # A direct app IS its contract, so re-wiring the same target refreshes it in place.
             # That is what makes a fixed header or a rotated key an update rather than a fork.
             patch = _api_contract(cfg)
+            if "request_template" in patch:
+                # The stored template may carry keys the platform wrote for itself; a capture
+                # never has them, so refreshing from the capture alone would erase them. See
+                # PLATFORM_TEMPLATE_PREFIXES.
+                patch["request_template"] = _keep_platform_template_keys(
+                    app.get("request_template"), patch["request_template"])
             if controls:
                 patch.update({"control_type": "custom", "control_ids": controls})
             if args.system_prompt:
@@ -4582,12 +4687,13 @@ def cmd_onboard(args):
         label = app.get("name") or args.name or name
         _out({"target": label, "app_id": app_id, "config": cfg_name, "adapter": adapter,
               "path": str(cfg_path),
-              "validated": True, "transport": via, "transport_reason": via_why,
+              "validated": not routed, "transport": via, "transport_reason": via_why,
               "reused": reused, "needs_bridge": via == "bridge",
               "key_stored": via == "bridge"}, args,
              human=(f"\ntarget '{label}' is ready\n"
                     f"  app       {app_id}\n"
-                    f"  adapter   {adapter}   (config '{cfg_name}', proven against the live target)\n"
+                    f"  adapter   {adapter}   (config '{cfg_name}', "
+                    f"{ROUTED_NOTE if routed else 'proven against the live target'})\n"
                     f"  run it    ascend assess run --app '{label}'\n"
                     f"  talk to it ascend chat '{label}'\n"
                     f"  re-check  ascend target check '{label}'"))
@@ -4626,7 +4732,7 @@ def cmd_onboard(args):
     print("", file=sys.stderr)
 
     if args.wait:
-        _ok("waiting for completion (Ctrl-C to detach; the run and its relay continue)")
+        _ok("waiting for completion (Ctrl-C to detach; the run and its bridge continue)")
         final = c.poll_assessment(app_id, aid, interval=args.interval, timeout=args.timeout_assess,
                                   on_tick=lambda st, pr, a: _ok(f"status={st} progress={pr}"))
         print("", file=sys.stderr)
@@ -4634,7 +4740,7 @@ def cmd_onboard(args):
         return
     _out({"app_id": app_id, "assessment_id": aid, "config": cfg_name, "adapter": adapter,
           "bridge": {k: ensure.get(k) for k in ("ensured", "started", "reused", "pid")}}, args,
-         human="the relay is detached and serving; this command can exit. "
+         human="the bridge is detached and serving; this command can exit. "
                f"Follow the run with:  ascend assess watch --app {app_id} --assessment {aid}")
 
 
@@ -5546,7 +5652,7 @@ def _add_runtime_start_args(s):
     s.add_argument("--consumer", help="bridge consumer id (parallel bridges MUST differ; auto per app)")
     s.add_argument("--log-file", help="write bridge logs here instead of stderr")
     s.add_argument("--status-file",
-                   help="force heartbeat+stats publishing for a relay that cannot be resolved to "
+                   help="force heartbeat+stats publishing for a bridge that cannot be resolved to "
                         "an app id (supervised children pass this; when the app IS known the "
                         "heartbeat is published under it automatically)")
     s.add_argument("--qpm", type=int, default=None, help="queries per minute against the target")
@@ -7136,6 +7242,17 @@ def cmd_adapter_validate(args):
     atype = args.adapter or cfg.get("adapter")
     if not atype:
         _die("no adapter type: pass --adapter or set 'adapter' in the config")
+    _target_url = cfg.get("endpoint") or cfg.get("url") or ""
+    if _routed_by_straiker(_target_url):
+        # Nothing to prove from here: the name is terminated by the platform and does not resolve
+        # on this machine, so a lookup would only call it unreachable. Not a pass — the platform
+        # proves it on the first probe — and not an error either: exit 0, with `ok` left unset.
+        res = {"ok": None, "checked": False, "routed": True, "host": _host_of(_target_url),
+               "note": ROUTED_NOTE}
+        _out(res, args, human=(f"  {_host_of(_target_url)}: {ROUTED_NOTE}\n"
+                               f"  nothing to prove from here — the platform calls this target "
+                               f"itself"))
+        sys.exit(EXIT_OK)
     res = V.validate_config(atype, cfg, args.prompt, args.expect, timeout_s=args.timeout)
     # A config can be perfectly correct and still be unassessable: the platform bounds how long each
     # probe may take, and the clock starts when the probe is queued. Say that here, from the one
@@ -7485,7 +7602,7 @@ COMPATIBILITY
                            adapter list      → target types
                            app create        → target add
                          `assess run` starts and stops the bridge itself, so there is no
-                         separate relay to operate; `bridge ls` stays useful as the alarm above.
+                         separate bridge to operate; `bridge ls` stays useful as the alarm above.
 
 Every command takes --json. `ascend target add --help` is the fastest way in.
 Full reference: docs/COMMAND_MAP.md  ·  building adapters: docs/BUILD_ADAPTER.md
@@ -7783,7 +7900,7 @@ def build_parser():
                           "request, so a missing one is named rather than returned as a 422."),
                       epilog=("examples:\n"
                               "  ascend app create --name 'My Bot' --controls sys_prompt_leak\n"
-                              "      a bridge app (the default) — `ascend assess run` starts the relay for you\n\n"
+                              "      a bridge app (the default) — `ascend assess run` starts the bridge for you\n\n"
                               "  ascend app create --type api --name 'Public Bot' --config mybot \\\n"
                               "      --target-api-key $KEY\n"
                               "      Ascend calls the target itself; url/templates/headers come from the config\n\n"
@@ -7985,7 +8102,7 @@ def build_parser():
     s.add_argument("--detail", action="store_true",
                    help="show key findings per control when the run completes")
     s.add_argument("--conversation", choices=["per-probe", "sequential"], default=None,
-                   help="how the relay threads probes into conversations. per-probe (default): each probe "
+                   help="how the bridge threads probes into conversations. per-probe (default): each probe "
                         "is its own conversation -- what a single-shot control means. sequential: consecutive "
                         "probes share one conversation, for multi-turn controls; bounded by the config's "
                         "conversation.max_turns (default 10)")
@@ -8043,7 +8160,7 @@ def build_parser():
     # menu, still wired, because scripts and the packaged binary call it.
     rp = sub.add_parser("runtime", parents=[GLOBALS], formatter_class=_Fmt,
                         help=argparse.SUPPRESS).add_subparsers(dest="verb", required=True)
-    s = rp.add_parser("start", parents=[GLOBALS], formatter_class=_Fmt, help="lease probes and relay them to a target via an adapter (see `bridge start --foreground`)",
+    s = rp.add_parser("start", parents=[GLOBALS], formatter_class=_Fmt, help="lease probes and forward them to a target via an adapter (see `bridge start --foreground`)",
                       epilog="example: STRAIKER_BRIDGE_API_KEY=tc-... ascend runtime start --adapter direct_api --config mybot")
     _add_runtime_start_args(s)
     s.set_defaults(func=cmd_runtime_start)
@@ -8197,7 +8314,7 @@ def build_parser():
     s.add_argument("--via", choices=["auto", "api", "bridge"], default="auto",
                    help="how probes reach the target. auto (default): direct when the platform can "
                         "reach the endpoint and speak its contract, a bridge only when it cannot. "
-                        "api: direct or fail. bridge: force a local relay.")
+                        "api: direct or fail. bridge: force a local bridge.")
     s.add_argument("--workspace", metavar="SLUG",
                    help="which agent to target, on a host that serves several (see `target inspect`)")
     s.add_argument("--no-profile", action="store_true",
@@ -8351,7 +8468,7 @@ def build_parser():
                    help="run ONE bridge in this terminal (logs here, Ctrl-C stops it) instead of "
                         "detaching — for debugging an adapter. Needs --config.")
     s.add_argument("--capture", default=None, metavar="PATH",
-                   help="write a jsonl transcript of every probe/result envelope the relay handles "
+                   help="write a jsonl transcript of every probe/result envelope the bridge handles "
                         "(same as `runtime start --capture`)")
     s.set_defaults(func=cmd_relay_start)
     s = rp.add_parser("ls", parents=[GLOBALS], formatter_class=_Fmt,
