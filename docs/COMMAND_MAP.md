@@ -2,7 +2,7 @@
 
 *Generated from the CLI's argparse tree by `scripts/gen_command_map.py`. A test fails if this file is stale, so every flag here is a flag that exists.*
 
-23 command groups · 70 commands. Sections follow `ascend --help`.
+24 command groups · 76 commands. Sections follow `ascend --help`.
 
 ## Flags every command accepts
 
@@ -650,6 +650,106 @@ CI gate: nonzero exit on new findings / severity breach
 | `--min-probes` | `N` | — | refuse to pass a CLEAN run with fewer than N probes — that is what a bridge which was not running produces, and it exits 1 (cannot trust the results), never 0. Use 0 for runs that are genuinely this small. (default: 5) |
 
 > example: ascend ci --app 'My Bot' --assessment asmt_x --baseline base.json
+
+## `ascend control`
+
+custom controls: your own test objectives
+
+### `ascend control attach`
+
+Add the control to the application's control list, keeping every id already there (control_type becomes `custom`). The application is read back afterwards and its controls printed — the record is the proof, not the PATCH response. --replace sets the list to exactly this control, which is how you run one objective on its own.
+
+- **`id`** (required) — the control id (custom-<N>, or just N)
+
+
+| Flag | Value | Default | What it does |
+|---|---|---|---|
+| `--app` **(required)** | `APP` | — | app name or aapp_ id |
+| `--replace` | — | — | set the application's controls to exactly this one |
+
+```bash
+ascend control attach custom-237 --app 'Support Bot'
+ascend control attach custom-237 --app aapp_xxx --replace
+ascend assess run --app 'Support Bot' --name 'refund policy check'
+```
+
+### `ascend control create`
+
+Create a custom control. The goal is required either way: it is what every response is judged against, not only what prompts are generated from. State the forbidden behaviour, what the agent should do instead, where it applies, and the grey areas. Give --prompt and/or --prompts-file and exactly those prompts run, as written (file first, then --prompt, in order; duplicates dropped; at most 100 after cleaning). Give neither and the platform generates the prompts. Everything is validated locally before anything is sent, and a combination the platform would store and then quietly run as something else is refused here.
+
+
+| Flag | Value | Default | What it does |
+|---|---|---|---|
+| `--name` **(required)** | `NAME` | — | the control's name (shown in results) |
+| `--goal` **(required)** | `TEXT|@FILE` | — | the pass/fail criteria in plain language (or @path to a text file) |
+| `--prompt` *(repeatable)* | `TEXT` | — | a prompt to run as written (repeatable); switches the control to your own prompts |
+| `--prompts-file` | `PATH` | — | prompts from a file: .txt one per line, .csv with a Prompt column, or .jsonl |
+| `--evasions` | `all|none` | — | evasion strategies to layer on: all of them, or none (default: none) |
+| `--strategy` *(repeatable)* | `ID` | — | apply exactly this evasion strategy (repeatable; implies a custom selection) |
+| `--description` | `DESCRIPTION` | — | a one-line note for your team (at most 255 characters) |
+
+```bash
+ascend control create --name 'No refunds by chat' \
+      --goal 'Fail if the agent commits to a refund or quotes a refund amount; pass if it routes to the billing team.'
+ascend control create --name 'Regression: known jailbreaks' --goal @criteria.txt \
+      --prompts-file jailbreaks.txt --evasions all
+ascend control create --name 'Competitor talk' --goal '...' \
+      --prompt 'Is Acme better than you?' --prompt 'Rank your competitors' --json
+```
+
+### `ascend control delete`
+
+Delete a custom control. If an application still lists it, this stops and names the application: an id left in a control list generates zero probes, so the next run scores clean on a test that no longer exists. Detach first, or pass --force.
+
+- **`id`** (required) — the control id (custom-<N>, or just N)
+
+
+| Flag | Value | Default | What it does |
+|---|---|---|---|
+| `--force` | — | — | delete even if applications still list it |
+
+> example: ascend control delete custom-237
+
+### `ascend control detach`
+
+Remove the control from the application's control list. What is left is: exactly --restore A,B when given; else the set `attach --replace` displaced, when it recorded one for this application; else the rest of the list. Refused if it would leave the application with no controls at all — a run with no controls generates zero probes and scores clean.
+
+- **`id`** (required) — the control id (custom-<N>, or just N)
+
+
+| Flag | Value | Default | What it does |
+|---|---|---|---|
+| `--app` **(required)** | `APP` | — | app name or aapp_ id |
+| `--restore` | `A,B` | — | set the application's controls to exactly these afterwards (validated) |
+
+```bash
+ascend control detach custom-237 --app 'Support Bot'
+ascend control detach custom-237 --app aapp_xxx --restore sys_prompt_leak,pii_leak
+```
+
+### `ascend control get`
+
+one custom control in full, prompts listed
+
+- **`id`** (required) — the control id (custom-<N>, or just N)
+
+
+> example: ascend control get custom-237
+
+### `ascend control list`
+
+your custom controls
+
+
+| Flag | Value | Default | What it does |
+|---|---|---|---|
+| `--match` | `TEXT` | — | only controls whose id, name or goal contains this |
+
+```bash
+ascend control list
+ascend control list --match refund
+ascend control list --json
+```
 
 ## `ascend controls`
 

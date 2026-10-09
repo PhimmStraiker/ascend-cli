@@ -511,6 +511,71 @@ class AscendAPI:
     def delete_app(self, app_id: str) -> Any:
         return self._req("DELETE", f"/ascend/applications/{app_id}")
 
+    # ---- custom controls (custom objectives) --------------------------------
+    # Measured 2026-10-09 (prod spec 2026.10.8). The record is snake_case: name, goal, prompt_type
+    # (auto | custom), prompts, strategy_type (none | all | custom), strategies, id `custom-<N>`.
+    # The body is built and validated in control/custom_controls.py; this is transport only.
+    CUSTOM_CONTROLS = "/ascend/custom-controls"
+
+    def list_custom_controls(self) -> List[Dict[str, Any]]:
+        """Every custom control on the tenant, following `has_more` (`starting_after=<last id>`).
+
+        Measured 2026-10-09: the endpoint ignored `limit` and returned every row with
+        `has_more: false`. The walk is kept for the day it pages, and a page that repeats an id
+        ends it — if the server ignores the cursor, a loop that trusted `has_more` alone would
+        never return.
+        """
+        out: List[Dict[str, Any]] = []
+        seen = set()
+        path = f"{self.CUSTOM_CONTROLS}?limit=100"
+        while True:
+            page = self._req("GET", path)
+            rows = self._rows(page)
+            fresh = [r for r in rows if r.get("id") not in seen]
+            out.extend(fresh)
+            seen.update(r.get("id") for r in fresh)
+            if not fresh or not (isinstance(page, dict) and page.get("has_more")):
+                return out
+            path = f"{self.CUSTOM_CONTROLS}?limit=100&starting_after={fresh[-1].get('id')}"
+
+    def get_custom_control(self, control_id: str) -> Any:
+        return self._req("GET", f"{self.CUSTOM_CONTROLS}/{control_id}")
+
+    def create_custom_control(self, body: Dict[str, Any]) -> Any:
+        """Create a custom control, and never report a failure that actually succeeded.
+
+        Same hazard as `create_app`: the server can create the record and the response still be
+        lost in transit (observed from a browser fetch: 201, then the stream dies). A retry would
+        create a second control with the same name, and an application can then be scoped to the
+        wrong one. On a transport error, look for the record by name before raising.
+        """
+        try:
+            return self._req("POST", self.CUSTOM_CONTROLS, json_body=body)
+        except Exception as exc:
+            found = self._find_custom_control_by_name(body.get("name"))
+            if found is None:
+                raise
+            return {**found, "recovered": True,
+                    "recovery_note": (
+                        f"the response was lost ({type(exc).__name__}), but the platform DID "
+                        f"create this custom control")}
+
+    def _find_custom_control_by_name(self, name: Optional[str]):
+        """The newest custom control with this exact name, or None (also on a failed lookup)."""
+        if not name:
+            return None
+        try:
+            same = [r for r in self.list_custom_controls() if r.get("name") == name]
+        except Exception:
+            return None
+        return max(same, key=lambda r: str(r.get("created_at") or "")) if same else None
+
+    def update_custom_control(self, control_id: str, patch: Dict[str, Any]) -> Any:
+        return self._req("PATCH", f"{self.CUSTOM_CONTROLS}/{control_id}", json_body=patch)
+
+    def delete_custom_control(self, control_id: str) -> Any:
+        return self._req("DELETE", f"{self.CUSTOM_CONTROLS}/{control_id}")
+
     # ---- reconnaissance -------------------------------------------------------------------
     # Capability enumeration is a run of its own in the Console (the Reconnaissance tab), separate
     # from an assessment. These are the v3 paths that run should have; today the platform serves

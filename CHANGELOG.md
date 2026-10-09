@@ -74,6 +74,29 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ### Added
 
+- **`ascend control` — custom controls from the CLI.** A custom control is a test objective of
+  your own: a name, a goal that states the pass/fail criteria in plain language, and either the
+  platform's generated prompts or exactly the prompts you bring (`--prompt`, `--prompts-file`;
+  at most 100 after de-duplication). `create` validates the definition locally and refuses the
+  pairs the platform would store and then quietly run as something else (prompts with no goal,
+  `--evasions` alongside `--strategy`, 101 prompts); `list`, `get` and `delete` manage them;
+  `attach` merges a control onto an application's existing control list (PATCH replaces the
+  whole list, so the ids already there are read first; `--replace` sets exactly one) and prints
+  the application read back afterwards; `detach` removes it and refuses to leave the list empty;
+  `delete` refuses while an application still lists the id, because an id left behind generates
+  zero probes. Transport is `POST/GET/PATCH/DELETE /ascend/custom-controls` on the v3 API
+  (measured 2026-10-09); a create whose response is lost in transit is recovered by name rather
+  than reported as a failure, as `app create` already does. `control/custom_controls.py` now
+  carries the wire shape (`api_body`, `record_summary`) and no longer claims the platform has no
+  route for this.
+- **`ascend control detach --restore A,B`, and `attach --replace` remembers what it displaced.**
+  `attach --replace` records the application's previous control set in the tenant's state dir
+  (`state/<tenant>/scope_before/<app>.json`); a later `control detach <id> --app <app>` — from
+  any shell, any process — puts that set back and spends the record. `--restore` names the set
+  explicitly instead (validated: catalog ids against the live catalog, custom ids by existence,
+  never the control being detached). Measured 2026-10-09: an agent's console pane unmounted
+  before its "put the scope back?" was answered, and the lab target stayed scoped to one custom
+  control until a person noticed; the restore no longer depends on the process that narrowed it.
 - **`ascend adaptor`: the custom-adaptor loop, as CLI commands.** A custom *adaptor* is one
   JavaScript file the Ascend engine runs against a target no template can drive — a login, a
   token mint, a conversation that has to be opened first, a reply to poll for — stored on the app
@@ -162,6 +185,10 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ### Fixed
 
+- **`scripts/gen_command_map.py` no longer prints `==SUPPRESS==` as a default.** A flag declared
+  with `default=argparse.SUPPRESS` (first: `control create --evasions`, which must tell `none`
+  apart from "nothing said") rendered the sentinel in the Default column of `docs/COMMAND_MAP.md`
+  and `docs/command-map.html`; it is now shown as no default.
 - **`app create --type api --config <name>` never worked with a derived config.** It read `url`
   while `target add` writes `endpoint`; added a second top-level `{{PROMPT}}` beside an already
   templated body; and flattened a nested answer path into one dotted key that matches nothing in

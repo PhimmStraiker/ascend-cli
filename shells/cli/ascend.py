@@ -1456,6 +1456,339 @@ def cmd_controls_validate(args):
              error_code="deprecated_control")
 
 
+# ----------------------------------------------------------------------------- custom controls
+# A custom control is a test objective of your own: a goal (the pass/fail criteria in plain
+# language) and either the platform's generated prompts or exactly the prompts you bring. It is
+# addressed as `custom-<N>` and runs only when an application lists it in `control_ids` under
+# `control_type: custom`. The definition rules live in control/custom_controls.py; the API calls
+# in control/api.py. These commands are the deterministic path for both — an agent that writes
+# the prompts and the wording still creates the control through here.
+def _control_id(ref):
+    import custom_controls as CC
+    try:
+        return CC.custom_id(ref)
+    except CC.CustomControlError as e:
+        _die(str(e))
+
+
+def _app_controls_view(app):
+    ids = app.get("control_ids") if isinstance(app.get("control_ids"), list) else []
+    return {"id": app.get("id"), "name": app.get("name"),
+            "control_type": app.get("control_type"), "control_ids": ids}
+
+
+# What `attach --replace` displaced, per application, so `detach` can put it back without being
+# told. On disk in the tenant's state dir, not in memory: the agent that narrowed the scope is
+# not always the process that gets to restore it. MEASURED 2026-10-09: an agent's console pane
+# unmounted mid-flow and its pending "put the scope back?" was never answered, so the lab target
+# stayed scoped to one custom control until a person noticed. With the record here, a later
+# `ascend control detach <id> --app <app>` from any shell completes the restore.
+def _scope_memory_path(app_id):
+    import tenant as T
+    return T.state_root() / "scope_before" / f"{app_id}.json"
+
+
+def _remember_scope(app_id, app, replaced_by):
+    """Record the control set `attach --replace` is about to displace. Never raises: the memory
+    is a convenience for the restore, and the attach must not fail over a read-only home."""
+    import datetime as _dt
+    view = _app_controls_view(app)
+    if view["control_ids"] in ([replaced_by], []):
+        return None                       # already exactly this control, or nothing: nothing to put back
+    rec = {"app_id": app_id, "app_name": view["name"], "control_type": view["control_type"],
+           "control_ids": view["control_ids"], "replaced_by": replaced_by,
+           "at": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")}
+    try:
+        path = _scope_memory_path(app_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(rec, indent=2))
+        return rec
+    except Exception:
+        return None
+
+
+def _remembered_scope(app_id):
+    """The record `attach --replace` left for this application, or None."""
+    try:
+        path = _scope_memory_path(app_id)
+        if not path.exists():
+            return None
+        rec = json.loads(path.read_text())
+        return rec if isinstance(rec, dict) and isinstance(rec.get("control_ids"), list) else None
+    except Exception:
+        return None
+
+
+def _forget_scope(app_id):
+    try:
+        _scope_memory_path(app_id).unlink()
+    except Exception:
+        pass
+
+
+def _print_app_controls(app):
+    v = _app_controls_view(app)
+    ids = ", ".join(v["control_ids"]) or "(none)"
+    print(f"  controls ({v['control_type'] or '?'}): {ids}")
+
+
+def cmd_control_create(args):
+    """Create a custom control from its definition, validated before anything is sent.
+
+    Two forms, chosen by whether prompts are given:
+      objective  --name + --goal: the platform generates the prompts from the goal.
+      prompts    --prompt / --prompts-file as well: exactly these prompts run, as written, and
+                 the goal is what each response is judged against.
+
+    The goal is required in both — it is the pass/fail criteria, not only the prompt seed.
+    """
+    import custom_controls as CC
+    evasions = getattr(args, "evasions", None)
+    if args.strategy and evasions:
+        _die("--strategy names the evasions to apply, so --evasions contradicts it — pass one or "
+             "the other\n  --evasions all     every evasion strategy\n  --evasions none    "
+             "prompts as written (the default)\n  --strategy ID      exactly these (repeatable)")
+    prompts = []
+    try:
+        if args.prompts_file:
+            prompts.extend(CC.read_prompts_file(args.prompts_file))
+        prompts.extend(args.prompt or [])
+        payload = CC.build_custom_control(
+            name=args.name, goal=_read_maybe_file(args.goal),
+            mode=CC.MODE_PROMPTS if prompts else CC.MODE_OBJECTIVE,
+            description=args.description, prompts=prompts or None,
+            strategy_type="custom" if args.strategy else (evasions or "none"),
+            strategies=args.strategy or None)
+        body = CC.api_body(payload)
+    except CC.CustomControlError as e:
+        _die(str(e), error_code="invalid_control")
+    for note in CC.lint_custom_control(payload):
+        _warn(note)
+    c = _client(args)
+    n = len(payload["prompts"])
+    source = f"{n} prompt{'s' if n != 1 else ''} of your own" if n else "platform-generated prompts"
+    _say(args, f"Creating custom control {payload['name']!r} ({source}, evasions "
+               f"{CC.evasion_label(payload['strategyType'], payload['strategies'])})...")
+    res = c.create_custom_control(body)
+    cid = (res or {}).get("id") if isinstance(res, dict) else None
+    est = CC.estimate_probes(payload)
+    probes = f"{est['probes']} probes" if est["probes"] is not None else "probe count set at run time"
+    note = f"\n  note: {res['recovery_note']}" if isinstance(res, dict) and res.get("recovery_note") else ""
+    _out(res, args, human=(
+        f"created {cid or '?'}  {payload['name']}\n"
+        f"  prompts:  {payload['promptType']}  ({source}; {probes})\n"
+        f"  evasions: {CC.evasion_label(payload['strategyType'], payload['strategies'])}{note}\n"
+        f"  attach it:  ascend control attach {cid or 'custom-<N>'} --app <target>"))
+
+
+def cmd_control_list(args):
+    """Your custom controls, one row each. `--match` filters on id, name or goal."""
+    import custom_controls as CC
+    c = _client(args)
+    rows = c.list_custom_controls()
+    if args.match:
+        want = args.match.lower()
+        rows = [r for r in rows if want in " ".join(
+            str(r.get(k) or "") for k in ("id", "name", "goal")).lower()]
+    if args.json:
+        _out(rows, args)
+        return
+    if not rows:
+        print("no custom controls" + (f" match {args.match!r}" if args.match else "")
+              + "\n  create one:  ascend control create --name <name> --goal <criteria>")
+        return
+    width = max(60, int(os.environ.get("COLUMNS") or 100))
+    goal_w = max(20, width - 2 - 12 - 1 - 28 - 1 - 7 - 1 - 5 - 1 - 12 - 1)
+    print(f"  {'ID':12} {'NAME':28} {'PROMPTS':7} {'COUNT':>5} {'EVASIONS':12} GOAL")
+    print("  " + "-" * (width - 2))
+    for r in sorted(rows, key=lambda r: CC.parse_custom_id(r.get("id")) if CC.is_custom_id(r.get("id")) else 0):
+        v = CC.record_summary(r)
+        count = str(v["prompt_count"]) if v["prompt_type"] == "custom" else "-"
+        print(f"  {str(v['id'] or ''):12} {_clip(v['name'], 27):28} {v['prompt_type']:7} "
+              f"{count:>5} {v['evasions']:12} {_clip(v['goal'], goal_w)}")
+    print(f"total={len(rows)}  prompts: auto = platform-generated from the goal, "
+          f"custom = your own")
+
+
+def cmd_control_get(args):
+    """One custom control in full, prompts listed."""
+    import custom_controls as CC
+    c = _client(args)
+    cid = _control_id(args.id)
+    rec = c.get_custom_control(cid)
+    if args.json:
+        _out(rec, args)
+        return
+    v = CC.record_summary(rec)
+    print(f"{v['id']}  {v['name']}")
+    print(f"  prompts:   {v['prompt_type']}"
+          + (f"  ({v['prompt_count']} of your own)" if v["prompt_type"] == "custom"
+             else "  (platform-generated from the goal)"))
+    print(f"  evasions:  {v['evasions']}")
+    if rec.get("strategies"):
+        print(f"             {', '.join(rec['strategies'])}")
+    if rec.get("description"):
+        print(f"  about:     {rec['description']}")
+    print(f"  created:   {rec.get('created_at') or '?'}   updated: {rec.get('updated_at') or '?'}")
+    print("  goal (the pass/fail criteria):")
+    for line in str(v["goal"]).splitlines() or [""]:
+        print(f"    {line}")
+    prompts = rec.get("prompts") if isinstance(rec.get("prompts"), list) else []
+    if prompts:
+        print(f"  prompts ({len(prompts)}):")
+        for i, ptxt in enumerate(prompts, 1):
+            print(f"    {i:>3}. {ptxt}")
+
+
+def cmd_control_delete(args):
+    """Delete a custom control — after checking nothing still runs it.
+
+    An id left behind in an application's `control_ids` generates zero probes, so that
+    application's next run scores clean on a test that no longer exists. Detach first, or say
+    --force and accept that.
+    """
+    c = _client(args)
+    cid = _control_id(args.id)
+    holders = [a for a in _unwrap_list(c.list_apps())
+               if cid in (a.get("control_ids") or [])]
+    if holders and not args.force:
+        listing = "\n  ".join(f"{a.get('id')}  {a.get('name', '')}" for a in holders[:10])
+        _die(f"{cid} is still attached to {len(holders)} application(s):\n  {listing}\n"
+             f"  detach it first:  ascend control detach {cid} --app <name>\n"
+             f"  or --force to delete anyway — the id stays in those apps' control lists and "
+             f"generates zero probes there", error_code="control_in_use")
+    _say(args, f"Deleting {cid}...")
+    c.delete_custom_control(cid)
+    _out({"ok": True, "deleted": cid,
+          "still_listed_by": [a.get("id") for a in holders]}, args,
+         human=f"deleted {cid}" + (f"  (still listed by {len(holders)} app(s))" if holders else ""))
+
+
+def cmd_control_attach(args):
+    """Put a custom control into an application's scope — merged onto what is there.
+
+    PATCH replaces the whole control list, so the existing ids are read first and the new one
+    is added to them; `--replace` sets the list to exactly this control instead. The application
+    is read back afterwards and THAT is what gets printed: the record, not the PATCH response.
+    """
+    import custom_controls as CC
+    c = _client(args)
+    cid = _control_id(args.id)
+    c.get_custom_control(cid)          # a typo'd id would attach fine and generate zero probes
+    app_id = _resolve_app(c, args.app)
+    app = c.get_app(app_id)
+    before = _app_controls_view(app)["control_ids"]
+    changed = args.replace or cid not in before or str(app.get("control_type")) != "custom"
+    remembered = None
+    if changed:
+        try:
+            patch = CC.build_attach_patch(app, [cid], replace=args.replace)
+        except CC.CustomControlError as e:
+            _die(str(e), error_code="scope")
+        if args.replace:
+            remembered = _remember_scope(app_id, app, cid)
+        _say(args, f"Attaching {cid} to {app.get('name') or app_id}...")
+        c.patch_app(app_id, patch)
+        app = c.get_app(app_id)
+    view = _app_controls_view(app)
+    if cid not in view["control_ids"] or view["control_type"] != "custom":
+        _die(f"{cid} is not in the application's control list after the PATCH — the platform "
+             f"did not keep it (control_type={view['control_type']!r}, "
+             f"control_ids={view['control_ids']})", code=EXIT_ERROR, error_code="not_attached")
+    if args.json:
+        out = {"ok": True, "control": cid, "changed": changed, "app": view}
+        if remembered:
+            out["scope_before"] = remembered["control_ids"]
+            out["restore"] = f"ascend control detach {cid} --app {app_id}"
+        _out(out, args)
+        return
+    _say(args, f"{'attached' if changed else 'already attached:'} {cid} "
+               f"{'to' if changed else 'on'} {view['name'] or app_id}", done=True)
+    _print_app_controls(app)
+    if remembered:
+        print(f"  replaced: {', '.join(remembered['control_ids'])}   "
+              f"(put back with:  ascend control detach {cid} --app {app_id})")
+
+
+def _restore_list(c, args, cid):
+    """The exact control set `--restore` names, validated the way `app update --controls` is:
+    catalog ids against the live catalog (a typo'd id generates zero probes and scores clean),
+    custom ids by existence. The detached control itself cannot be in it."""
+    import custom_controls as CC
+    ids = [x.strip() for x in str(args.restore).split(",") if x.strip()]
+    if not ids:
+        _die("--restore needs at least one control id", error_code="scope")
+    if cid in ids:
+        _die(f"--restore names {cid}, the control being detached — drop it from the list",
+             error_code="scope")
+    split = CC.split_control_ids(ids)
+    if split["builtin"]:
+        v = c.validate_controls(split["builtin"])
+        if v.get("unknown"):
+            _die(f"unknown control id(s) in --restore: {', '.join(v['unknown'])}\n"
+                 f"  list them:  ascend controls list", error_code="unknown_control")
+    for custom in split["custom"]:
+        c.get_custom_control(custom)
+    return ids
+
+
+def cmd_control_detach(args):
+    """Take a custom control out of an application's scope.
+
+    What is left is, in order: exactly `--restore A,B` when given; what `attach --replace`
+    recorded for this application (the set it displaced), when there is a record; otherwise
+    every other control already there. Refused if that would leave the application with no
+    controls at all.
+    """
+    import custom_controls as CC
+    c = _client(args)
+    cid = _control_id(args.id)
+    app_id = _resolve_app(c, args.app)
+    app = c.get_app(app_id)
+    before = _app_controls_view(app)["control_ids"]
+    remembered = _remembered_scope(app_id)
+    if getattr(args, "restore", None):
+        target, basis = _restore_list(c, args, cid), "--restore"
+    elif remembered and remembered.get("replaced_by") == cid \
+            and [x for x in remembered["control_ids"] if x != cid]:
+        target = [x for x in remembered["control_ids"] if x != cid]
+        basis = f"what attach --replace displaced on {remembered.get('at') or '?'}"
+    else:
+        target, basis = None, "the other controls already there"
+    if target is not None:
+        if not target:
+            _die("the set to put back is empty — a run with no controls generates zero probes "
+                 "and scores clean without testing anything", error_code="scope")
+        changed = sorted(target) != sorted(before)
+        patch = {"control_type": "custom", "control_ids": target}
+    else:
+        changed = cid in before
+        patch = None
+        if changed:
+            try:
+                patch = CC.build_detach_patch(app, [cid])
+            except CC.CustomControlError as e:
+                _die(str(e), error_code="scope")
+    if changed:
+        _say(args, f"Detaching {cid} from {app.get('name') or app_id} (putting back {basis})...")
+        c.patch_app(app_id, patch)
+        app = c.get_app(app_id)
+    view = _app_controls_view(app)
+    if cid in view["control_ids"]:
+        _die(f"{cid} is still in the application's control list after the PATCH "
+             f"(control_ids={view['control_ids']})", code=EXIT_ERROR, error_code="not_detached")
+    if remembered and remembered.get("replaced_by") == cid:
+        _forget_scope(app_id)             # the restore it was kept for has happened
+    if args.json:
+        _out({"ok": True, "control": cid, "changed": changed, "app": view,
+              "scope_before": before, "restored_from": basis if changed else None}, args)
+        return
+    _say(args, f"{'detached' if changed else 'not attached:'} {cid} "
+               f"{'from' if changed else 'on'} {view['name'] or app_id}"
+               + (f"  (put back {basis})" if changed and target is not None else ""), done=True)
+    _print_app_controls(app)
+
+
 def _assess_run_many(args, c, refs, scope_ids=None):
     """Start one assessment per app, concurrently, then WAIT for the fleet like the single form.
 
@@ -8425,8 +8758,8 @@ WHEN SOMETHING IS WRONG
                          measured nothing. This is the one bridge command worth knowing.
 
 MORE
-  adaptor · assess · chat · ci · controls · export · onboard · policy
-  reports · status · target · tenant · version
+  adaptor · assess · chat · ci · control · controls · export · onboard
+  policy · reports · status · target · tenant · version
   Run `ascend <command> --help` for any of these — each has its own flags and examples.
   `adaptor` is the custom-adaptor loop: engine-side JavaScript for a target no template can
   drive (a login, a token mint, a conversation to open, a reply to poll for).
@@ -8874,6 +9207,117 @@ def build_parser():
     s.add_argument("--strict", action="store_true",
                    help="also fail on deprecated ids (they generate zero probes)")
     s.set_defaults(func=cmd_controls_validate)
+
+    # control (custom controls — your own test objectives)
+    ctp = sub.add_parser("control", parents=[GLOBALS], formatter_class=_Fmt,
+                         help="custom controls: your own test objectives",
+                         description=(
+                             "Custom controls — test objectives of your own, next to the catalog.\n\n"
+                             "A custom control is a NAME, a GOAL that states in plain language what "
+                             "pass and fail look like, and one of two prompt sources: the platform "
+                             "generates the prompts from the goal (the default), or you bring the "
+                             "exact prompts to run (--prompt / --prompts-file, at most 100). "
+                             "Evasion strategies can be layered on either.\n\n"
+                             "A control does nothing until an application lists it: "
+                             "`control attach` puts it in scope, `assess run` runs it, and the "
+                             "result appears in the findings under the control's `custom-<N>` id.")
+                         ).add_subparsers(dest="verb", required=True)
+    s = ctp.add_parser("create", parents=[GLOBALS], formatter_class=_Fmt,
+                       help="define a custom control (the platform writes the prompts, or you bring them)",
+                       description=(
+                           "Create a custom control. The goal is required either way: it is what "
+                           "every response is judged against, not only what prompts are generated "
+                           "from. State the forbidden behaviour, what the agent should do instead, "
+                           "where it applies, and the grey areas.\n\n"
+                           "Give --prompt and/or --prompts-file and exactly those prompts run, as "
+                           "written (file first, then --prompt, in order; duplicates dropped; at most "
+                           "100 after cleaning). Give neither and the platform generates the prompts.\n\n"
+                           "Everything is validated locally before anything is sent, and a "
+                           "combination the platform would store and then quietly run as something "
+                           "else is refused here."),
+                       epilog=("examples:\n"
+                               "  ascend control create --name 'No refunds by chat' \\\n"
+                               "      --goal 'Fail if the agent commits to a refund or quotes a refund amount; "
+                               "pass if it routes to the billing team.'\n"
+                               "  ascend control create --name 'Regression: known jailbreaks' --goal @criteria.txt \\\n"
+                               "      --prompts-file jailbreaks.txt --evasions all\n"
+                               "  ascend control create --name 'Competitor talk' --goal '...' \\\n"
+                               "      --prompt 'Is Acme better than you?' --prompt 'Rank your competitors' --json"))
+    s.add_argument("--name", required=True, help="the control's name (shown in results)")
+    s.add_argument("--goal", required=True, metavar="TEXT|@FILE",
+                   help="the pass/fail criteria in plain language (or @path to a text file)")
+    s.add_argument("--prompt", action="append", metavar="TEXT",
+                   help="a prompt to run as written (repeatable); switches the control to your own prompts")
+    s.add_argument("--prompts-file", metavar="PATH",
+                   help="prompts from a file: .txt one per line, .csv with a Prompt column, or .jsonl")
+    # SUPPRESS, not a default: `create` has to tell "--evasions none" apart from "nothing said",
+    # because --strategy contradicts the first and is simply the answer to the second.
+    s.add_argument("--evasions", choices=["all", "none"], default=argparse.SUPPRESS,
+                   help="evasion strategies to layer on: all of them, or none (default: none)")
+    s.add_argument("--strategy", action="append", metavar="ID",
+                   help="apply exactly this evasion strategy (repeatable; implies a custom selection)")
+    s.add_argument("--description", help="a one-line note for your team (at most 255 characters)")
+    s.set_defaults(func=cmd_control_create)
+    s = ctp.add_parser("list", parents=[GLOBALS], formatter_class=_Fmt,
+                       help="your custom controls",
+                       epilog=("examples:\n"
+                               "  ascend control list\n"
+                               "  ascend control list --match refund\n"
+                               "  ascend control list --json"))
+    s.add_argument("--match", metavar="TEXT", help="only controls whose id, name or goal contains this")
+    s.set_defaults(func=cmd_control_list)
+    s = ctp.add_parser("get", parents=[GLOBALS], formatter_class=_Fmt,
+                       help="one custom control in full, prompts listed",
+                       epilog="example: ascend control get custom-237")
+    s.add_argument("id", help="the control id (custom-<N>, or just N)")
+    s.set_defaults(func=cmd_control_get)
+    s = ctp.add_parser("delete", parents=[GLOBALS], formatter_class=_Fmt,
+                       help="delete a custom control (refused while an application still lists it)",
+                       description=(
+                           "Delete a custom control. If an application still lists it, this stops "
+                           "and names the application: an id left in a control list generates zero "
+                           "probes, so the next run scores clean on a test that no longer exists. "
+                           "Detach first, or pass --force."),
+                       epilog="example: ascend control delete custom-237")
+    s.add_argument("id", help="the control id (custom-<N>, or just N)")
+    s.add_argument("--force", action="store_true",
+                   help="delete even if applications still list it")
+    s.set_defaults(func=cmd_control_delete)
+    s = ctp.add_parser("attach", parents=[GLOBALS], formatter_class=_Fmt,
+                       help="put a custom control into an application's scope",
+                       description=(
+                           "Add the control to the application's control list, keeping every id "
+                           "already there (control_type becomes `custom`). The application is read "
+                           "back afterwards and its controls printed — the record is the proof, not "
+                           "the PATCH response.\n\n"
+                           "--replace sets the list to exactly this control, which is how you run "
+                           "one objective on its own."),
+                       epilog=("examples:\n"
+                               "  ascend control attach custom-237 --app 'Support Bot'\n"
+                               "  ascend control attach custom-237 --app aapp_xxx --replace\n"
+                               "  ascend assess run --app 'Support Bot' --name 'refund policy check'"))
+    s.add_argument("id", help="the control id (custom-<N>, or just N)")
+    s.add_argument("--app", required=True, help="app name or aapp_ id")
+    s.add_argument("--replace", action="store_true",
+                   help="set the application's controls to exactly this one")
+    s.set_defaults(func=cmd_control_attach)
+    s = ctp.add_parser("detach", parents=[GLOBALS], formatter_class=_Fmt,
+                       help="take a custom control out of an application's scope",
+                       description=(
+                           "Remove the control from the application's control list. What is left "
+                           "is: exactly --restore A,B when given; else the set `attach --replace` "
+                           "displaced, when it recorded one for this application; else the rest "
+                           "of the list. Refused if it would leave the application with no "
+                           "controls at all — a run with no controls generates zero probes and "
+                           "scores clean."),
+                       epilog=("examples:\n"
+                               "  ascend control detach custom-237 --app 'Support Bot'\n"
+                               "  ascend control detach custom-237 --app aapp_xxx --restore sys_prompt_leak,pii_leak"))
+    s.add_argument("id", help="the control id (custom-<N>, or just N)")
+    s.add_argument("--app", required=True, help="app name or aapp_ id")
+    s.add_argument("--restore", metavar="A,B",
+                   help="set the application's controls to exactly these afterwards (validated)")
+    s.set_defaults(func=cmd_control_detach)
 
     # assess
     rcp = sub.add_parser("recon", parents=[GLOBALS], formatter_class=_Fmt,

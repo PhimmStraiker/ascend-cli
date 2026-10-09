@@ -49,8 +49,8 @@ WHEN SOMETHING IS WRONG
                          measured nothing. This is the one bridge command worth knowing.
 
 MORE
-  adaptor · assess · chat · ci · controls · export · onboard · policy
-  reports · status · target · tenant · version
+  adaptor · assess · chat · ci · control · controls · export · onboard
+  policy · reports · status · target · tenant · version
   Run `ascend <command> --help` for any of these — each has its own flags and examples.
   `adaptor` is the custom-adaptor loop: engine-side JavaScript for a target no template can
   drive (a login, a token mint, a conversation to open, a reply to poll for).
