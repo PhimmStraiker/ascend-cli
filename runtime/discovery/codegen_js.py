@@ -772,6 +772,8 @@ var SESSION_METHOD = __SESSION_METHOD__;
 var SESSION_BODY = __SESSION_BODY__;
 var SESSION_EXTRACT = __SESSION_EXTRACT__;
 var SESSION_VARIABLE = __SESSION_VARIABLE__;
+var SESSION_HEADER = __SESSION_HEADER__;
+var SESSION_HEADER_VALUE = __SESSION_HEADER_VALUE__;
 var MESSAGE_PATH = __MESSAGE_PATH__;
 var MESSAGE_METHOD = __MESSAGE_METHOD__;
 var MESSAGE_BODY = __MESSAGE_BODY__;
@@ -814,7 +816,7 @@ function mintSession(turn, host, timeoutMs, out) {
     // A throwaway first turn: this target greets or asks consent before it answers anything.
     try {
       host.http.request(messageUrl(host, id), {
-        method: MESSAGE_METHOD, headers: headersOf(turn, BASE_HEADERS),
+        method: MESSAGE_METHOD, headers: messageHeaders(turn, id),
         body: render(MESSAGE_BODY, sessionVars(WARMUP, id)), timeoutMs: timeoutMs,
       });
     } catch (e) {
@@ -829,6 +831,17 @@ function messageUrl(host, id) {
   vars[SESSION_VARIABLE] = id;
   var url = targetUrl(host, MESSAGE_PATH, vars);
   return url.split("{{" + SESSION_VARIABLE + "}}").join(id);
+}
+
+/** The message call's headers: the app's, plus the minted value under SESSION_HEADER when the
+ *  target expects it there (`x-conv-token`, a per-conversation bearer) rather than in the URL
+ *  or body. The mint call never carries it: there is nothing to carry yet. */
+function messageHeaders(turn, id) {
+  var h = headersOf(turn, BASE_HEADERS);
+  if (SESSION_HEADER) {
+    h[SESSION_HEADER] = String(SESSION_HEADER_VALUE).split("{{" + SESSION_VARIABLE + "}}").join(id);
+  }
+  return h;
 }
 
 /**
@@ -849,7 +862,7 @@ function checkReachability(turn, host) {
 function sendMessage(turn, host, id, prompt, timeoutMs) {
   return host.http.request(messageUrl(host, id), {
     method: MESSAGE_METHOD,
-    headers: headersOf(turn, BASE_HEADERS),
+    headers: messageHeaders(turn, id),
     body: render(MESSAGE_BODY, sessionVars(prompt, id)),
     timeoutMs: timeoutMs,
   });
@@ -1156,6 +1169,8 @@ def _gen_session_api(cfg: Dict[str, Any]) -> str:
         "SESSION_BODY": _js(cfg.get("session_body") if cfg.get("session_body") is not None else {}),
         "SESSION_EXTRACT": _js(str(cfg.get("session_extract") or "sessionId")),
         "SESSION_VARIABLE": _js(str(cfg.get("session_variable") or "SESSION_ID")),
+        "SESSION_HEADER": _js(str(cfg["session_header"]) if cfg.get("session_header") else None),
+        "SESSION_HEADER_VALUE": _js(str(cfg.get("session_header_value") or "{{SESSION_ID}}")),
         "MESSAGE_PATH": _js(path_template(cfg)),
         "MESSAGE_METHOD": _js(str(cfg.get("message_method") or "POST").upper()),
         "MESSAGE_BODY": _js(body),

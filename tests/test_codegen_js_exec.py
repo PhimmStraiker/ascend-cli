@@ -216,6 +216,44 @@ class TestSessionApi:
         assert bad["reply"]["status_code"] == 403
 
 
+    SESSION_IN_HEADER = {
+        **SESSION, "session_extract": "token", "session_header": "X-Conv-Token",
+        "session_header_value": "{{SESSION_ID}}", "message_body": {"message": "{{PROMPT}}"},
+    }
+
+    def test_the_minted_token_rides_in_the_header_of_the_message_call_only(self):
+        """The Target Lab's /session shape: mint -> {token}, then x-conv-token on every message."""
+        out = run(self.SESSION_IN_HEADER, {"http": [
+            {"url_contains": "/session/api/conversations", "method": "POST", "body": {"token": "tok-77"}},
+            {"url_contains": "/session/api/messages", "method": "POST", "body": {"reply": "Sure."}},
+        ]})
+        assert out["reply"]["body"] == {"response": "Sure."}
+        mint, send = http_calls(out)
+        assert "X-Conv-Token" not in mint["headers"], "nothing to carry before the mint"
+        assert send["headers"]["X-Conv-Token"] == "tok-77"
+        assert send["headers"]["x-lab-code"] == "code-from-the-app-record"
+        assert send["body"] == {"message": "What is the status of order 42?"}
+        assert out["state"] == {"session_id": "tok-77"}
+
+    def test_a_dead_token_is_re_minted_and_the_new_one_sent(self):
+        out = run(self.SESSION_IN_HEADER, {"http": [
+            {"url_contains": "/conversations", "body": {"token": "old"}, "once": True},
+            {"url_contains": "/messages", "status": 401, "body": "expired", "once": True},
+            {"url_contains": "/conversations", "body": {"token": "new"}, "once": True},
+            {"url_contains": "/messages", "body": {"reply": "ok"}},
+        ]})
+        assert out["reply"]["body"] == {"response": "ok"} and out["state"] == {"session_id": "new"}
+        sends = [c for c in http_calls(out) if "/messages" in c["url"]]
+        assert [c["headers"]["X-Conv-Token"] for c in sends] == ["old", "new"]
+
+    def test_a_bearer_template_is_rendered(self):
+        cfg = {**self.SESSION_IN_HEADER, "session_header": "Authorization",
+               "session_header_value": "Bearer {{SESSION_ID}}"}
+        out = run(cfg, {"http": [{"url_contains": "/conversations", "body": {"token": "t1"}},
+                                 {"url_contains": "/messages", "body": {"reply": "ok"}}]})
+        assert http_calls(out)[1]["headers"]["Authorization"] == "Bearer t1"
+
+
 class TestSessionPoll:
     def test_create_send_then_poll_until_a_new_bot_turn(self):
         before = {"messages": [{"role": "assistant", "text": "Welcome"}]}

@@ -14,6 +14,10 @@ Config keys:
   session_variable  - Variable name injected into message endpoint/body (default: "SESSION_ID")
   message_endpoint  - URL to send messages ({{SESSION_ID}} is replaced with extracted value)
   message_body      - Request body template with {{PROMPT}} and {{SESSION_ID}} placeholders
+  session_header    - Optional. A header the MESSAGE call carries the session value in (a
+                      per-conversation `X-Conv-Token`, a minted bearer); the create call never
+                      carries it. `session_header_value` is its template (default "{{SESSION_ID}}",
+                      e.g. "Bearer {{SESSION_ID}}")
   warmup_message    - Optional. A throwaway first turn after create; agents that greet, ask consent, or
                       refuse any question until greeted (409 'first turn must be a greeting') need one
   response_path     - Dot-path to extract response text (default: "messages.0.message")
@@ -66,6 +70,7 @@ class SessionAPIAdapter(BotAdapter):
             session_value = self._session_value
             variable_name = config.get("session_variable", "SESSION_ID")
             resolved_endpoint = message_endpoint.replace(f"{{{{{variable_name}}}}}", str(session_value))
+            headers = _with_session_header(headers, config, variable_name, session_value)
         else:
             self._session_value = None
             self._seq_turns = 0
@@ -97,6 +102,7 @@ class SessionAPIAdapter(BotAdapter):
 
             variable_name = config.get("session_variable", "SESSION_ID")
             logger.debug("SessionAPI: extracted session id (elided)")
+            headers = _with_session_header(headers, config, variable_name, session_value)
 
             # --- Step 1b (optional): warm-up / greeting discard ---
             # Some agents return a mandatory greeting/consent on the FIRST message; send a
@@ -160,6 +166,24 @@ class SessionAPIAdapter(BotAdapter):
             adapter="session_api",
             session_id=str(session_value),
         )
+
+
+def _with_session_header(headers: Dict[str, Any], config: Dict[str, Any], variable_name: str,
+                         session_value: Any) -> Dict[str, Any]:
+    """The message call's headers: the shared ones plus the minted value under `session_header`.
+
+    A target that mints a per-conversation token and expects it back as a header (the Target
+    Lab's `x-conv-token`) could only be described by freezing the captured token into `headers`,
+    which validated once and then 401'd for good. Returns a copy; the create call keeps the
+    shared headers unchanged because the value does not exist yet when it runs.
+    """
+    name = config.get("session_header")
+    if not name:
+        return headers
+    template = str(config.get("session_header_value") or f"{{{{{variable_name}}}}}")
+    out = dict(headers)
+    out[str(name)] = template.replace(f"{{{{{variable_name}}}}}", str(session_value))
+    return out
 
 
 def _extract(data: Any, path: str) -> Any:

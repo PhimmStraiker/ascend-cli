@@ -79,8 +79,43 @@ def _extract_fn_direct(response_path: Optional[str]) -> str:
             "    return cur if isinstance(cur, str) else json.dumps(cur)\n")
 
 
+# Headers a capture carries that describe the BROWSER, not the contract. A generated module (or a
+# direct application the platform drives) replaying them is lying about what it is, and the
+# platform refuses to create an application that carries them: MEASURED 2026-10-09 on a Target Lab
+# HAR, `POST /ascend/applications` answered 400 "rejected by the upstream service" with the
+# capture's Sec-Ch-Ua / Sec-Fetch-* set on the record and created the same app the moment they
+# were gone. Client hints and fetch metadata are the browser's own; the rest is transport noise
+# that `requests` and the engine compute themselves.
+FINGERPRINT_PREFIXES = ("sec-ch-ua", "sec-fetch-")
+NOISE_HEADERS = {"content-length", "host", "connection", "accept-encoding", "sec-fetch-user",
+                 "upgrade-insecure-requests", "priority", "te"}
+
+
+def safe_headers(headers: Dict[str, Any]) -> "tuple[Dict[str, Any], list[str]]":
+    """(the headers a generated adapter or a direct app may carry, the names dropped).
+
+    Browser fingerprint headers (`Sec-Ch-Ua*`, `Sec-Fetch-*`) and transport noise are dropped;
+    a query string is cut from `Referer` and `Origin` because on a widget behind an access code
+    it IS the credential (`/session?code=…`). Everything else — including `User-Agent`, `Accept`,
+    `Origin` and `Referer` themselves, which a target may legitimately check — is kept as
+    captured. Order is preserved so a config stays diff-stable.
+    """
+    out: Dict[str, Any] = {}
+    dropped: list[str] = []
+    for k, v in (headers or {}).items():
+        lk = str(k).lower()
+        if lk.startswith(FINGERPRINT_PREFIXES) or lk in NOISE_HEADERS:
+            dropped.append(str(k))
+            continue
+        if lk in ("referer", "origin") and isinstance(v, str) and "?" in v:
+            v = v.split("?", 1)[0]
+        out[k] = v
+    return out, dropped
+
+
 def _header_block(headers: Dict[str, str]) -> str:
-    return f"HEADERS = {_py(headers or {})}\n"
+    kept, _dropped = safe_headers(headers or {})
+    return f"HEADERS = {_py(kept)}\n"
 
 
 def _preamble(name: str, source: str, url: str, adapter_kind: str) -> str:

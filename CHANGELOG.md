@@ -11,6 +11,49 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ## [Unreleased]
 
+### Fixed
+
+- **A capture's mint-then-send chain derives the session shape.** `classify_session` found a
+  minted id only when it reappeared in a later request's URL or body. A target that mints a
+  per-conversation token and expects it back as a header (`POST …/conversations ->
+  {conversation_id, token}`, then `x-conv-token` on `POST …/messages`) was classified `stateless`,
+  the captured token became a static credential, and the generated `direct_api` adaptor replayed
+  it — measured on the Target Lab's /session widget, where the lane's older token answered 401
+  within hours. The chain `har_chains` already reports is now the create step of `session_api`:
+  the config carries `session_header` (and `session_header_value`, `Bearer {{SESSION_ID}}` when
+  the capture showed a prefix), `codegen_js` emits the `getOrMint` flow and sends the minted
+  value under that header on the message call only, and `runtime/adapters/session_api.py` — the
+  validation gate — performs the same two steps. The carrier header is neither frozen into the
+  auth block nor reported as withheld. (`tests/test_mint_then_send_derivation.py`,
+  `tests/test_codegen_js_exec.py`)
+- **`target add --har` / `--url` store the credentials the capture saw.** `classify_evidence`
+  returned them under `secrets` and the config carried `env:ASCEND_SECRET_<host>_<header>`
+  references, and nothing stored the values, so validation died with "environment variable …
+  is not set" and the operator exported them by hand. `runtime/target_secrets.py` is a 0600,
+  tenant-scoped store; `layers.auth.resolve_secret_ref` reads the environment first and falls
+  back to it; the HAR/url branch records what the capture saw before the config is written, and
+  says so (`authenticating as the captured session: Cookie`) instead of "withheld".
+  (`tests/test_captured_credentials_store.py`)
+- **The auth flags apply on a `--config` re-run.** `--header`, `--bearer`, `--api-key`,
+  `--basic` and `--cookie` were folded into every derived config and silently ignored when the
+  config was loaded from disk: `target add --config … --header 'x-lab-code: …'` registered a
+  record without the header. The same three steps now run on the loaded config, and the file
+  is rewritten only when something changed. An operator `env:` reference joins a captured static
+  block (a list) instead of replacing it. (`tests/test_config_rerun_flags.py`)
+- **Browser fingerprint headers never reach an application record.** A HAR-derived config
+  carried `Sec-Ch-Ua*` and `Sec-Fetch-*`; `POST /ascend/applications` answered 400 "rejected by
+  the upstream service" and created the same app once they were gone. The rule the old Python
+  codegen applied (`codegen.safe_headers`: drop client hints, fetch metadata and transport noise;
+  cut a query string from `Referer`/`Origin`, where an access code hides) is now shared by
+  `_api_contract` and the adaptor app's headers, and the output names what was left off.
+  (`tests/test_app_record_headers.py`)
+- **The engine's host-call trace masks credentials in URLs.** `adaptor test` / `verify` printed
+  `config.get`'s result and `ws.connect`'s `args` with the app URL's `?code=` access code in
+  clear; so did the probe's echo of a typed `--ws`/`--api`/`--url`. `manual.redact_url` now uses
+  the classifier's query-credential rule (`code`, `token`, `sig`, … and an entropy backstop) and
+  substitutes in place; `redact_text` finds a URL inside other text; headers under credential
+  names inside the request options are masked too. (`tests/test_trace_masks_credentials.py`)
+
 ### Changed
 
 - **`target add` registers a hosted adaptor by default; the local bridge is deprecated.** Locally

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -64,16 +65,53 @@ def redact_url(value: Any) -> Any:
     if not value.lower().startswith(("http://", "https://", "ws://", "wss://")):
         return value
     try:
-        from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+        from urllib.parse import unquote, urlsplit, urlunsplit
         parts = urlsplit(value)
         if not parts.query:
             return value
-        pairs = parse_qsl(parts.query, keep_blank_values=True)
-        cleaned = [(k, "[REDACTED]" if _is_sensitive_key(k) or k.lower() in ("key", "apikey")
-                    else v) for k, v in pairs]
-        return urlunsplit(parts._replace(query=urlencode(cleaned)))
+        # Substituted IN PLACE, parameter by parameter, so nothing else in the URL is re-encoded
+        # by the display path (a `parse_qsl`/`urlencode` round trip turned `[REDACTED]` into
+        # `%5BREDACTED%5D` and rewrote every other value too), and so masking twice is a no-op.
+        out = []
+        for piece in parts.query.split("&"):
+            k, sep, v = piece.partition("=")
+            if sep and v != "[REDACTED]" and (_is_sensitive_key(k) or _secret_param(k, unquote(v))):
+                out.append(f"{k}=[REDACTED]")
+            else:
+                out.append(piece)
+        return urlunsplit(parts._replace(query="&".join(out)))
     except Exception:                       # never let masking raise on the display path
         return value
+
+
+def _secret_param(name: str, value: str) -> bool:
+    """Is this query parameter a credential? One rule, the classifier's, so what the probe
+    withholds from a config and what the display masks never disagree. MEASURED 2026-10-09: the
+    engine's host-call trace printed a WebSocket URL with its `?code=` access code in clear —
+    `code` was on nobody's list, and `key`/`apikey` were the only names this knew."""
+    try:
+        from discovery.classify import _looks_secret_param  # noqa: PLC0415
+        return _looks_secret_param(name, value)
+    except Exception:                       # noqa: BLE001 - a display path never raises
+        return name.lower() in ("key", "apikey", "api_key", "code", "token", "access_token",
+                                "sig", "signature", "secret", "password", "auth")
+
+
+_URL_IN_TEXT = re.compile(r"(?:https?|wss?)://[^\s'\"<>)}]+")
+
+
+def redact_text(text: Any) -> Any:
+    """`text` with every URL inside it masked by `redact_url`.
+
+    `redact_url` only recognises a string that IS a URL. A host-call transcript, an error
+    message and a `repr` of a request's options carry URLs INSIDE other text, and that is where
+    a credential in a query string was printed in clear."""
+    if not isinstance(text, str) or "://" not in text:
+        return text
+    try:
+        return _URL_IN_TEXT.sub(lambda m: redact_url(m.group(0)), text)
+    except Exception:                       # noqa: BLE001
+        return text
 
 
 def redact(obj: Any) -> Any:

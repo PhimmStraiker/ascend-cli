@@ -653,11 +653,15 @@ def _api_contract(cfg):
     gave every other shape an application with no URL.
     """
     from runtime.discovery import codegen_js as _cj
+    from runtime.discovery.codegen import safe_headers
     out = {}
     url = _cj.app_url(cfg)
     if url:
         out["url"] = url
-    headers = dict(cfg.get("headers") or {})
+    # The old Python codegen's rule, reused: a browser's Sec-Ch-Ua / Sec-Fetch-* and transport
+    # noise describe the capture, not the contract, and the platform refuses an application that
+    # carries them (400 "rejected by the upstream service", measured on a HAR-derived record).
+    headers, _dropped = safe_headers(dict(cfg.get("headers") or {}))
     headers.setdefault("Content-Type", "application/json")
     out["headers"] = headers
     body = cfg.get("body") or cfg.get("request_body")
@@ -3529,6 +3533,14 @@ def _finalize_target_auth(cfg, args):
             ref = block.get("value_ref") or block.get("password_ref")
             print(f"[auth] {block['mode']} credential referenced as {ref} — the config carries the "
                   f"reference, never the value", file=sys.stderr)
+        # A capture may already have written a static block (the session cookie it saw). An
+        # operator reference ADDS to it — `--header 'x-lab-code: env:LAB_CODE'` beside a captured
+        # Cookie is the ordinary case — rather than replacing it, which dropped the cookie the
+        # target also requires. Only static blocks combine; a live mechanism was refused above.
+        prior = cfg.get("auth")
+        prior_blocks = prior if isinstance(prior, list) else ([prior] if isinstance(prior, dict) else [])
+        prior_blocks = [b for b in prior_blocks if b.get("type") == "static" and b not in blocks]
+        blocks = prior_blocks + blocks
         cfg["auth"] = blocks[0] if len(blocks) == 1 else blocks
     inline = (cfg.get("_probe") or {}).get("inline_secret_headers") or []
     still = [h for h in inline if any(k.lower() == h.lower() for k in (cfg.get("headers") or {}))]
@@ -3867,6 +3879,103 @@ def _prepare_target_auth(args):
         # this run's credential, not a durable one, and the auth block re-mints them per probe.
         args._login_minted_headers = set(login_headers)
     return _target_auth(args)
+
+
+def _store_captured_credentials(secrets, cfg, args):
+    """Put the credentials a capture SAW into the 0600 store, so its `env:` references resolve.
+
+    `classify_evidence` has returned them under `secrets` (one `ASCEND_SECRET_<host>_<header>`
+    name per credential header) and the config has carried the matching `env:` references — and
+    nothing ever stored the values, so validation died on the next line with "environment
+    variable … is not set". MEASURED 2026-10-09 on a Target Lab HAR: `withheld … Cookie,
+    X-Conv-Token`, then `auth failed: … _COOKIE is not set`; the operator exported the two
+    variables by hand to get past step 2.
+
+    The config still never holds a secret. The value goes to `runtime/target_secrets.py` (0600,
+    tenant-scoped) and `layers.auth.resolve_secret_ref` reads it back at materialize time — in
+    this process for the validation gate, in `adapter validate` tomorrow, and on the application
+    record the adaptor path builds (`_adaptor_app_headers` resolves the same references). Also
+    exported into THIS process so the gate a few lines below proves the credential the record
+    will carry.
+    """
+    if not secrets or not isinstance(cfg, dict):
+        return
+    try:
+        import target_secrets as TS
+    except Exception as exc:                 # noqa: BLE001 - the store is optional at import time
+        _warn(f"captured credentials could not be stored ({exc}); export them yourself")
+        return
+    host = ""
+    try:
+        from urllib.parse import urlparse
+        host = urlparse(cfg.get("endpoint") or cfg.get("url") or cfg.get("message_endpoint")
+                        or "").hostname or ""
+    except Exception:                        # noqa: BLE001
+        pass
+    stored = []
+    for name, value in sorted(secrets.items()):
+        try:
+            TS.record(name, value, host=host, header=name, source="capture")
+            os.environ[name] = value         # so step 2 validates the real contract, not a stub
+            stored.append(name)
+        except Exception as exc:             # noqa: BLE001 - one bad entry must not lose the rest
+            _warn(f"could not store {name}: {exc}")
+    if stored:
+        _ok(f"captured {len(stored)} credential(s) from the session and stored them "
+            f"({TS.store_path()}, 0600) — the config holds references, never values")
+
+
+def _report_credentials(cfg, args):
+    """Say what the capture did with the credentials it saw — after the store has them.
+
+    Three cases, each said once: a credential the adaptor MINTS per conversation (the session
+    header the derivation found), credentials captured and stored (session credentials, which
+    expire), and names that were withheld with no value to store (re-supply by flag).
+    """
+    if not isinstance(cfg, dict):
+        return
+    held = cfg.pop("_withheld_headers", None)
+    have = cfg.pop("_captured_credentials", None)
+    unused = cfg.pop("_captured_credentials_unused", None)
+    if cfg.get("session_header"):
+        _ok(f"{cfg['session_header']} is minted per conversation by the adaptor "
+            f"(create step: {cfg.get('session_endpoint')})")
+    if have:
+        _ok(f"authenticating as the captured session: {', '.join(sorted(have))}")
+        _warn("  these are SESSION credentials — they expire. If a long run starts failing "
+              "partway, re-capture the target.")
+        held = [h for h in (held or []) if h not in have]
+    if held:
+        _warn(f"withheld from the config (credential-shaped): {', '.join(held)}")
+        _warn("  re-supply with --header 'Name: value' or --bearer / --api-key, "
+              "or set the value in the config yourself; the names are recorded, "
+              "never the values.")
+    if unused:
+        _warn(f"  {unused.get('why')}")
+
+
+def _apply_flag_auth_to_saved(cfg, args, cfg_name):
+    """`--header` / `--bearer` / `--api-key` / `--basic` / `--cookie` on a `--config` re-run.
+
+    Every source branch folds the auth flags into the config it derives (`_target_auth` →
+    `_bake_auth` → `_finalize_target_auth`); the `--config` branch loaded the file and ignored
+    them, silently. MEASURED 2026-10-09: `target add --config lab-session --header 'x-lab-code: …'`
+    registered an application whose record carried Content-Type, Cookie and X-Conv-Token and no
+    x-lab-code — the flag that was typed was the one thing missing. Same three steps here, and
+    the file is rewritten only when something changed, so a plain `--config` re-run stays
+    byte-identical.
+    """
+    headers, query = _target_auth(args)
+    if not headers and not query:
+        return cfg, None
+    before = json.dumps(cfg, sort_keys=True, default=str)
+    cfg = _finalize_target_auth(_bake_auth(cfg, headers, query), args)
+    if json.dumps(cfg, sort_keys=True, default=str) == before:
+        return cfg, None
+    path, _name = _write_named_config(cfg, cfg_name, exact=True, quiet=True)
+    what = sorted(headers) + [f"?{k}" for k in query]
+    _ok(f"applied {', '.join(what)} from the command line to the saved config")
+    return cfg, path
 
 
 def _apply_login_auth(cfg, args):
@@ -4785,6 +4894,9 @@ def cmd_onboard(args):
         _step(1, total, f"using existing config '{args.config}'")
         cfg = _load_named_config(args.config)
         cfg_path = resolve_config_path(args.config) or cfg_path
+        cfg, _written = _apply_flag_auth_to_saved(cfg, args, cfg_name)
+        if _written:
+            cfg_path = _written
     elif getattr(args, "api", None) and _profile_for(args):
         # The target states its own contract. Read it, rather than infer a lesser one by probing.
         from runtime.discovery import profiles as P
@@ -4813,7 +4925,7 @@ def cmd_onboard(args):
     elif getattr(args, "api", None):
         # the simple-contract one-liner: one probe, no browser, no adapter to author
         _refuse_routed_probe(args.api)
-        _step(1, total, f"probing {args.api}")
+        _step(1, total, f"probing {_mask_urls(args.api)}")
         _guard_egress(args.api, args)
         from runtime.discovery.probe import probe_api, build_config
         auth_headers, auth_query = _prepare_target_auth(args)
@@ -4832,7 +4944,7 @@ def cmd_onboard(args):
         cfg_path, cfg_name = _write_named_config(cfg, cfg_name, exact=named_exactly)
     elif getattr(args, "ws", None):
         _refuse_routed_probe(args.ws)
-        _step(1, total, f"probing {args.ws}")
+        _step(1, total, f"probing {_mask_urls(args.ws)}")
         _guard_egress(args.ws, args)
         from runtime.discovery.probe import probe_ws, build_ws_config
         auth_headers, auth_query = _prepare_target_auth(args)
@@ -4849,7 +4961,7 @@ def cmd_onboard(args):
         if not res.get("ok"):
             _die(f"{res.get('diagnosis')}: {res.get('message')}\n  {res.get('hint','')}",
                  code=EXIT_ERROR)
-        _ok(f"WS {res['ws_url']} · frames {res['frames_seen']} · answer at "
+        _ok(f"WS {_mask_urls(res['ws_url'])} · frames {res['frames_seen']} · answer at "
             f"{res.get('response_path') or '(whole frame)'}")
         cfg = _finalize_target_auth(build_ws_config(res), args)
         cfg_path, cfg_name = _write_named_config(cfg, cfg_name, exact=named_exactly)
@@ -4874,7 +4986,7 @@ def cmd_onboard(args):
                 _ok(f"answer at {_found}")
         cfg_path, cfg_name = _write_named_config(cfg, cfg_name, exact=named_exactly)
     else:
-        _step(1, total, f"capturing the contract from {args.url or args.har}")
+        _step(1, total, f"capturing the contract from {_mask_urls(args.url or args.har)}")
         if args.url:
             _refuse_routed_probe(args.url)
             _guard_egress(args.url, args)
@@ -4906,25 +5018,21 @@ def cmd_onboard(args):
             ev = C.load_har(args.har, prompt_sent=args.prompt)
         res = C.classify_evidence(ev)
         cfg = _finalize_target_auth(_stamp_cdp(res.get("config") or {}, args), args)
-        _guard_egress(cfg.get("endpoint") or cfg.get("url"), args)
+        _guard_egress(cfg.get("endpoint") or cfg.get("url") or cfg.get("message_endpoint"), args)
         t = (res.get("layers") or {}).get("transport") or {}
-        _ok(f"transport {t.get('value')} (confidence {t.get('confidence')})")
+        sess = (res.get("layers") or {}).get("session") or {}
+        _ok(f"transport {t.get('value')} (confidence {t.get('confidence')})"
+            + (f" · session {sess.get('value')}" if sess.get("value") not in (None, "stateless") else ""))
         if res.get("unresolved"):
             _ok(f"unresolved layers: {res['unresolved']}")
+        # BEFORE the config is written and before anything validates: the config carries `env:`
+        # references and the store is what they resolve against.
+        _store_captured_credentials(res.get("secrets") or {}, cfg, args)
         cfg_path, cfg_name = _write_named_config(cfg, cfg_name, exact=named_exactly)
 
-    # Credentials are deliberately NOT baked into a config on disk, so say which ones were
-    # withheld. Dropping a header the target requires and staying quiet about it just moves the
-    # confusion: the config then 401s for no visible reason, which reads like a tool bug.
-    try:
-        _held = cfg.pop("_withheld_headers", None)
-        if _held:
-            _warn(f"withheld from the config (credential-shaped): {', '.join(_held)}")
-            _warn("  re-supply with --header 'Name: value' or --bearer / --api-key, "
-                        "or set the value in the config yourself; the names are recorded, "
-                        "never the values.")
-    except Exception:
-        pass
+    # Credentials are deliberately NOT baked into a config on disk, so say what became of each
+    # one: minted by the adaptor, stored from the capture, or withheld and to be re-supplied.
+    _report_credentials(cfg, args)
 
     _before_login = json.dumps(cfg, sort_keys=True, default=str)
     cfg = _apply_login_auth(cfg, args)
@@ -5235,10 +5343,18 @@ def _adaptor_app_headers(cfg, args):
     Returns (headers, moved_names, query_params).
     """
     from dispatch import merge_auth
-    headers = dict(cfg.get("headers") or {})
+    from runtime.discovery.codegen import safe_headers
+    headers, dropped = safe_headers(dict(cfg.get("headers") or {}))
+    if dropped:
+        _ok(f"browser fingerprint header(s) left off the record: {', '.join(dropped)}")
     moved, params = [], {}
     if cfg.get("auth"):
-        merged = merge_auth(cfg, timeout_s=min(float(getattr(args, "timeout", 20) or 20), 20.0),
+        # Merged on the FILTERED headers. `merge_auth` returns the config's own headers plus the
+        # credential, so merging the original config put every fingerprint header straight back
+        # on the record after the filter above had dropped it — invisible offline (no auth block
+        # in the test), measured live: three creates rejected with the filter "applied".
+        merged = merge_auth({**cfg, "headers": headers},
+                            timeout_s=min(float(getattr(args, "timeout", 20) or 20), 20.0),
                             verify_tls=not getattr(args, "insecure", False))
         if merged.get("_auth_error"):
             _die(f"the credential this target needs could not be resolved: {merged['_auth_error']}\n"
@@ -5255,6 +5371,7 @@ def _adaptor_app_headers(cfg, args):
             moved.append("Cookie")
         params = dict(merged.get("params") or {})
         moved += [k for k in params if k not in moved]
+    headers, _again = safe_headers(headers)      # the final set, whatever the merge added
     headers.setdefault("Content-Type", "application/json")
     return headers, moved, params
 
@@ -8325,6 +8442,35 @@ def cmd_adaptor_gate(args):
     _out({"ok": True, "data": _gate_payload(out)}, args, human=_gate_passed_text(out))
 
 
+def _mask_urls(value):
+    """`value` as display text with every credential-shaped query parameter masked.
+
+    The host-call trace prints what the adaptor did: `config.get` returns the app's URL and
+    `ws.connect` / `http.request` take it as an argument. A target behind an access code carries
+    it in that URL (`?code=…`), so the trace printed the credential in clear on every test and
+    verify — MEASURED on a WebSocket target 2026-10-09. Masked through the same rule the probe
+    uses to withhold a query credential from a config; headers under credential names inside the
+    request options are masked too. Never raises on the display path.
+    """
+    try:
+        from manual import redact, redact_text
+        return redact_text(str(redact(value)))
+    except Exception:                        # noqa: BLE001
+        return str(value)
+
+
+def _mask_state_value(fn, args):
+    """`host.state.set(slot, value)` carries what the adaptor minted — on a session target the
+    per-conversation token itself (measured: `state.conv.set … 'value': 'ct_…'` in clear). The
+    slot name is the useful part of that line; the value is shown as a masked tail only."""
+    if not (isinstance(fn, str) and fn.startswith("state.") and isinstance(args, dict)):
+        return args
+    v = args.get("value")
+    if not isinstance(v, str) or len(v) < 8:
+        return args
+    return {**args, "value": f"…{v[-4:]} ({len(v)} chars)"}
+
+
 def _render_host_calls(step):
     """The host-call transcript is the point of a test: "http.request to /conversation returned
     401 after the mint returned 200" is actionable where "status 500" is not."""
@@ -8332,8 +8478,9 @@ def _render_host_calls(step):
     for call in (step.get("host_calls") or []):
         err = call.get("error")
         lines.append(f"    {str(call.get('fn')):>14}  {str(call.get('ms', '?')):>7}ms  "
-                     f"{('ERROR ' + str(err)) if err else str(call.get('result'))[:80]}")
-        lines.append(f"    {'':>14}  args: {str(call.get('args'))[:110]}")
+                     f"{('ERROR ' + _mask_urls(err)) if err else _mask_urls(call.get('result'))[:80]}")
+        args = _mask_state_value(call.get("fn"), call.get("args"))
+        lines.append(f"    {'':>14}  args: {_mask_urls(args)[:110]}")
     return lines
 
 
