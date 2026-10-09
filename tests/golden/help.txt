@@ -63,7 +63,7 @@ COMPATIBILITY
                            adapter list      → target types
                            app create        → target add
                          `assess run` starts and stops the bridge itself, so there is no
-                         separate relay to operate; `bridge ls` stays useful as the alarm above.
+                         separate bridge to operate; `bridge ls` stays useful as the alarm above.
 
 Every command takes --json. `ascend target add --help` is the fastest way in.
 Full reference: docs/COMMAND_MAP.md  ·  building adapters: docs/BUILD_ADAPTER.md

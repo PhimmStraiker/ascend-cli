@@ -146,7 +146,7 @@ options:
   --via {auto,api,bridge}
                         how probes reach the target. auto (default): direct when the platform can
                         reach the endpoint and speak its contract, a bridge only when it cannot.
-                        api: direct or fail. bridge: force a local relay. (default: auto)
+                        api: direct or fail. bridge: force a local bridge. (default: auto)
   --workspace SLUG      which agent to target, on a host that serves several (see `target
                         inspect`) (default: None)
   --no-profile          ignore a contract the target publishes and probe the endpoint instead

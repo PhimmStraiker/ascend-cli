@@ -78,7 +78,7 @@ options:
 
 examples:
   ascend app create --name 'My Bot' --controls sys_prompt_leak
-      a bridge app (the default) — `ascend assess run` starts the relay for you
+      a bridge app (the default) — `ascend assess run` starts the bridge for you
 
   ascend app create --type api --name 'Public Bot' --config mybot \
       --target-api-key $KEY

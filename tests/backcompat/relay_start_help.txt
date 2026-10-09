@@ -34,7 +34,7 @@ options:
                         managed runs. (default: None)
   --foreground          run ONE bridge in this terminal (logs here, Ctrl-C stops it) instead of
                         detaching — for debugging an adapter. Needs --config. (default: False)
-  --capture PATH        write a jsonl transcript of every probe/result envelope the relay handles
+  --capture PATH        write a jsonl transcript of every probe/result envelope the bridge handles
                         (same as `runtime start --capture`) (default: None)
 
 examples:

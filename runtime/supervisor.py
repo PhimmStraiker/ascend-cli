@@ -193,11 +193,11 @@ def start(app_id: str, *, config: str, adapter: Optional[str], api_key: str,
         # supervise is the false pass this whole layer exists to prevent. Say so, with the two
         # paths that do work.
         return {"app_id": app_id, "error": (
-            "the supervised relay needs macOS or Linux (it is managed with POSIX signals). On "
-            "Windows run the relay in its own terminal with `ascend bridge start --app <name> "
+            "the supervised bridge needs macOS or Linux (it is managed with POSIX signals). On "
+            "Windows run the bridge in its own terminal with `ascend bridge start --app <name> "
             "--foreground`, or use WSL for the supervised form.")}
     if is_running(app_id):
-        return {"app_id": app_id, "error": "a relay is already running for this app",
+        return {"app_id": app_id, "error": "a bridge is already running for this app",
                 "pid": read_pid(app_id)}
     missing = _unresolved_env_refs(config)
     if missing:
@@ -205,7 +205,7 @@ def start(app_id: str, *, config: str, adapter: Optional[str], api_key: str,
         return {"app_id": app_id, "error": (
             f"config {config!r} authenticates by environment reference, but "
             f"{'these variables are' if len(missing) > 1 else 'this variable is'} not set in this "
-            f"shell: {names}. The relay would start and then be refused by the target on every "
+            f"shell: {names}. The bridge would start and then be refused by the target on every "
             f"probe, which scores as a clean run that measured nothing. "
             f"Export {'them' if len(missing) > 1 else 'it'} and start again."),
             "missing_env": missing}
@@ -227,8 +227,8 @@ def start(app_id: str, *, config: str, adapter: Optional[str], api_key: str,
         elif not _inline:
             _where = ", ".join(str(d) for d in config_dirs())
             return {"app_id": app_id, "error": (
-                f"config {config!r} not found, so the relay was not started. Looked in: {_where}. "
-                f"The relay runs from the CLI's own directory and cannot see a config that exists "
+                f"config {config!r} not found, so the bridge was not started. Looked in: {_where}. "
+                f"The bridge runs from the CLI's own directory and cannot see a config that exists "
                 f"only relative to this shell -- pass a path to it, or save it under "
                 f"~/.ascend/configs.")}
     except ImportError:
@@ -298,7 +298,7 @@ def start(app_id: str, *, config: str, adapter: Optional[str], api_key: str,
         if proc.poll() is not None:
             _clear(app_id)
             return {"app_id": app_id, "log": str(p["log"]),
-                    "error": f"relay exited at startup (code {proc.returncode}): {_log_tail(p['log'])}"}
+                    "error": f"bridge exited at startup (code {proc.returncode}): {_log_tail(p['log'])}"}
         st = read_status(app_id) or {}
         if st.get("pid") == proc.pid and st.get("state") in ("serving", "fatal"):
             break                                   # the child's first heartbeat: it is up
@@ -323,7 +323,7 @@ def stop(app_id: str, *, grace_s: float = 8.0) -> Dict[str, Any]:
     """
     pid = read_pid(app_id)
     if pid is None:
-        return {"app_id": app_id, "stopped": False, "reason": "no relay recorded"}
+        return {"app_id": app_id, "stopped": False, "reason": "no bridge recorded"}
     if not pid_alive(pid):
         _clear(app_id)
         return {"app_id": app_id, "stopped": False, "reason": "was not running (stale pidfile reaped)"}
