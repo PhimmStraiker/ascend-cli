@@ -13,6 +13,33 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ### Added
 
+- **`ascend adaptor`: the custom-adaptor loop, as CLI commands.** A custom *adaptor* is one
+  JavaScript file the Ascend engine runs against a target no template can drive — a login, a
+  token mint, a conversation that has to be opened first, a reply to poll for — stored on the app
+  as `request_template._adaptor_src`. It is not an *adapter* (the CLI's own Python, run on the
+  operator's side behind the bridge) and is spelled differently on purpose.
+  `docs/CUSTOM_ADAPTOR.md` has the procedure and the table that says which to reach for;
+  `skills/build-custom-adaptor/SKILL.md` is the agent workflow. The verbs, in the order the loop
+  runs them: `har <file> [--bodies]` (the session chain as the adaptor's step list, every value
+  redacted — `runtime/discovery/har_chains.py`), `shape --app` (the exact `return` the app's
+  `response_template` expects), `spec [--out]` (the host surface, `host.d.ts`),
+  `scaffold [--example] [--out]` (the shipped JavaScript in `templates/`), `gate <file>` (static,
+  no target; exit 2 with each violation's kind, detail and line when refused),
+  `test <file> --app <uuid> [--prompt …] [--budget]` (one real turn per prompt, with the host-call
+  transcript), `store <file> --app <name|aapp_id> [--dry-run]` (gated first and refused on any
+  violation; only `_adaptor_src` changes and every other template key is sent back as it was; a
+  bridge app is refused, since the engine cannot reach a bridged target; the write is read back
+  before it is reported), `get --app`, and `verify --app [--budget]` (runs what is stored — the
+  only proof the bytes landed). The engine's adapter routes live in `control/api.py` with a timeout
+  sized for the run budget rather than the client default; `runtime/discovery/egress.py` gains
+  `routed_name()` for `.tun.` / `.pl.straiker.ai` addresses; the binary bundles `templates/`.
+  Every verb takes `--json`.
+
+  Two ids meet here and are not interchangeable: `get`, `test` and `verify` take the engine's
+  application uuid (the one in the Console URL); `store` and `shape` take the platform's name or
+  `aapp_` id. The engine answers a bare 404 "could not be read" for an `aapp_` id; the CLI tries
+  what it is given, then explains that 404 by shape rather than passing it on.
+
 - **Routed names are settled before DNS.** A target under `.tun.straiker.ai` or `.pl.straiker.ai`
   is reached by Straiker itself: nothing runs on the operator's machine, and the name never
   resolves in public DNS. `target inspect`, `target check` and `target add` now recognise the

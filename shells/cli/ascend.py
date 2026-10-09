@@ -7479,6 +7479,468 @@ def cmd_ci(args):
     sys.exit(int(res.get("exit_code", EXIT_ERROR)))
 
 
+# ----------------------------------------------------------------------------- adaptor
+# The custom-adaptor loop: one JavaScript file that teaches the Ascend ENGINE how to talk to a
+# target whose auth or session cannot be written as a template. It runs on the Straiker side and
+# is stored on the app as request_template._adaptor_src. Distinct from `adapter` — the CLI's own
+# code, run on YOUR side behind the bridge — and spelled differently on purpose; runtime/adaptor.py
+# has the boundary and docs/CUSTOM_ADAPTOR.md the procedure. The rules live in runtime/adaptor.py
+# and the HTTP calls in control/api.py; only the command bodies are here.
+def _adaptor_mod():
+    import adaptor as AD   # runtime/adaptor.py — pure, offline
+    return AD
+
+
+def _adaptor_source(path):
+    """The adaptor file, as written. Unreadable is a usage error that names the path."""
+    try:
+        return Path(path).read_text(encoding="utf-8")
+    except OSError as e:
+        _die(f"cannot read {path}: {e}")
+
+
+def _adaptor_budget(args):
+    budget, why = _adaptor_mod().check_budget(getattr(args, "budget", None))
+    if why:
+        _die(why)
+    return budget
+
+
+def _adaptor_engine_ref(c, ref):
+    """The id to put on an engine adaptor route (`get`, `test`, `verify`).
+
+    An engine uuid (the one in the Console URL) is used as given. A name or an `aapp_` id is
+    resolved through the platform — so a typo is caught here, with a did-you-mean — and then tried
+    on the route anyway: the engine answers 404 for an id it cannot read, and `_adaptor_route_error`
+    turns that into the explanation. Trying rather than refusing by shape means the day the
+    gateway resolves `aapp_` ids on these routes, nothing here has to change.
+    """
+    if not ref:
+        _die("no application given: pass --app <engine uuid from the Console URL> "
+             "(or a name / aapp_ id, which the engine may not be able to read)")
+    if _adaptor_mod().is_engine_uuid(ref):
+        return ref
+    return _resolve_app(c, ref)
+
+
+def _adaptor_route_error(exc, app_id):
+    """Explain an engine adaptor-route failure instead of relaying it.
+
+    The engine answers 404 "application <id> could not be read" for ANY id it cannot resolve: an
+    `aapp_` token (the platform's encrypted form of the uuid, which it cannot decode), a uuid that
+    is not yours (it will not confirm another tenant's app exists), or garbage. Which of those it
+    was is only knowable from the shape of what was sent.
+    """
+    msg = str(exc)
+    if "-> 404" in msg and "could not be read" in msg:
+        if not _adaptor_mod().is_engine_uuid(app_id):
+            _die(f"the engine could not read application {app_id}: its adaptor routes take the "
+                 f"engine's application uuid, not the platform's aapp_ id, and this CLI cannot "
+                 f"convert one into the other.\n"
+                 f"  The uuid is in the Console URL for the app: .../applications/ascend/<uuid>\n"
+                 f"  then:  ascend adaptor get --app <uuid>",
+                 error_code="engine_uuid_required")
+        _die(f"the engine could not read application {app_id}: it does not exist, or it is not "
+             f"in this tenant — the API will not say which.", code=EXIT_ERROR,
+             error_code="app_unreadable")
+    if "-> 403" in msg:
+        _die(f"{msg}\n  the token is valid but lacks scope: running an adaptor needs both "
+             f"ascend:read and ascend:write (a PAT with Ascend read AND manage).",
+             code=EXIT_ERROR, error_code="forbidden")
+    raise exc
+
+
+def _gate_payload(out):
+    """The gate result minus `storeAs`, which is an echo of the source nobody asked for twice."""
+    data = {k: v for k, v in (out or {}).items() if k != "storeAs"}
+    data["preflight"] = _adaptor_mod().preflight_note((out or {}).get("gate") or {})
+    return data
+
+
+def _gate_refused(out, args, why):
+    """Print the refusal and stop with exit 2: the gate is a gate, so a refusal is a gate failure
+    (the findings exit code), not a tool error — a CI job can tell the two apart."""
+    g = (out or {}).get("gate") or {}
+    summary = out.get("summary") or "refused by the publish gate; nothing was executed"
+    lines = [f"FAIL  {summary}"]
+    if why:
+        lines.append(f"      {why}")
+    lines += [f"  {ln}" for ln in _adaptor_mod().violation_lines(g)]
+    _out({"ok": False, "data": _gate_payload(out),
+          "error": {"code": "gate_refused", "message": summary, "hint": why or None,
+                    "exit_code": EXIT_FINDINGS}},
+         args, human="\n".join(lines))
+    raise SystemExit(EXIT_FINDINGS)
+
+
+def _gate_passed_text(out):
+    g = out.get("gate") or {}
+    sizes = out.get("sizes") or {}
+    lines = [f"PASS  caps: {', '.join(g.get('caps') or []) or 'none'}"]
+    pre = _adaptor_mod().preflight_note(g)
+    if pre:
+        lines.append(f"      preflight: {pre}")
+    if sizes:
+        lines.append(f"      {sizes.get('bytes')} bytes -> {sizes.get('minifiedBytes')} minified -> "
+                     f"{sizes.get('encodedBytes')} as a template value   digest {out.get('digest')}")
+    return "\n".join(lines)
+
+
+def cmd_adaptor_spec(args):
+    """host.d.ts — the COMPLETE list of what exists inside the isolate. Read it before writing."""
+    c = _client(args)
+    spec = c.adapter_spec()
+    src = (spec.get("source") if isinstance(spec, dict) else None) or ""
+    if not src:
+        _die("the engine returned no spec source", code=EXIT_ERROR)
+    if getattr(args, "out", None):
+        p = Path(args.out)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(src, encoding="utf-8")
+        n = len(src.encode("utf-8"))
+        _out({"ok": True, "data": {"path": str(p), "filename": spec.get("filename"), "bytes": n}},
+             args, human=f"wrote {p}  ({n} bytes) — the capability surface. Keep it next to your "
+                         f"adaptor; the shipped scaffold is typed against ./host")
+        return
+    if getattr(args, "json", False):
+        _out({"ok": True, "data": spec}, args)
+        return
+    sys.stdout.write(src if src.endswith("\n") else src + "\n")
+
+
+def cmd_adaptor_gate(args):
+    """Static. No target. Fast. Run it after every edit."""
+    c = _client(args)
+    out = c.adapter_gate(_adaptor_source(args.file))
+    if not out.get("ok"):
+        _gate_refused(out, args, None)
+    _out({"ok": True, "data": _gate_payload(out)}, args, human=_gate_passed_text(out))
+
+
+def _render_host_calls(step):
+    """The host-call transcript is the point of a test: "http.request to /conversation returned
+    401 after the mint returned 200" is actionable where "status 500" is not."""
+    lines = []
+    for call in (step.get("host_calls") or []):
+        err = call.get("error")
+        lines.append(f"    {str(call.get('fn')):>14}  {str(call.get('ms', '?')):>7}ms  "
+                     f"{('ERROR ' + str(err)) if err else str(call.get('result'))[:80]}")
+        lines.append(f"    {'':>14}  args: {str(call.get('args'))[:110]}")
+    return lines
+
+
+def _render_scored(turn):
+    """The pipeline's view of the reply, and a loud complaint when it is not the answer."""
+    if "scored" not in turn or turn.get("scored") is None:
+        return []          # an older engine: nothing to judge, read `parsed`
+    problem = _adaptor_mod().scored_problem(turn)
+    if problem == "empty":
+        return ["  scored : (empty)  <- a detector would score NOTHING. The reply did not survive",
+                "           the app's response_template; check its shape: ascend adaptor shape"]
+    lines = [f"  scored : {str(turn.get('scored'))[:400]}"]
+    if problem == "unextracted":
+        lines += ["           ^ THIS IS WRONG. That is the whole body stringified, not the answer -",
+                  "             a detector will score it verbatim. Your reply shape and the app's",
+                  "             response_template disagree: run `ascend adaptor shape --app <app>`."]
+    return lines
+
+
+def _render_turns(out):
+    """Three views of each turn, scored FIRST: it is what ships, and the three can disagree."""
+    lines = []
+    if "preflight" in out:
+        pre = out.get("preflight")
+        if pre is None:
+            lines.append("preflight: no checkReachability - preflight will spend one real sendTurn")
+        else:
+            ok = pre.get("status_code") == 200
+            lines.append(f"preflight (checkReachability)  status={pre.get('status_code')}  "
+                         f"{pre.get('ms')}ms  {'ok' if ok else 'FAILED - would block the run'}")
+            if "body" in pre:
+                lines.append(f"  body   : {str(pre.get('body'))[:400]}")
+            lines += _render_host_calls(pre)
+    for t in (out.get("turns") or []):
+        status = t.get("status_code")
+        extra = f"  {t.get('requests')} request(s)" if t.get("requests") is not None else ""
+        lines.append("")
+        lines.append(f"turn {t.get('n')}  status={status}  {t.get('ms')}ms  "
+                     f"{'ok' if status == 200 else 'FAILED'}{extra}")
+        lines += _render_scored(t)
+        if "response" in t:
+            lines.append(f"  parsed : {str(t.get('response'))[:400]}")
+        if "body" in t:
+            lines.append(f"  raw    : {str(t.get('body'))[:400]}")
+        if t.get("diag"):
+            lines.append(f"  _diag  : {str(t['diag'])[:300]}")
+        lines += _render_host_calls(t)
+    return lines
+
+
+def _run_envelope(ok, out, verdict, code):
+    env = {"ok": ok, "data": out, "verdict": verdict}
+    if not ok:
+        env["error"] = {"code": code, "message": "; ".join(verdict.get("problems") or []) or code,
+                        "hint": None, "exit_code": EXIT_ERROR}
+    return env
+
+
+def cmd_adaptor_test(args):
+    """Run the file against the app's real target, one turn per prompt, and show what it DID."""
+    AD = _adaptor_mod()
+    c = _client(args)
+    src = _adaptor_source(args.file)
+    budget = _adaptor_budget(args)
+    app_id = _adaptor_engine_ref(c, args.app)
+    prompts = list(args.prompt or [AD.DEFAULT_PROMPT])
+    _say(args, f"Running {args.file} against the target of {app_id}: {len(prompts)} prompt(s), "
+               f"{budget:g}s budget. Each turn is a real conversation with a real system.")
+    import api
+    try:
+        out = c.adapter_test(src, app_id, prompts, budget)
+    except api.AscendAPIError as e:
+        _adaptor_route_error(e, app_id)
+    g = out.get("gate") or {}
+    if g and not g.get("ok"):
+        _gate_refused(out, args, "refused by the gate; nothing ran")
+    verdict = AD.summarize_run(out)
+    lines = _render_turns(out)
+    if not out.get("turns"):
+        lines.append(json.dumps(out, indent=2, default=str)[:1500])
+    lines += ["", "DONE" if verdict["ok"] else "NOT DONE"]
+    lines += [f"  - {p}" for p in verdict["problems"]]
+    if verdict["ok"]:
+        lines.append(f"  the scored line is a real answer on every turn. Store it:  "
+                     f"ascend adaptor store {args.file} --app <name|aapp_id>")
+    _out(_run_envelope(verdict["ok"], out, verdict, "test_failed"), args, human="\n".join(lines))
+    if not verdict["ok"]:
+        raise SystemExit(EXIT_ERROR)
+
+
+def cmd_adaptor_verify(args):
+    """Run what is STORED on the app — the only check that proves the bytes landed where you
+    think they did. It runs the stored adaptor, not the file on your disk."""
+    AD = _adaptor_mod()
+    c = _client(args)
+    budget = _adaptor_budget(args)
+    app_id = _adaptor_engine_ref(c, args.app)
+    _say(args, f"Running the adaptor stored on {app_id} against its target ({budget:g}s budget)...")
+    import api
+    try:
+        out = c.verify_app_adapter(app_id, budget)
+    except api.AscendAPIError as e:
+        _adaptor_route_error(e, app_id)
+    verdict = AD.summarize_run(out)
+    ok = verdict["ok"]
+    lines = [f"{'PASS' if ok else 'FAIL'}  {out.get('summary') or ''}".rstrip(),
+             f"  app={out.get('app_id')}  endpoint={out.get('endpoint')}  "
+             f"origin={out.get('origin')}  digest={out.get('digest')}"]
+    lines += _render_turns(out)
+    lines += [f"  - {p}" for p in verdict["problems"]]
+    if ok:
+        lines += ["", "Start a NEW assessment from the Console — not Rerun. An assessment snapshots",
+                  "the app when it is created, and Rerun replays the previous snapshot's adaptor."]
+    _out(_run_envelope(ok, out, verdict, "verify_failed"), args, human="\n".join(lines))
+    if not ok:
+        raise SystemExit(EXIT_ERROR)
+
+
+def cmd_adaptor_get(args):
+    """What the engine resolves for the app: origin, digest, and the stored source."""
+    c = _client(args)
+    app_id = _adaptor_engine_ref(c, args.app)
+    import api
+    try:
+        out = c.get_app_adapter(app_id)
+    except api.AscendAPIError as e:
+        _adaptor_route_error(e, app_id)
+    if not isinstance(out, dict):
+        _out({"ok": True, "data": out}, args)
+        return
+    head = {k: v for k, v in out.items() if k != "source"}
+    lines = [json.dumps(head, indent=2, default=str)]
+    if out.get("source"):
+        lines += ["", "--- source ---", str(out["source"]).rstrip("\n")]
+    _out({"ok": True, "data": out}, args, human="\n".join(lines))
+
+
+def cmd_adaptor_shape(args):
+    """The reply shape the app's response_template expects — the exact return statement to write.
+
+    The single most expensive thing to get wrong, because it does not fail: it scores. Read it
+    before writing a line.
+    """
+    AD = _adaptor_mod()
+    c = _client(args)
+    app_id = _resolve_app(c, args.app)
+    app = c.get_app(app_id)
+    try:
+        tpl = AD.parse_template(app.get("request_template"))
+    except ValueError:
+        tpl = None
+    stored = (tpl or {}).get(AD.TEMPLATE_KEY)
+    shape = AD.reply_shape(app.get("response_template"))
+    from discovery import egress
+    url = str(app.get("url") or "").strip()
+    kind, _real = egress.routed_name(url) if url else ("", "")
+    if stored == AD.PLACEHOLDER:
+        adaptor_line = f"{stored} - a placeholder: this app is waiting for its real adaptor"
+    elif isinstance(stored, str) and stored.startswith(AD.ALIAS_PREFIX):
+        adaptor_line = f"{stored} (an alias of an adaptor the engine ships)"
+    elif stored:
+        adaptor_line = f"<{len(str(stored))}b of base64> stored under {AD.TEMPLATE_KEY}"
+    else:
+        adaptor_line = "none stored"
+    data = {"app": {"id": app_id, "name": app.get("name"), "api_type": app.get("api_type"),
+                    "url": url, "routed": kind or None},
+            "adaptor": adaptor_line, "placeholder": stored == AD.PLACEHOLDER,
+            "request_template": (AD.template_for_display(tpl) if tpl is not None
+                                 else app.get("request_template")),
+            "response_template": app.get("response_template"), "reply_shape": shape}
+    lines = [f"name     {app.get('name')}", f"type     {_type_label(app.get('api_type'))}",
+             f"url      {url or '(none)'}"
+             + (f"   ({kind} name: the engine reaches it through the customer's network)" if kind else ""),
+             f"adaptor  {adaptor_line}", "",
+             "request_template:", json.dumps(data["request_template"], indent=2, default=str), "",
+             f"response_template:\n{app.get('response_template')}", ""]
+    if shape:
+        lines += [f"YOUR ADAPTOR MUST RETURN the reply at `{shape['path'] or '(the whole body)'}`:",
+                  f"    {shape['statement']}"]
+    else:
+        lines.append("No {{RESPONSE}} in the response_template - ask which field should carry the "
+                     "reply before writing the adaptor.")
+    _out({"ok": True, "data": data}, args, human="\n".join(lines))
+
+
+def cmd_adaptor_store(args):
+    """Gate the adaptor and write it onto the application.
+
+    Merged into the existing request_template, never written over it: the platform's PATCH
+    replaces the whole field, so "only `_adaptor_src` changes" means every other key is sent back
+    exactly as it was. The write is then read back, because a PATCH that returned is not a PATCH
+    that landed.
+    """
+    AD = _adaptor_mod()
+    c = _client(args)
+    src = _adaptor_source(args.file)
+    gated = c.adapter_gate(src)
+    if not gated.get("ok"):
+        _gate_refused(gated, args, "will not store an adaptor the gate refuses")
+    app_id = _resolve_app(c, args.app)
+    app = c.get_app(app_id)
+    if str(app.get("api_type") or "").lower() == "thin":
+        _die(f"{app.get('name')} ({app_id}) is a bridge app: its bridge client is its integration, "
+             f"and an adaptor runs in the engine, which cannot reach a bridged target.\n"
+             f"  Store the adaptor on an `api` app whose URL is the target's address.",
+             code=EXIT_ERROR, error_code="bridge_app")
+    try:
+        tpl = AD.parse_template(app.get("request_template"))
+    except ValueError as e:
+        _die(f"the application's request_template is not a JSON object ({e}); fix it in the "
+             f"Console before storing an adaptor into it", code=EXIT_ERROR, error_code="bad_template")
+    url = str(app.get("url") or "").strip()
+    problem = AD.address_problem(url, tpl)
+    if problem:
+        _die(problem, code=EXIT_ERROR, error_code="no_address")
+    key = gated.get("templateKey") or AD.TEMPLATE_KEY
+    value = gated.get("templateValue")
+    if not value:
+        _die("the gate passed but returned no template value to store", code=EXIT_ERROR)
+    dead, why = AD.dead_endpoint_keys(tpl, url, AD.is_inline_source(src))
+    merged, notes = AD.merge_source(tpl, key, value)
+    if dead:
+        notes.append(f"{', '.join(dead)} in the template would never be read ({why}); kept as "
+                     f"it was — remove it in the Console if it is not meant to be there")
+    for n in notes:
+        _warn(n)
+    from discovery import egress
+    kind, _real = egress.routed_name(url) if url else ("", "")
+    shape = AD.reply_shape(app.get("response_template"))
+    address = url or tpl.get("_adaptor_endpoint")
+    sizes = gated.get("sizes") or {}
+    data = {"app": {"id": app_id, "name": app.get("name"), "api_type": app.get("api_type")},
+            "address": address, "routed": kind or None, "template_key": key,
+            "digest": gated.get("digest"), "sizes": sizes,
+            "template": AD.template_for_display(merged), "reply_shape": shape, "notes": notes,
+            "dry_run": bool(getattr(args, "dry_run", False)), "stored": False}
+
+    def report(verb):
+        lines = [f"{verb:<8} digest {gated.get('digest')}  {sizes.get('bytes')}B -> "
+                 f"{sizes.get('encodedBytes')}B base64",
+                 f"app      {app.get('name')}  {app_id}",
+                 f"address  {address}"
+                 + (f"   ({kind} name: the engine reaches it through the customer's network)"
+                    if kind else ""),
+                 f"template {', '.join(merged)}"]
+        if shape:
+            lines.append(f"reply    {shape['statement']}   <- the shape response_template expects")
+        else:
+            lines.append("reply    no {{RESPONSE}} in the response_template - ask which field "
+                         "should carry the reply")
+        return lines
+
+    if getattr(args, "dry_run", False):
+        lines = report("would") + ["", "dry run: nothing was written. Drop --dry-run to PATCH "
+                                       "the template."]
+        _out({"ok": True, "data": data}, args, human="\n".join(lines))
+        return
+    _say(args, f"Storing {args.file} on {app.get('name')} ({app_id})...")
+    c.patch_app(app_id, {"request_template": json.dumps(merged, indent=2)})
+    after = c.get_app(app_id)
+    try:
+        landed = AD.parse_template(after.get("request_template")).get(key) == value
+    except ValueError:
+        landed = False
+    data["stored"] = landed
+    if not landed:
+        _out({"ok": False, "data": data,
+              "error": {"code": "store_unverified", "exit_code": EXIT_ERROR, "hint": None,
+                        "message": "the PATCH returned but reading the app back does not show "
+                                   "the adaptor"}},
+             args, human=f"FAIL  the PATCH returned, but reading the app back does not show the "
+                         f"adaptor under {key}. Nothing is proven; check the app in the Console.")
+        raise SystemExit(EXIT_ERROR)
+    lines = report("stored") + [
+        "", "Now prove it ran:  ascend adaptor verify --app <engine uuid from the Console URL>",
+        "Then start a NEW assessment, not Rerun: an assessment snapshots the app when it is created."]
+    _out({"ok": True, "data": data}, args, human="\n".join(lines))
+
+
+def cmd_adaptor_har(args):
+    """Read a HAR of the target: what must the adaptor do, and in what order? Offline, and it
+    prints no usable secret — the output is meant to be pasted into a chat with an agent."""
+    from discovery import har_chains
+    try:
+        rep = har_chains.read_chains(args.file, ignore=args.ignore, bodies=args.bodies)
+    except har_chains.HarError as e:
+        _die(str(e))
+    _out({"ok": True, "data": rep}, args, human=har_chains.render(rep))
+
+
+def cmd_adaptor_scaffold(args):
+    """The onboarding adaptor (or the worked thin example) — a working starting point."""
+    AD = _adaptor_mod()
+    kind = "example" if getattr(args, "example", False) else "scaffold"
+    try:
+        src = AD.template_js(kind)
+    except FileNotFoundError as e:
+        _die(str(e), code=EXIT_ERROR)
+    if getattr(args, "out", None):
+        p = Path(args.out)
+        if p.exists() and not getattr(args, "force", False):
+            _die(f"{p} exists — pick another name, or pass --force to overwrite it")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(src, encoding="utf-8")
+        _out({"ok": True, "data": {"path": str(p), "kind": kind, "bytes": len(src.encode("utf-8"))}},
+             args, human=f"wrote {p}  ({kind})\n"
+                         f"next:  ascend adaptor spec --out {p.parent / 'host.d.ts'}   # typed against ./host\n"
+                         f"       ascend adaptor gate {p}")
+        return
+    if getattr(args, "json", False):
+        _out({"ok": True, "data": {"kind": kind, "source": src}}, args)
+        return
+    sys.stdout.write(src)
+
+
 # ----------------------------------------------------------------------------- parser
 def _global_flags() -> argparse.ArgumentParser:
     """Global flags, as a parent parser.
@@ -7588,9 +8050,11 @@ WHEN SOMETHING IS WRONG
                          measured nothing. This is the one bridge command worth knowing.
 
 MORE
-  assess · chat · ci · controls · export · onboard · policy
+  adaptor · assess · chat · ci · controls · export · onboard · policy
   reports · status · target · tenant · version
   Run `ascend <command> --help` for any of these — each has its own flags and examples.
+  `adaptor` is the custom-adaptor loop: engine-side JavaScript for a target no template can
+  drive (a login, a token mint, a conversation to open, a reply to poll for).
 
 COMPATIBILITY
   app · adapter · keys · bridge
@@ -7606,6 +8070,7 @@ COMPATIBILITY
 
 Every command takes --json. `ascend target add --help` is the fastest way in.
 Full reference: docs/COMMAND_MAP.md  ·  building adapters: docs/BUILD_ADAPTER.md
+Custom adaptors (engine-side JavaScript): docs/CUSTOM_ADAPTOR.md
 """
 
 
@@ -8622,6 +9087,137 @@ def build_parser():
     s.add_argument("--quick", action="store_true",
                    help="skip the per-app assessment fan-out (fast, no live-run detail)")
     s.set_defaults(func=cmd_status)
+
+    # adaptor — the custom-adaptor loop. An ADAPTOR is engine-side JavaScript stored on the app
+    # (request_template._adaptor_src); an ADAPTER is this CLI's own, run on your side behind the
+    # bridge. Spelled differently on purpose; docs/CUSTOM_ADAPTOR.md has the procedure.
+    adx = sub.add_parser(
+        "adaptor", parents=[GLOBALS], formatter_class=_Fmt,
+        help="write, gate, test and store a custom adaptor: engine-side JavaScript for one app",
+        description=(
+            "Build the custom adaptor for one Ascend application.\n\n"
+            "An adaptor is one JavaScript file that teaches the Ascend engine how to hold a\n"
+            "conversation with a target whose auth or session is not a template: a login, a token\n"
+            "mint, a conversation that has to be opened first, a reply you poll for. It runs on the\n"
+            "Straiker side and is stored on the app as request_template._adaptor_src.\n\n"
+            "It is not an `adapter`. That is the CLI's own code, run on YOUR side behind the bridge\n"
+            "(`ascend target add` derives one). Reach for an adaptor when the engine must call the\n"
+            "target directly and a template cannot express the flow.\n\n"
+            "The loop:  har -> spec -> scaffold -> gate -> test -> store -> verify\n"
+            "`get`, `test` and `verify` take the ENGINE's application uuid (the one in the Console\n"
+            "URL, .../applications/ascend/<uuid>); `store` and `shape` take the name or aapp_ id."),
+        epilog=("examples:\n"
+                "  ascend adaptor har customer.har --bodies        # what the target takes, in order\n"
+                "  ascend adaptor shape --app 'My Bot'             # the reply shape to return\n"
+                "  ascend adaptor spec --out host.d.ts             # the capability surface\n"
+                "  ascend adaptor scaffold --out my_adaptor.js     # a working starting point\n"
+                "  ascend adaptor gate my_adaptor.js               # static; no target; fast\n"
+                "  ascend adaptor test my_adaptor.js --app <uuid> --prompt 'how do I reset it?'\n"
+                "  ascend adaptor store my_adaptor.js --app 'My Bot'\n"
+                "  ascend adaptor verify --app <uuid>              # runs what is STORED")
+    ).add_subparsers(dest="verb", required=True)
+    s = adx.add_parser("spec", parents=[GLOBALS], formatter_class=_Fmt,
+                       help="print host.d.ts: the complete capability surface inside the isolate",
+                       epilog=("examples:\n"
+                               "  ascend adaptor spec > host.d.ts\n"
+                               "  ascend adaptor spec --out host.d.ts"))
+    s.add_argument("--out", metavar="FILE", help="write it here instead of stdout")
+    s.set_defaults(func=cmd_adaptor_spec)
+    s = adx.add_parser("gate", parents=[GLOBALS], formatter_class=_Fmt,
+                       help="static check: will this file be allowed to run? (no target, fast)",
+                       epilog=("examples:\n"
+                               "  ascend adaptor gate my_adaptor.js\n"
+                               "  ascend adaptor gate my_adaptor.js --json    # includes templateValue\n\n"
+                               "exit 2 when refused; each violation names kind, detail and line."))
+    s.add_argument("file", help="the adaptor source (.js)")
+    s.set_defaults(func=cmd_adaptor_gate)
+    s = adx.add_parser("test", parents=[GLOBALS], formatter_class=_Fmt,
+                       help="run the file against the app's real target and show every host call",
+                       epilog=("examples:\n"
+                               "  ascend adaptor test my_adaptor.js --app <uuid>\n"
+                               "  ascend adaptor test my_adaptor.js --app <uuid> \\\n"
+                               "      --prompt 'how do I reset it?' --prompt 'and my password?'\n\n"
+                               "Read `scored :` first: it is what a detector will see. Each turn is a "
+                               "real conversation\nwith a real system, so change one thing per test."))
+    s.add_argument("file", help="the adaptor source (.js)")
+    s.add_argument("--app", required=True, metavar="UUID|NAME|aapp_id",
+                   help="the engine's application uuid (from the Console URL); a name or aapp_ id "
+                        "is tried and explained if the engine cannot read it")
+    s.add_argument("--prompt", action="append", metavar="TEXT",
+                   help="a prompt to send, one turn each (repeatable; default: one benign hello)")
+    s.add_argument("--budget", type=float, default=120.0,
+                   help="seconds the whole run may take (max 240)")
+    s.set_defaults(func=cmd_adaptor_test)
+    s = adx.add_parser("store", parents=[GLOBALS], formatter_class=_Fmt,
+                       help="gate the file and write it onto the app's request_template",
+                       epilog=("examples:\n"
+                               "  ascend adaptor store my_adaptor.js --app 'My Bot' --dry-run   # see the merge\n"
+                               "  ascend adaptor store my_adaptor.js --app 'My Bot'\n\n"
+                               "Gated first; refused on any violation. Only _adaptor_src changes - every "
+                               "other key in the\ntemplate is sent back as it was - and the write is read "
+                               "back before it is reported."))
+    s.add_argument("file", help="the adaptor source (.js)")
+    s.add_argument("--app", required=True, metavar="NAME|aapp_id",
+                   help="the application (platform side: a name or aapp_ id)")
+    s.add_argument("--dry-run", action="store_true",
+                   help="gate and show the merged template; write nothing")
+    s.set_defaults(func=cmd_adaptor_store)
+    s = adx.add_parser("get", parents=[GLOBALS], formatter_class=_Fmt,
+                       help="what the engine resolves for the app: origin, digest, stored source",
+                       epilog="examples:\n  ascend adaptor get --app <uuid>")
+    s.add_argument("--app", required=True, metavar="UUID|NAME|aapp_id",
+                   help="the engine's application uuid (from the Console URL); a name or aapp_ id "
+                        "is tried and explained if the engine cannot read it")
+    s.set_defaults(func=cmd_adaptor_get)
+    s = adx.add_parser("verify", parents=[GLOBALS], formatter_class=_Fmt,
+                       help="run what is STORED on the app: the only proof the bytes landed",
+                       epilog=("examples:\n"
+                               "  ascend adaptor verify --app <uuid>\n"
+                               "  ascend adaptor verify --app <uuid> --budget 60\n\n"
+                               "Runs the stored adaptor, not the file on your disk. If it fails after "
+                               "`test` passed, the\nstored bytes differ from the file you tested."))
+    s.add_argument("--app", required=True, metavar="UUID|NAME|aapp_id",
+                   help="the engine's application uuid (from the Console URL); a name or aapp_ id "
+                        "is tried and explained if the engine cannot read it")
+    s.add_argument("--budget", type=float, default=120.0,
+                   help="seconds the whole run may take (max 240)")
+    s.set_defaults(func=cmd_adaptor_verify)
+    s = adx.add_parser("shape", parents=[GLOBALS], formatter_class=_Fmt,
+                       help="the reply shape the app's response_template expects (read it first)",
+                       epilog=("examples:\n"
+                               "  ascend adaptor shape --app 'My Bot'\n\n"
+                               "The engine applies the response_template to whatever the adaptor returns. "
+                               "A reply of the\nwrong shape does not error: a detector scores the "
+                               "stringified wrapper instead of the answer."))
+    s.add_argument("--app", required=True, metavar="NAME|aapp_id",
+                   help="the application (platform side: a name or aapp_ id)")
+    s.set_defaults(func=cmd_adaptor_shape)
+    s = adx.add_parser("har", parents=[GLOBALS], formatter_class=_Fmt,
+                       help="read a HAR of the target: the session chain is the adaptor's step list",
+                       epilog=("examples:\n"
+                               "  ascend adaptor har customer.har\n"
+                               "  ascend adaptor har customer.har --bodies    # + JSON body shapes\n\n"
+                               "Offline. Values are redacted and bodies reduced to shapes, so the output "
+                               "can be pasted into\na chat. A HAR holds a live session: delete it when done."))
+    s.add_argument("file", help="a HAR export (DevTools -> Network -> Save all as HAR)")
+    s.add_argument("--bodies", action="store_true", help="also show JSON body shapes (keys and types)")
+    s.add_argument("--ignore", metavar="REGEX",
+                   default=r"\.(png|jpe?g|gif|svg|css|woff2?|ico|map)(\?|$)",
+                   help="URLs to drop")
+    s.set_defaults(func=cmd_adaptor_har)
+    s = adx.add_parser("scaffold", parents=[GLOBALS], formatter_class=_Fmt,
+                       help="print the onboarding adaptor (or --example, the worked thin one)",
+                       epilog=("examples:\n"
+                               "  ascend adaptor scaffold --out my_adaptor.js\n"
+                               "  ascend adaptor scaffold --example > chattie.js\n\n"
+                               "The scaffold reports 200 whenever the target ANSWERED - a 401 or a login "
+                               "page included -\nbecause at onboarding that reply is the spec for the "
+                               "adaptor you are about to write."))
+    s.add_argument("--out", metavar="FILE", help="write it here instead of stdout")
+    s.add_argument("--example", action="store_true",
+                   help="the worked thin adaptor (one POST, no session) instead of the scaffold")
+    s.add_argument("--force", action="store_true", help="overwrite an existing --out file")
+    s.set_defaults(func=cmd_adaptor_scaffold)
 
     s = sub.add_parser("doctor", parents=[GLOBALS], formatter_class=_Fmt,
                        help="preflight checks + version-vs-latest (--api-compat, --update)")

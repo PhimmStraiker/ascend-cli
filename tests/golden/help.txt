@@ -49,9 +49,11 @@ WHEN SOMETHING IS WRONG
                          measured nothing. This is the one bridge command worth knowing.
 
 MORE
-  assess · chat · ci · controls · export · onboard · policy
+  adaptor · assess · chat · ci · controls · export · onboard · policy
   reports · status · target · tenant · version
   Run `ascend <command> --help` for any of these — each has its own flags and examples.
+  `adaptor` is the custom-adaptor loop: engine-side JavaScript for a target no template can
+  drive (a login, a token mint, a conversation to open, a reply to poll for).
 
 COMPATIBILITY
   app · adapter · keys · bridge
@@ -67,4 +69,5 @@ COMPATIBILITY
 
 Every command takes --json. `ascend target add --help` is the fastest way in.
 Full reference: docs/COMMAND_MAP.md  ·  building adapters: docs/BUILD_ADAPTER.md
+Custom adaptors (engine-side JavaScript): docs/CUSTOM_ADAPTOR.md
 --- stderr

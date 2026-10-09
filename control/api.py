@@ -119,6 +119,16 @@ _JWT_REFRESH_SKEW_S = 60.0
 _JWT_ASSUMED_TTL_S = 300.0
 
 
+def _adapter_run_timeout(budget_s: float) -> float:
+    """The HTTP timeout for a call that runs an adaptor: its budget plus the engine's own
+    overhead (gate, isolate start, the reply). The client's 60s default would cut a 120s run off
+    mid-turn and report a transport error for a test that was still going."""
+    try:
+        return float(budget_s) + 60.0
+    except (TypeError, ValueError):
+        return 300.0
+
+
 class _BlockCookies:
     """Cookie policy that stores nothing (see the Session setup in AscendAPI.__init__)."""
     def set_ok(self, *_a, **_kw):
@@ -346,17 +356,19 @@ class AscendAPI:
             _jwt_cache_clear()
 
     def _req(self, method: str, path: str, *, json_body: Any = None, close_after: bool = False,
-             retry_auth: bool = True) -> Any:
+             retry_auth: bool = True, timeout: Optional[float] = None) -> Any:
         url = self.base + path
         headers = {"Authorization": f"Bearer {self._bearer()}",
                    **({"Connection": "close"} if close_after else {}),
                    "Content-Type": "application/json", "Accept": "application/json"}
-        r = self._s.request(method, url, headers=headers, json=json_body, timeout=self.timeout)
+        r = self._s.request(method, url, headers=headers, json=json_body,
+                            timeout=timeout or self.timeout)
         if r.status_code == 401 and retry_auth and self.token.startswith("s6r_pat_"):
             # The cached token was rejected — drop it from disk too, or the next process
             # re-reads a token the server already refused.
             self._forget_jwt()
-            return self._req(method, path, json_body=json_body, retry_auth=False)
+            return self._req(method, path, json_body=json_body, retry_auth=False,
+                             timeout=timeout)
         if r.status_code >= 400:
             raise AscendAPIError(f"{method} {path} -> {r.status_code}: {r.text[:500]}")
         if not r.content:
@@ -511,6 +523,43 @@ class AscendAPI:
     def recon_results(self, app_id: str, *, category: Optional[str] = None) -> Any:
         q = f"?category={category}" if category else ""
         return self._req("GET", f"/ascend/applications/{app_id}/recon/results{q}")
+
+    # ---- custom adaptors ------------------------------------------------------
+    # The engine-side JavaScript loop (see runtime/adaptor.py and docs/CUSTOM_ADAPTOR.md). These
+    # routes are served by the Ascend engine under the same /ascend prefix and are absent from the
+    # public OpenAPI document. `spec` and `gate` are static; `test` and `verify` EXECUTE an adaptor
+    # against the app's real target, which is why they take a run budget and get a timeout sized
+    # for it rather than the client's default.
+    #
+    # Two id spaces meet here. `get`, `test` and `verify` take the ENGINE's application id — the
+    # uuid in the Console URL — not the platform's `aapp_` token, which the engine cannot decode
+    # (it answers 404 "application … could not be read"). The CLI explains that 404 by shape.
+    def adapter_spec(self) -> Any:
+        """host.d.ts — the complete capability surface an adaptor has inside the isolate."""
+        return self._req("GET", "/ascend/adapters/spec")
+
+    def adapter_gate(self, source: str) -> Any:
+        """Static check: will this source be allowed to run? No target is contacted."""
+        return self._req("POST", "/ascend/adapters/gate", json_body={"adapterSource": source})
+
+    def adapter_test(self, source: str, app_id: str, prompts: List[str],
+                     budget_s: float) -> Any:
+        """Run inline source against the app's target, one turn per prompt, with the transcript."""
+        return self._req("POST", "/ascend/adapters/test",
+                         json_body={"adapterSource": source, "appId": app_id,
+                                    "prompts": list(prompts), "appConfig": {},
+                                    "runBudgetSeconds": budget_s},
+                         timeout=_adapter_run_timeout(budget_s))
+
+    def get_app_adapter(self, app_id: str) -> Any:
+        """What the engine resolves for the app: origin, digest, and the stored source."""
+        return self._req("GET", f"/ascend/applications/{app_id}/adapter")
+
+    def verify_app_adapter(self, app_id: str, budget_s: float) -> Any:
+        """Run what is STORED on the app — the only check that proves the bytes landed."""
+        return self._req("POST", f"/ascend/applications/{app_id}/adapter/verify",
+                         json_body={"runBudgetSeconds": budget_s},
+                         timeout=_adapter_run_timeout(budget_s))
 
     # ---- assessments ---------------------------------------------------------
     def create_assessment(self, app_id: str, name: str) -> Any:

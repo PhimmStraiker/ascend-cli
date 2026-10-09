@@ -38,6 +38,7 @@ pyinstaller \
   "${cfg_data[@]}" \
   --add-data "docs:docs" \
   --add-data "skills:skills" \
+  --add-data "templates:templates" \
   shells/cli/ascend.py
 
 echo

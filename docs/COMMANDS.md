@@ -21,3 +21,7 @@ The everyday surface is **`target`** — `add`, `list`, `show`, `check`, `rm` �
 Start here: **[BUILD_ADAPTER.md](BUILD_ADAPTER.md)** (connect to a target) and
 **[APP_TYPES.md](APP_TYPES.md)** (bridge/api/gcp/bedrock). To drive the CLI from an agent or a
 script, read **[AGENTS.md](AGENTS.md)** — the JSON contract and the stable exit codes.
+
+**`adaptor`** is a separate loop: a custom **adaptor** is engine-side JavaScript stored on an app,
+for a target no template can drive. `ascend adaptor har|shape|spec|scaffold|gate|test|store|verify`,
+documented in **[CUSTOM_ADAPTOR.md](CUSTOM_ADAPTOR.md)**. Not the same thing as an adapter.

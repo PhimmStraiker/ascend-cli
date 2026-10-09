@@ -347,6 +347,7 @@ Every command takes `--json`, `--token`, `--base`, `--bridge-base`.
 | Set up | `doctor` · `tenant show` · `controls list` · `controls validate` |
 | **Add a target** | **`target add\|list\|show\|check\|rm`** |
 | Build an adapter | `map` · `adapter list\|show\|configs\|validate` · `chat` |
+| Build a custom adaptor (engine-side JavaScript) | `adaptor har\|shape\|spec\|scaffold\|gate\|test\|store\|verify` |
 | Register | `app create\|list\|get\|bind\|delete` · `keys list\|add\|rm\|prune` · `policy set\|push` |
 | Run | `assess run\|watch\|pause\|resume\|list` · `onboard` · `bridge sync\|ls\|logs\|start\|stop` (auto-managed; `start` is advanced) |
 | Read results | `results` · `reports` · `export` · `ci` |
@@ -369,6 +370,7 @@ Full per-command flags, `--json` behaviour, and exit codes are in **`docs/COMMAN
 | `docs/USAGE.md` | Task-oriented how-tos (onboard, run, monitor, multi-turn, browser/terminal, enterprise) |
 | `docs/COMMANDS.md` | Full per-command reference for every `ascend` group/verb |
 | `docs/ADAPTER_AUTHORING.md` | The `BotAdapter` contract, config schema per adapter, how to add a new one |
+| `docs/CUSTOM_ADAPTOR.md` | Custom **adaptors**: engine-side JavaScript for a target no template can drive (`ascend adaptor`), and when to reach for one instead of an adapter |
 | `docs/MULTI_TURN.md` | How conversation/session state works over pull-mode; sequential vs concurrent; identity rotation |
 | `docs/CAPABILITY_MATRIX.md` | The deterministic 6-layer adapter model (transport/auth/lifecycle/session/identity/rate) |
 | `docs/SURFACE.md` | The one-core-three-shells product surface (CLI primary + skills + optional thin MCP) |

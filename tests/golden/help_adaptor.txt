@@ -1,0 +1,53 @@
+$ ascend adaptor --help
+--- exit 0
+--- stdout
+usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] adaptor
+       [-h] [--json] [--token TOKEN] [--base BASE] [--bridge-base BRIDGE_BASE]
+       {spec,gate,test,store,get,verify,shape,har,scaffold} ...
+
+Build the custom adaptor for one Ascend application.
+
+An adaptor is one JavaScript file that teaches the Ascend engine how to hold a
+conversation with a target whose auth or session is not a template: a login, a token
+mint, a conversation that has to be opened first, a reply you poll for. It runs on the
+Straiker side and is stored on the app as request_template._adaptor_src.
+
+It is not an `adapter`. That is the CLI's own code, run on YOUR side behind the bridge
+(`ascend target add` derives one). Reach for an adaptor when the engine must call the
+target directly and a template cannot express the flow.
+
+The loop:  har -> spec -> scaffold -> gate -> test -> store -> verify
+`get`, `test` and `verify` take the ENGINE's application uuid (the one in the Console
+URL, .../applications/ascend/<uuid>); `store` and `shape` take the name or aapp_ id.
+
+positional arguments:
+  {spec,gate,test,store,get,verify,shape,har,scaffold}
+    spec                print host.d.ts: the complete capability surface inside the isolate
+    gate                static check: will this file be allowed to run? (no target, fast)
+    test                run the file against the app's real target and show every host call
+    store               gate the file and write it onto the app's request_template
+    get                 what the engine resolves for the app: origin, digest, stored source
+    verify              run what is STORED on the app: the only proof the bytes landed
+    shape               the reply shape the app's response_template expects (read it first)
+    har                 read a HAR of the target: the session chain is the adaptor's step list
+    scaffold            print the onboarding adaptor (or --example, the worked thin one)
+
+options:
+  -h, --help            show this help message and exit
+  --json                machine-readable JSON output (default: False)
+  --token TOKEN         Straiker PAT (s6r_pat_...) or JWT; else $STRAIKER_PAT (default: None)
+  --base BASE           v3 API base URL (default: https://api.prod.straiker.ai/api/v3)
+  --bridge-base BRIDGE_BASE
+                        Ascend lease-service base URL (where bridges fetch probes and post
+                        results) (default: https://ascendai-bridge.prod.straiker.ai)
+
+examples:
+  ascend adaptor har customer.har --bodies        # what the target takes, in order
+  ascend adaptor shape --app 'My Bot'             # the reply shape to return
+  ascend adaptor spec --out host.d.ts             # the capability surface
+  ascend adaptor scaffold --out my_adaptor.js     # a working starting point
+  ascend adaptor gate my_adaptor.js               # static; no target; fast
+  ascend adaptor test my_adaptor.js --app <uuid> --prompt 'how do I reset it?'
+  ascend adaptor store my_adaptor.js --app 'My Bot'
+  ascend adaptor verify --app <uuid>              # runs what is STORED
+--- stderr

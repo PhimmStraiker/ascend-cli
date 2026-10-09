@@ -39,7 +39,7 @@ CANONICAL = ["bridge key", "transcript", "assessment", "adapter config", "contro
 def _all_help() -> str:
     """Every help screen the CLI can print, concatenated."""
     env = dict(os.environ, NO_COLOR="1", ASCEND_NO_SPINNER="1", STRAIKER_PAT="s6r_pat_test")
-    groups = ("app controls assess adapter map chat onboard results export ci bridge keys "
+    groups = ("app controls assess adapter adaptor map chat onboard results export ci bridge keys "
               "tenant policy status doctor version").split()
     out = [subprocess.run([sys.executable, str(CLI), "--help"],
                           capture_output=True, text=True, env=env).stdout]

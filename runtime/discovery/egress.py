@@ -12,8 +12,28 @@ metadata-adjacent service.
 """
 import ipaddress
 import socket
-from typing import Optional
+from typing import Optional, Tuple
 from urllib.parse import urlparse
+
+# App URLs the Ascend engine reaches through a customer's network — a tunnel agent or a private
+# link — which nothing outside that network can dial, this machine included. A custom adaptor
+# running in the engine reaches them; `ascend adapter build` / `target add` from here cannot.
+ROUTED_SUFFIXES = {".tun.straiker.ai": "tunnel", ".pl.straiker.ai": "private-link"}
+
+
+def routed_name(url: str) -> Tuple[str, str]:
+    """("tunnel" | "private-link", the real host or "") for a routed app URL, else ("", "").
+
+    A tunnel name is the real host plus `.tun.straiker.ai`, so the host a HAR shows is recoverable
+    from it; a private-link name is opaque.
+    """
+    u = url if "://" in (url or "") else "https://" + (url or "")
+    host = (urlparse(u).hostname or "").lower()
+    for suffix, kind in ROUTED_SUFFIXES.items():
+        if host.endswith(suffix):
+            return kind, host[: -len(suffix)] if kind == "tunnel" else ""
+    return "", ""
+
 
 # Hostnames that front cloud metadata regardless of the IP they resolve to.
 _METADATA_HOSTS = {"metadata.google.internal", "metadata", "instance-data",

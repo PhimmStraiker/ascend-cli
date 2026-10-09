@@ -1,0 +1,29 @@
+$ ascend adaptor store --help
+--- exit 0
+--- stdout
+usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] adaptor store
+       [-h] [--json] [--token TOKEN] [--base BASE] [--bridge-base BRIDGE_BASE] --app NAME|aapp_id
+       [--dry-run]
+       file
+
+positional arguments:
+  file                  the adaptor source (.js)
+
+options:
+  -h, --help            show this help message and exit
+  --json                machine-readable JSON output (default: False)
+  --token TOKEN         Straiker PAT (s6r_pat_...) or JWT; else $STRAIKER_PAT (default: None)
+  --base BASE           v3 API base URL (default: https://api.prod.straiker.ai/api/v3)
+  --bridge-base BRIDGE_BASE
+                        Ascend lease-service base URL (where bridges fetch probes and post
+                        results) (default: https://ascendai-bridge.prod.straiker.ai)
+  --app NAME|aapp_id    the application (platform side: a name or aapp_ id) (default: None)
+  --dry-run             gate and show the merged template; write nothing (default: False)
+
+examples:
+  ascend adaptor store my_adaptor.js --app 'My Bot' --dry-run   # see the merge
+  ascend adaptor store my_adaptor.js --app 'My Bot'
+
+Gated first; refused on any violation. Only _adaptor_src changes - every other key in the
+template is sent back as it was - and the write is read back before it is reported.
+--- stderr
