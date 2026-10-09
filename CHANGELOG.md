@@ -11,6 +11,40 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ## [Unreleased]
 
+### Added
+
+- **`ascend tunnel` — the Ascend tunnel agent, run from the CLI.** `ascend-tunnel` is Straiker's
+  open-source agent (github.com/straiker-ai/ascend-tunnel) for a private or local target: it runs
+  on a machine that can reach the target, opens one outbound HTTPS connection to Straiker, and
+  Ascend reaches the target through it at `https://<host>.tun.straiker.ai/<path>`. The tunnel is
+  an L4 path (Ascend speaks to the target itself); the bridge stays the L7 path (the CLI runs the
+  adapter here). `tunnel check` runs the agent's own preflight and prints its lines as they come
+  — WAIT on the key line is the expected state until an app lists the key, and only a FAIL exits
+  1; `tunnel key` prints the public key and never reads the private half; `tunnel start` runs the
+  agent detached on the bridge supervisor's contract (pid, log and status under the CLI's state
+  dir, a start-up death reported with its exit code, `--foreground` for a terminal or Windows);
+  `tunnel ls` shows liveness and the link state read from the agent's log (up, waiting,
+  reconnecting); `tunnel stop` and `tunnel logs`; `tunnel url` states the URL rule for one target
+  (no port in the URL, the port in the allow entry, one entry per host, a DNS name never an IP,
+  the key listed on the app). `--env dev|stage|prod` selects the Straiker endpoint — by default
+  the environment `--base` names — with `--relay` / `--host-key` overriding it and `--ca-file` for
+  a TLS-inspecting proxy; HTTPS_PROXY / NO_PROXY are honoured as the agent honours them. The agent
+  is `ascend-tunnel` on PATH, else `ghcr.io/straiker-ai/ascend-tunnel:0.1.0` with the agent's
+  state directory as the container's volume, run as this user, the proxy variables passed in by
+  name and host.docker.internal mapped; every verb says which it used, and neither available
+  prints the install paths. An allow entry the agent would refuse is refused here first, in the
+  agent's words, before anything is spawned. (`runtime/tunnel.py`; `tests/test_tunnel_rules.py`,
+  `tests/test_tunnel_command.py`)
+- **`ascend app tunnel-keys <app> --add|--remove|--list`.** Edits `_tunnel_agent_keys` in the
+  app's request template through the app PATCH, keeping every other template key, and prints the
+  record read back — a PATCH that returned is not a PATCH that landed. A key line is validated
+  the engine's way (ssh-ed25519, ecdsa-sha2-nistp256 or ecdsa-sha2-nistp384; at most 20), taken
+  as the full line or the bare base64 the agent prints and stored as `<type> <base64>`; `--add`
+  with no value lists this machine's own key, a listed key is a no-op, `--remove` takes the line
+  or the agent's 8-character id and refuses one that is not listed, and a bridge app is refused
+  (nothing dials it). `ascend app --help` now lists the verb, so the back-compat baseline for
+  that one screen was re-recorded; every recorded legacy invocation prints what it did.
+
 ### Fixed
 
 - **A capture's mint-then-send chain derives the session shape.** `classify_session` found a

@@ -1,0 +1,29 @@
+$ ascend tunnel url --help
+--- exit 0
+--- stdout
+usage: ascend [--json] [--token TOKEN] [--base URL] <command> [<verb>] [flags] tunnel url
+       [-h] [--json] [--token TOKEN] [--base BASE] [--bridge-base BRIDGE_BASE] [--path /PATH]
+       HOST[:PORT]|URL
+
+The app's URL for a target behind the tunnel, and the allow entry that goes with it. The URL is https://<host>.tun.straiker.ai/<path> — the real host rides inside the name — and never carries a port: the port lives in the agent's allow list, one entry per host. http:// is for an app that speaks plain HTTP on port 80; wss:// for a WebSocket app. The host is a DNS name, never an IP address, since the name is what the agent dials. Offline; nothing is asked of the platform or the agent.
+
+positional arguments:
+  HOST[:PORT]|URL       the target as host[:port], or its real URL (its port and path are read
+                        from it)
+
+options:
+  -h, --help            show this help message and exit
+  --json                machine-readable JSON output (default: False)
+  --token TOKEN         Straiker PAT (s6r_pat_...) or JWT; else $STRAIKER_PAT (default: None)
+  --base BASE           v3 API base URL (default: https://api.prod.straiker.ai/api/v3)
+  --bridge-base BRIDGE_BASE
+                        Ascend lease-service base URL (where bridges fetch probes and post
+                        results) (default: https://ascendai-bridge.prod.straiker.ai)
+  --path /PATH          the app's own path, appended to the tunnel name (default: None)
+
+examples:
+  ascend tunnel url chat.corp.internal
+  ascend tunnel url api.corp.internal:8080 --path /v1/chat
+  ascend tunnel url https://api.corp.internal:8080/v1/chat    # the app's real URL
+  ascend tunnel url ws://bot.corp.internal:9000/socket --json
+--- stderr

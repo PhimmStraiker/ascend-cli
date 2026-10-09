@@ -43,6 +43,10 @@ CASES = {
     "help_adaptor_store": ["adaptor", "store", "--help"],
     "help_results":       ["results", "--help"],
     "help_status":        ["status", "--help"],
+    "help_tunnel":        ["tunnel", "--help"],
+    "help_tunnel_url":    ["tunnel", "url", "--help"],
+    # offline and deterministic: the URL rule applied to one target
+    "tunnel_url":         ["tunnel", "url", "api.corp.internal:8080", "--path", "/v1/chat"],
     "adapter_list":       ["adapter", "list"],
     "bad_out_dir":        ["adapter", "build", "--api", "http://127.0.0.1:1/x", "--out", "./"],
     "unknown_command":    ["not-a-command"],
