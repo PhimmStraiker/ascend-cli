@@ -180,16 +180,23 @@ Skills that orchestrate the CLI (never reimplement it). See `docs/SURFACE.md`.
 
 ---
 
-## Two ways to reach a target
+## Three ways to reach a target
 
-1. **`api` app (direct)** — Ascend calls the target endpoint itself. Use when the target is a
-   simple, reachable REST endpoint with stable auth. No runtime process needed.
-2. **`bridge` app (default)** — Ascend hands probes to *your* runtime; the CLI's built-in
-   bridge relays each probe to your adapter, which calls the target and returns the answer. Use
-   for anything that needs a browser, a session handshake, streaming reassembly, OAuth, or
-   egress from inside your network. `ascend assess run` auto-starts the bridge before probes are
-   scheduled and it self-stops when the run reaches a terminal state, with no manual serve step. The
-   `app create` call returns a **bridge key** (`tc-…`, shown once) that authenticates the bridge.
+1. **`api` app driven by a hosted adaptor (the default of `ascend target add`)** — the CLI
+   derives and proves the contract, generates one JavaScript adaptor from it, gates it through the
+   engine, stores it on a direct application (`request_template._adaptor_src`) and verifies it from
+   the stored bytes. Ascend runs it on its own side: a stream is reassembled, a session minted, a
+   socket driven — and nothing runs on your machine during the assessment. The file lands beside
+   the config as `<config>.adaptor.js`; `ascend adaptor` is the loop for editing and re-proving it
+   (`docs/CUSTOM_ADAPTOR.md`).
+2. **`api` app with a plain template (`--via api`)** — Ascend renders the request itself from
+   `request_template` / `response_template`. Only a public JSON endpoint with static auth can be one.
+3. **`bridge` app (`--via bridge`, DEPRECATED)** — Ascend hands probes to *your* runtime; the CLI's
+   built-in bridge forwards each probe to your adapter, which calls the target and returns the
+   answer. Still what carries a driven browser, a Python `--module` adapter and a login handshake no
+   generated adaptor runs yet. `ascend assess run` auto-starts the bridge before probes are
+   scheduled and it self-stops when the run reaches a terminal state. The `app create` call returns
+   a **bridge key** (`tc-…`, shown once) that authenticates the bridge.
 
 ---
 

@@ -25,6 +25,23 @@ shape it turns out to be, including the simple shape.
 
 `ascend` below means `python3 shells/cli/ascend.py` (or the installed binary).
 
+## `ascend target add` writes one for you
+
+The default registration IS an adaptor. `ascend target add <url | curl | har | config>` derives
+the contract, proves it against the live target, then generates an adaptor from it
+(`runtime/discovery/codegen_js.py`: one generator each for a direct request, an SSE/ndjson
+stream with an optional create step, a WebSocket, a create-then-message session API and a
+create/send/poll transcript; the onboarding scaffold for everything else), gates it through the
+engine, creates — or re-wires in place — a direct application whose URL is the transport's real
+address, whose headers carry the literal credentials the adaptor needs (an `env:` reference in the
+config is resolved onto the application record, because the engine cannot read your environment;
+the output says which), and whose `request_template` carries the prompt key, a FRESH
+`_adaptor_src` (never the one stored before) and `_adaptor_domains` for every host beyond the
+app's URL. It then runs `test` through the engine, confirms the store by reading the app back, and
+runs `verify`. The result says `transport: adaptor` and names the file it wrote beside the config,
+`<config>.adaptor.js` — the file to edit when the generated one is not enough, with the loop below.
+`--via api` keeps a plain template app (no adaptor); `--via bridge` is the deprecated local path.
+
 ## The loop
 
 ```
@@ -51,11 +68,13 @@ allowed to run" from "the tool broke") · `3` bad invocation.
 | the engine's application id | a uuid | `get`, `test`, `verify` | the Console URL for the app: `…/applications/ascend/<uuid>` |
 
 The `aapp_` token is an encrypted form of the uuid that the engine cannot decode, and no platform
-payload carries the uuid, so this CLI cannot convert one into the other. Give `get`/`test`/`verify`
-a name or an `aapp_` id and they try it anyway (the day the gateway resolves it, nothing changes);
-when the engine answers *"application … could not be read"* they explain this table and exit `3`.
-A uuid the engine cannot read exits `1`: it does not exist, or it is not in this tenant, and the
-API will not say which.
+payload carries the uuid. The one join is the Console's own listing: give `get`/`test`/`verify` a
+name or an `aapp_` id and the CLI resolves the uuid through it with your PAT's token
+(`control/console.py`), says so on stderr, and uses that. `--console-id <uuid>` overrides the
+lookup for the day the listing cannot be read; without either, the `aapp_` id is tried as given
+and, when the engine answers *"application … could not be read"*, the CLI explains this table and
+exits `3`. A uuid the engine cannot read exits `1`: it does not exist, or it is not in this
+tenant, and the API will not say which.
 
 ### The credential
 
@@ -359,7 +378,8 @@ When `verify` passes, tell the SE:
 
 - **Mint or widen a credential.** A PAT short of a scope is minted in the Console by someone whose
   role allows it; `ascend doctor` tells you what the key you have can do.
-- **Convert an `aapp_` id into the engine uuid**, or the reverse. The Console URL is the source.
+- **Mint the engine uuid.** It is joined through the Console's listing by name; when that fails
+  the Console URL is the source (`--console-id`).
 - **Detect a tunnel agent on this machine.** Whether a tunnel app's real host is reachable from here
   is a question for the customer's network team; the adaptor reaches it through the engine either
   way.
@@ -368,7 +388,9 @@ When `verify` passes, tell the SE:
 
 | Piece | Where |
 |---|---|
-| the pure rules (template merge, reply shape, what a detector sees, the verdict) | `runtime/adaptor.py` |
+| the pure rules (template merge, reply shape, the local lint, what a detector sees, the verdict) | `runtime/adaptor.py` |
+| the generators `target add` uses (one per derived shape; the scaffold for the rest) | `runtime/discovery/codegen_js.py` |
+| the Console join (name → engine uuid) | `control/console.py` |
 | the HAR chain reader | `runtime/discovery/har_chains.py` |
 | routed-name detection (tunnel / private link) | `runtime/discovery/egress.py` |
 | the five engine routes | `control/api.py` (`adapter_spec`, `adapter_gate`, `adapter_test`, `get_app_adapter`, `verify_app_adapter`) |

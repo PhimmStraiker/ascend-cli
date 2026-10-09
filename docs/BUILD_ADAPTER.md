@@ -7,8 +7,15 @@ the bridge runs. A code adapter handles bespoke complexity that no fixed set of 
 
 ## Start here: `ascend target add`
 
-Onboarding a target is one command. It works out what you handed it, builds the adapter, proves it
-against the live target, registers the application, and stores the bridge key:
+Onboarding a target is one command. It works out what you handed it, derives the contract, proves
+it against the live target, and registers the application. **By default the application is a
+direct app driven by a hosted adaptor**: JavaScript generated from the proven contract, gated by
+the engine, stored on the app as `request_template._adaptor_src`, tested and verified through the
+engine — so nothing runs on your machine during the assessment. The generated file lands beside
+the config as `<config>.adaptor.js`; `ascend adaptor` is the loop for editing and re-proving it
+([CUSTOM_ADAPTOR.md](CUSTOM_ADAPTOR.md)). Everything in this document about running an adapter
+**here**, behind the bridge, is the old flow: it still works, it is reached with `--via bridge`,
+and it is deprecated.
 
 ```bash
 ascend target add https://your-bot.example.com/chat   # an HTTP endpoint
@@ -259,7 +266,13 @@ That is how you re-prove one that has started failing, before assuming the bridg
 
 ---
 
-## When the built-ins don't fit: `--code`
+## The old flow for the bridge: `--code` (deprecated)
+
+A Python adapter module runs on **your** machine behind the local bridge, and the bridge is
+deprecated: the default `ascend target add` generates a hosted adaptor the engine runs instead, and
+`ascend adaptor` ([CUSTOM_ADAPTOR.md](CUSTOM_ADAPTOR.md)) is the loop for a target no generator
+covers. `--code` is kept for a target that can only be reached from this machine and is used
+together with `--via bridge`.
 
 The built-in adapters cover the common shapes. For a target that fits none of them (an odd
 envelope, a signed request, a multi-step flow), add `--code`:

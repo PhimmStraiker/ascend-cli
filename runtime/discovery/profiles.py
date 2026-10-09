@@ -268,9 +268,19 @@ class CopilotStudio:
         if cls.is_power_platform_host(origin):
             return True
         status, body = _get(cls.token_url(origin), verify=verify)
-        if status in (401, 403):
+        if status == 200 and isinstance(body, dict) and bool(body.get("token")):
             return True
-        return status == 200 and isinstance(body, dict) and bool(body.get("token"))
+        if status in (401, 403):
+            # A refusal at the token path is the signal only when it is THAT path refusing. A
+            # host that answers 401 to every path it does not know — a passcode gate in front of
+            # a whole site, which is how a pilot's lab target is commonly fronted — is not a
+            # Copilot Studio agent. Measured: such a REST bot was called one, and `target add`
+            # then demanded an Entra token for it. A real tenant never reaches this GET (its
+            # host settles it above); a stand-in 404s the sibling.
+            sibling, _ = _get(origin.rstrip("/") + "/copilotstudio/directline/token-is-not-here",
+                              verify=verify)
+            return sibling not in (401, 403)
+        return False
 
     @classmethod
     def family(cls, origin: str, verify: bool = True) -> str:

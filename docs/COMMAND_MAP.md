@@ -151,6 +151,7 @@ what the engine resolves for the app: origin, digest, stored source
 | Flag | Value | Default | What it does |
 |---|---|---|---|
 | `--app` **(required)** | `UUID|NAME|aapp_id` | — | the engine's application uuid (from the Console URL); a name or aapp_ id is tried and explained if the engine cannot read it |
+| `--console-id` | `UUID` | — | the engine's application uuid (from the Console URL); wins over --app when the Console's listing cannot resolve a name or aapp_ id |
 
 ```bash
 ascend adaptor get --app <uuid>
@@ -253,6 +254,7 @@ run the file against the app's real target and show every host call
 | `--app` **(required)** | `UUID|NAME|aapp_id` | — | the engine's application uuid (from the Console URL); a name or aapp_ id is tried and explained if the engine cannot read it |
 | `--prompt` *(repeatable)* | `TEXT` | — | a prompt to send, one turn each (repeatable; default: one benign hello) |
 | `--budget` | `BUDGET` | `120.0` | seconds the whole run may take (max 240) |
+| `--console-id` | `UUID` | — | the engine's application uuid (from the Console URL); wins over --app when the Console's listing cannot resolve a name or aapp_ id |
 
 ```bash
 ascend adaptor test my_adaptor.js --app <uuid>
@@ -271,6 +273,7 @@ run what is STORED on the app: the only proof the bytes landed
 |---|---|---|---|
 | `--app` **(required)** | `UUID|NAME|aapp_id` | — | the engine's application uuid (from the Console URL); a name or aapp_ id is tried and explained if the engine cannot read it |
 | `--budget` | `BUDGET` | `120.0` | seconds the whole run may take (max 240) |
+| `--console-id` | `UUID` | — | the engine's application uuid (from the Console URL); wins over --app when the Console's listing cannot resolve a name or aapp_ id |
 
 ```bash
 ascend adaptor verify --app <uuid>
@@ -1159,7 +1162,8 @@ onboard a target from a URL, a cURL/HAR file, or a saved config
 | `--assessment-name` | `ASSESSMENT_NAME` | — | assessment name (default: '<app> run 1') |
 | `-v`, `--verbose` | — | — | debug logging for the bridge |
 | `--run` | — | — | continue into an assessment once the target is registered |
-| `--via` | `auto|api|bridge` | `auto` | how probes reach the target. auto (default): direct when the platform can reach the endpoint and speak its contract, a bridge only when it cannot. api: direct or fail. bridge: force a local bridge. |
+| `--via` | `auto|api|bridge` | `auto` | how probes reach the target. auto (default): a hosted adaptor generated from the proven contract, gated, stored on a direct app and verified through the engine — nothing runs on this machine. api: a plain template app (no adaptor), or fail. bridge: DEPRECATED — a local bridge process you keep alive for the whole run. |
+| `--console-id` | `UUID` | — | the engine's application uuid (from the Console URL) for the adaptor steps, when the Console's listing cannot resolve the app by name |
 | `--workspace` | `SLUG` | — | which agent to target, on a host that serves several (see `target inspect`) |
 | `--no-profile` | — | — | ignore a contract the target publishes and probe the endpoint instead |
 | `--purpose` | `PURPOSE` | — | one line on what the agent is for (business purpose) |
