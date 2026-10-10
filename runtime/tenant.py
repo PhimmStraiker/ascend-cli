@@ -145,14 +145,24 @@ def clear() -> bool:
         return False
 
 
+def state_base() -> Path:
+    """The directory the per-tenant state dirs live in: $ASCEND_STATE_DIR, else ~/.ascend/state.
+
+    State that belongs to this MACHINE rather than to a tenant — the tunnel agent's identity and
+    its records (tunnel.tunnel_dir) — lives directly under it, beside the per-tenant dirs, so it
+    resolves the same way whether or not a tenant is pinned yet.
+    """
+    env = os.environ.get("ASCEND_STATE_DIR")
+    return Path(os.path.expanduser(env)) if env else ASCEND_HOME / "state"
+
+
 def state_root(fingerprint: Optional[str] = None) -> Path:
     """Per-tenant state dir: $ASCEND_STATE_DIR > ~/.ascend/state/<fp16>.
 
     Tenant-scoped so a switch can never expose another tenant's keys or relay records.
     """
-    env = os.environ.get("ASCEND_STATE_DIR")
-    if env:
-        base = Path(os.path.expanduser(env))
+    base = state_base()
+    if os.environ.get("ASCEND_STATE_DIR"):
         # Still namespace by tenant fingerprint UNDER the override, so two customers worked from
         # one exported ASCEND_STATE_DIR do not share one keys.json / jwt.json.
         fp = fingerprint or _pinned_fingerprint()
@@ -161,4 +171,4 @@ def state_root(fingerprint: Optional[str] = None) -> Path:
     if fp is None:
         rec = load() or {}
         fp = rec.get("fingerprint")
-    return ASCEND_HOME / "state" / (str(fp)[:16] if fp else "unpinned")
+    return base / (str(fp)[:16] if fp else "unpinned")

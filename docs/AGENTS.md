@@ -196,7 +196,7 @@ all HTTP uses one pooled connection, so a second command in the same window cost
 | `ASCEND_POLICY` | path to the severity/gate policy file |
 | `ASCEND_NO_CACHE` | disable the response/JWT cache |
 | `ASCEND_NO_SPINNER` / `NO_COLOR` | plain, quiet output |
-| `ASCEND_STATE_DIR` | keys, bridge records, cache (per tenant) |
+| `ASCEND_STATE_DIR` | keys, bridge records, cache (per tenant); the tunnel agent's identity and records (per machine, beside the tenant dirs) |
 
 ## The CLI versus MCP
 

@@ -531,17 +531,119 @@ def key_from_output(stdout: str) -> Optional[str]:
 
 
 # ----------------------------------------------------------------------------- state files
+AGENT_DIR = "agent"
+KEPT_PREFIX = "agent-"          # a second identity folded in from a per-tenant directory
+RECORD_SUFFIXES = (".pid", ".log", ".json")
+
+
 def tunnel_dir() -> Path:
-    d = _tenant.state_root() / "tunnel"
+    """The tunnel directory: <state base>/tunnel — BESIDE the per-tenant state dirs, never inside one.
+
+    The agent's identity is this machine's, not a tenant's: the key is self-generated and listed
+    on apps by hand, and `check`, `key` and `start` take --org and ask nothing of the platform, so
+    they run before any tenant is pinned. Under the per-tenant root the directory moved with the
+    pin. MEASURED 2026-10-10 in a fresh home: `tunnel check` resolved state/unpinned/tunnel/agent
+    and minted one identity; `app tunnel-keys --add` then pinned the tenant, resolved
+    state/<fp16>/tunnel/agent, minted a second and listed THAT one — an operator who pasted the
+    key `check` printed had listed a key the agent never used. A tunnel started before the pin
+    vanished from `tunnel ls` the same way. A directory an earlier CLI left under a tenant (or
+    under `unpinned`) is folded in once; see adopt_legacy.
+    """
+    d = _tenant.state_base() / "tunnel"
+    adopt_legacy(d)
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
+def legacy_dirs() -> List[Path]:
+    """Every `tunnel/` directory an earlier CLI wrote under a per-tenant state dir: the pinned
+    tenant's first (the identity the CLI's own `--add` and `start` used once the pin existed),
+    then `unpinned`, then the rest newest first."""
+    base = _tenant.state_base()
+    try:
+        found = [p for p in base.glob("*/tunnel") if p.is_dir()]
+    except OSError:
+        return []
+    pinned = str((_tenant.load() or {}).get("fingerprint") or "")[:16]
+
+    def rank(p: Path):
+        name = p.parent.name
+        if pinned and name == pinned:
+            return (0, 0.0)
+        if name == "unpinned":
+            return (1, 0.0)
+        try:
+            return (2, -p.stat().st_mtime)
+        except OSError:
+            return (2, 0.0)
+    return sorted(found, key=rank)
+
+
+def _move(src: Path, dst: Path) -> bool:
+    """rename, else a copying move across devices. Never INTO an existing destination: a second
+    CLI process racing this one may have created it, and shutil.move would nest src inside it."""
+    try:
+        src.rename(dst)
+        return True
+    except OSError:
+        if dst.exists():
+            return False
+    try:
+        shutil.move(str(src), str(dst))
+        return True
+    except (OSError, shutil.Error):
+        return False
+
+
+def adopt_legacy(new: Path) -> List[Dict[str, str]]:
+    """Fold every per-tenant `tunnel/` directory into `new`. Returns what moved.
+
+    The first identity (in legacy_dirs' order) becomes `new/agent` when there is none yet; any
+    other is kept beside it as `new/agent-<tenant>`, never dropped: the CLI cannot tell which of
+    two keys an app lists without asking the platform, and leftovers() names it until it is
+    removed. Records (pid, log, status) move in unless `new` already holds that name, so a tunnel
+    started before the pin stays in `tunnel ls`; a directory emptied this way is removed. Nothing
+    of another tenant surfaces here: an identity is a key this machine generated.
+    """
+    moved: List[Dict[str, str]] = []
+    for old in legacy_dirs():
+        new.mkdir(parents=True, exist_ok=True)
+        src = old / AGENT_DIR
+        if src.is_dir():
+            dst = new / AGENT_DIR
+            if dst.exists():
+                dst = new / f"{KEPT_PREFIX}{_safe(old.parent.name)}"
+            if not dst.exists() and _move(src, dst):
+                moved.append({"from": str(src), "to": str(dst), "kind": "identity"})
+        for f in sorted(old.glob("*")):
+            if f.suffix not in RECORD_SUFFIXES or not f.is_file():
+                continue
+            dst = new / f.name
+            if not dst.exists() and _move(f, dst):
+                moved.append({"from": str(f), "to": str(dst), "kind": "record"})
+        try:
+            old.rmdir()                 # only when nothing was left behind
+        except OSError:
+            pass
+    return moved
+
+
+def leftovers() -> List[Path]:
+    """Identities kept beside the live one (agent-<tenant>), and any still under a per-tenant
+    directory because it could not be moved: each is a key this machine once generated, and an
+    app may list it rather than the live one. The key-bearing verbs name them until removed."""
+    d = _tenant.state_base() / "tunnel"
+    out = sorted(p for p in d.glob(f"{KEPT_PREFIX}*") if p.is_dir()) if d.is_dir() else []
+    out += [p / AGENT_DIR for p in legacy_dirs() if (p / AGENT_DIR).is_dir()]
+    return out
+
+
 def agent_state_dir(override: Optional[str] = None) -> Path:
     """Where the agent keeps its key: --state-dir, else $TUNNEL_STATE_DIR (the agent's own
-    variable, so an identity made by hand is reused), else under the CLI's state dir."""
+    variable, so an identity made by hand is reused), else under the tunnel directory — one
+    identity per machine, whichever tenant is pinned."""
     raw = override or os.environ.get("TUNNEL_STATE_DIR")
-    return Path(os.path.expanduser(raw)) if raw else tunnel_dir() / "agent"
+    return Path(os.path.expanduser(raw)) if raw else tunnel_dir() / AGENT_DIR
 
 
 def tunnel_id(org: Any, env: str) -> str:

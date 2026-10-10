@@ -22,13 +22,24 @@ Pins:
     container is removed by name on stop;
   * app tunnel-keys keeps every other template key, validates the line the engine's way, caps
     the list at 20, treats a listed key as a no-op, refuses an unlisted removal and a bridge app,
-    and reports a PATCH that did not land.
+    and reports a PATCH that did not land;
+  * the identity does not move with the tenant pin: in a fresh home, `check` (no platform call),
+    then `app tunnel-keys --add` (the PAT exchange pins the tenant), then `key` report ONE agent
+    id and leave ONE key file; a tunnel started before the pin is still in `ls` after it; a key an
+    earlier CLI left under a tenant's state dir is adopted, and a second one is kept and named.
+    The fake agent's FAKE_TUNNEL_MINT mode makes one identity per state directory, as the real
+    agent does — the fixed vector could not tell two directories apart.
 """
+import base64
+import hashlib
 import json
 import os
+import shutil
 import stat
+import struct
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -68,8 +79,24 @@ FAKE_AGENT = textwrap.dedent(f'''\
     state = flag("--state-dir")
     if state:
         os.makedirs(state, exist_ok=True)
-        with open(os.path.join(state, "agent.key"), "w") as fh:
-            fh.write({PRIVATE!r})
+        kf = os.path.join(state, "agent.key")
+        if os.environ.get("FAKE_TUNNEL_MINT"):
+            # As the real agent: one identity per state directory, made on first use and read
+            # back after. The public blob rides on the second line of the fake private file.
+            import base64, hashlib, struct
+            lines = open(kf).read().splitlines() if os.path.exists(kf) else []
+            KEY = lines[1] if len(lines) > 2 and lines[1].startswith("AAAAC3NzaC1lZDI1NTE5") else None
+            if not KEY:
+                KEY = base64.b64encode(struct.pack(">I", 11) + b"ssh-ed25519"
+                                       + struct.pack(">I", 32) + os.urandom(32)).decode()
+                with open(kf, "w") as fh:
+                    fh.write("-----BEGIN OPENSSH PRIVATE KEY-----\\n" + KEY
+                             + "\\nFAKEPRIVATEHALF\\n-----END OPENSSH PRIVATE KEY-----\\n")
+        else:
+            with open(kf, "w") as fh:
+                fh.write({PRIVATE!r})
+    import base64 as _b64, hashlib as _sha
+    AID = _sha.sha256(_b64.b64decode(KEY)).hexdigest()[:8]      # the agent's rule for its id
     org, allows = flag("--org"), flag("--allow", multi=True)
     endpoint = flag("--relay") or "wss://ascendai-bridge.prod.straiker.ai/tunnel"
 
@@ -82,14 +109,14 @@ FAKE_AGENT = textwrap.dedent(f'''\
         return ("http" if port == 80 else "https") + "://" + host + ".tun.straiker.ai"
     if cmd == "key":
         print(KEY)
-        print("# agent id {KEY_ID}: paste the line above into each Ascend app\'s _tunnel_agent_keys",
+        print("# agent id %s: paste the line above into each Ascend app\'s _tunnel_agent_keys" % AID,
               file=sys.stderr)
         sys.exit(0)
     if cmd == "check":
         if not org or not allows:
             print("ascend-tunnel: tenant (your Straiker org id) is required", file=sys.stderr)
             sys.exit(2)
-        print("INFO  org %s, agent {KEY_ID}" % org)
+        print("INFO  org %s, agent %s" % (org, AID))
         print("INFO  agent key (paste into the app\'s _tunnel_agent_keys): " + KEY)
         for a in allows:
             print("INFO  app URL for %s:%d: %s/... (the Ascend app\'s URL, with its path)" % (*addr(a), app_url(a)))
@@ -114,10 +141,10 @@ FAKE_AGENT = textwrap.dedent(f'''\
             print("ascend-tunnel: tenant (your Straiker org id) is required", file=sys.stderr)
             sys.exit(2)
         print(json.dumps({{"ts": "2026-10-09T00:00:00.000000+00:00", "event": "identity", "tenant": org,
-                          "agent_id": "{KEY_ID}", "agent_key": KEY, "app_urls": [app_url(a) for a in allows],
+                          "agent_id": AID, "agent_key": KEY, "app_urls": [app_url(a) for a in allows],
                           "hint": "paste agent_key into each Ascend app\'s _tunnel_agent_keys"}}), flush=True)
         print(json.dumps({{"ts": "2026-10-09T00:00:01.000000+00:00", "event": "waiting", "link": 0,
-                          "agent_id": "{KEY_ID}", "retry_every_s": 5,
+                          "agent_id": AID, "retry_every_s": 5,
                           "error": "no Ascend app lists this agent\'s key in _tunnel_agent_keys yet (or it was removed)"}}), flush=True)
         signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
         while True:
@@ -174,7 +201,7 @@ def state(tmp_path, monkeypatch):
     monkeypatch.setenv("ASCEND_NO_CACHE", "1")
     monkeypatch.setenv("NO_COLOR", "1")
     for v in ("TUNNEL_STATE_DIR", "STRAIKER_API_BASE", "FAKE_TUNNEL_FAIL", "FAKE_TUNNEL_LISTED",
-              "FAKE_TUNNEL_DIE", "FAKE_DOCKER_NO_IMAGE", *T.PROXY_VARS):
+              "FAKE_TUNNEL_DIE", "FAKE_TUNNEL_MINT", "FAKE_DOCKER_NO_IMAGE", *T.PROXY_VARS):
         monkeypatch.delenv(v, raising=False)
     return tmp_path / "state"
 
@@ -610,13 +637,14 @@ class Platform:
     carries it: a JSON string."""
 
     def __init__(self, *, keys=None, api_type="api", url="https://chat.corp.internal.tun.straiker.ai/v1/chat",
-                 lose_patch=False, template=None):
+                 lose_patch=False, template=None, jwt="JWT-test"):
         tpl = dict(template if template is not None else TEMPLATE)
         if keys is not None:
             tpl["_tunnel_agent_keys"] = list(keys)
         self.app = {"id": APP_ID, "name": "Support Bot", "api_type": api_type, "url": url,
                     "request_template": json.dumps(tpl), "response_template": '{"reply": "{{RESPONSE}}"}'}
         self.lose_patch = lose_patch
+        self.jwt = jwt                      # what the PAT exchange hands back; a real-shaped one pins
         self.patches = []
 
     def template(self):
@@ -626,7 +654,7 @@ class Platform:
         path = url.split("/api/v3", 1)[-1].split("?", 1)[0]
         body = kwargs.get("json")
         if url.endswith("/auth/token"):
-            return FakeResponse(200, {"access_token": "JWT-test"})
+            return FakeResponse(200, {"access_token": self.jwt})
         if path == "/ascend/applications" and method == "GET":
             return FakeResponse(200, {"object": "list", "data": [self.app], "has_more": False})
         if path == f"/ascend/applications/{APP_ID}":
@@ -782,3 +810,185 @@ def test_a_template_that_is_not_an_object_is_refused(cli, platform_factory):
     pf.app["request_template"] = "[1, 2]"
     code, out, _ = cli(["app", "tunnel-keys", APP_ID, "--json"])
     assert code == ascend.EXIT_ERROR and json.loads(out)["error"]["code"] == "bad_template"
+
+
+# --------------------------------------------------------------------------- the identity and the tenant pin
+def _jwt(sid="123", email="ops@example.test"):
+    """A PAT-exchange answer with the claims the tenant lock pins on (never verified here)."""
+    def b64(d):
+        return base64.urlsafe_b64encode(json.dumps(d).encode()).rstrip(b"=").decode()
+    return (f"{b64({'alg': 'none'})}."
+            f"{b64({'iss': 'https://idp.example/pool', 'straikerId': sid, 'email': email, 'role': 'admin', 'exp': int(time.time()) + 600})}.")
+
+
+def _plant(agent_dir: Path):
+    """An identity in the fake agent's own format, as an earlier CLI would have left it:
+    (public blob, agent id)."""
+    blob = base64.b64encode(struct.pack(">I", 11) + b"ssh-ed25519" + struct.pack(">I", 32)
+                            + os.urandom(32)).decode()
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "agent.key").write_text("-----BEGIN OPENSSH PRIVATE KEY-----\n" + blob
+                                         + "\nFAKEPRIVATEHALF\n-----END OPENSSH PRIVATE KEY-----\n")
+    return blob, hashlib.sha256(base64.b64decode(blob)).hexdigest()[:8]
+
+
+@pytest.fixture
+def fresh_home(tmp_path, monkeypatch, agent):
+    """A home no command has touched, with the single-tenant lock ON (no ASCEND_SKIP_TENANT_CHECK)
+    and no $ASCEND_STATE_DIR, so the state dir resolves the way it does on an operator's machine
+    and the first platform call pins the tenant. The fake agent mints one identity per state
+    directory, as the real one does.
+
+    `tenant` reads ASCEND_HOME at import, so the module's constants are pointed at the home — on
+    EVERY live copy of the module: in the full suite `sys.modules["tenant"]` is not always the
+    object `tunnel` bound at its own import, and patching only the former sent the first version
+    of these tests into the real ~/.ascend. The resolver is asserted to land under the home
+    before anything runs."""
+    home = tmp_path / "fresh-home"
+    monkeypatch.setenv("ASCEND_HOME", str(home))
+    copies = {id(m): m for m in list(sys.modules.values())
+              if getattr(m, "__name__", "").split(".")[-1] == "tenant"
+              and getattr(m, "__file__", None) and Path(m.__file__).name == "tenant.py"}
+    copies[id(T._tenant)] = T._tenant
+    for m in copies.values():
+        monkeypatch.setattr(m, "ASCEND_HOME", home)
+        monkeypatch.setattr(m, "TENANT_FILE", home / "tenant.json")
+    monkeypatch.delenv("ASCEND_STATE_DIR", raising=False)
+    monkeypatch.delenv("ASCEND_SKIP_TENANT_CHECK", raising=False)
+    monkeypatch.setenv("FAKE_TUNNEL_MINT", "1")
+    assert T._tenant.state_base() == home / "state", "the resolver must never leave tmp_path"
+    import tenant as TN
+    assert TN.TENANT_FILE == home / "tenant.json"
+    return home
+
+
+@pytest.mark.parametrize("state_dir_override", [False, True],
+                         ids=["default state dir", "ASCEND_STATE_DIR set"])
+def test_the_identity_is_the_same_before_and_after_the_tenant_pin(cli, fresh_home, platform_factory,
+                                                                   monkeypatch, state_dir_override):
+    """The sequence measured 2026-10-10: a fresh home, `tunnel check` first (no platform call, so
+    no tenant is pinned), then `app tunnel-keys --add` with no value (the PAT exchange pins the
+    tenant), then `tunnel key`. All three report one agent id, one key file exists under the
+    home, and the key listed on the app is that one."""
+    import tenant as TN
+    base = fresh_home / "state"
+    if state_dir_override:
+        base = fresh_home / "elsewhere"
+        monkeypatch.setenv("ASCEND_STATE_DIR", str(base))
+    pf = platform_factory(jwt=_jwt())
+    code, out, err = cli(["tunnel", "check", "--org", "123", "--allow", "localhost:8099", "--json"])
+    assert code == 0, err
+    first = json.loads(out)["data"]["agent_id"]
+    assert TN.load() is None                                   # check asked nothing of the platform
+    code, out, err = cli(["app", "tunnel-keys", APP_ID, "--add", "--json"])
+    assert code == 0, err
+    listed = json.loads(out)["data"]["added"]["agent_id"]
+    assert TN.load()["fingerprint"]                            # THIS call pinned the tenant
+    code, out, err = cli(["tunnel", "key", "--json"])
+    assert code == 0, err
+    third = json.loads(out)["data"]
+    assert first == listed == third["agent_id"], \
+        f"check reported {first}, --add listed {listed}, key printed {third['agent_id']}"
+    keys = sorted(str(p.relative_to(fresh_home)) for p in fresh_home.rglob("agent.key"))
+    assert keys == [str((base / "tunnel" / "agent" / "agent.key").relative_to(fresh_home))]
+    assert third["state_dir"] == str(base / "tunnel" / "agent")
+    assert pf.template()["_tunnel_agent_keys"] == [third["line"]]
+    assert "another tunnel identity" not in err                # nothing was left anywhere
+
+
+def test_a_tunnel_started_before_the_pin_is_still_listed_after_it(cli, fresh_home, platform_factory):
+    """The other documented order: `start` first, list the key it printed, then look. The pid,
+    log and status records live with the identity, so the pin does not lose a running tunnel."""
+    pf = platform_factory(jwt=_jwt())
+    try:
+        code, out, err = cli(["tunnel", "start", "--org", "123", "--allow", "a.corp", "--json"])
+        assert code == 0, err
+        started = json.loads(out)["data"]
+        code, out, err = cli(["app", "tunnel-keys", APP_ID, "--add", started["key"], "--json"])
+        assert code == 0, err                                 # pins the tenant
+        code, out, _ = cli(["tunnel", "ls", "--json"])
+        [row] = json.loads(out)["data"]["tunnels"]
+        assert row["pid"] == started["pid"] and row["agent_id"] == started["agent_id"]
+        assert row["state"] == "serving"
+        code, out, _ = cli(["tunnel", "stop", "--json"])
+        assert code == 0 and json.loads(out)["data"]["results"][0]["stopped"] is True
+    finally:
+        _stop_all(cli)
+
+
+def test_an_identity_left_under_the_tenant_dir_is_adopted_with_its_records(cli, fresh_home,
+                                                                            platform_factory):
+    """An earlier CLI kept the key under state/<fp16>/tunnel/agent — the identity `--add` listed
+    and `start` ran once the pin existed. It becomes the live identity; its records come along;
+    the emptied directory goes; nothing is said, since nothing is ambiguous."""
+    import tenant as TN
+    platform_factory(jwt=_jwt())
+    cli(["app", "tunnel-keys", APP_ID, "--json"])             # pins; a listing touches no tunnel dir
+    fp16 = TN.load()["fingerprint"][:16]
+    legacy = fresh_home / "state" / fp16 / "tunnel"
+    blob, aid = _plant(legacy / "agent")
+    (legacy / "9-prod.json").write_text(json.dumps({"id": "9-prod", "org": "9", "env": "prod"}))
+    (legacy / "9-prod.log").write_text("")
+    code, out, err = cli(["tunnel", "key", "--json"])
+    assert code == 0, err
+    d = json.loads(out)["data"]
+    assert d["agent_id"] == aid and d["key"] == blob
+    new = fresh_home / "state" / "tunnel"
+    assert (new / "agent" / "agent.key").read_text().splitlines()[1] == blob
+    assert (new / "9-prod.json").exists() and (new / "9-prod.log").exists()
+    assert not legacy.exists()
+    assert "another tunnel identity" not in err
+    code, out, _ = cli(["tunnel", "ls", "--json"])
+    assert [r["id"] for r in json.loads(out)["data"]["tunnels"]] == []   # no pid: not a tunnel
+
+
+def test_a_second_legacy_identity_is_kept_beside_the_live_one_and_named(cli, fresh_home,
+                                                                         platform_factory):
+    """Both the pre-pin (`unpinned`) and the pinned directory hold a key: the measured case. The
+    pinned tenant's becomes the live identity; the other is kept as agent-unpinned and named by
+    every key-bearing verb, because the CLI cannot tell which one an app lists. An explicit
+    --state-dir is the operator's choice, so nothing is said then; removing it ends the note."""
+    import tenant as TN
+    pf = platform_factory(jwt=_jwt())
+    cli(["app", "tunnel-keys", APP_ID, "--json"])
+    fp16 = TN.load()["fingerprint"][:16]
+    _, old_id = _plant(fresh_home / "state" / "unpinned" / "tunnel" / "agent")
+    _, aid = _plant(fresh_home / "state" / fp16 / "tunnel" / "agent")
+    live = fresh_home / "state" / "tunnel" / "agent"
+    kept = fresh_home / "state" / "tunnel" / "agent-unpinned"
+
+    code, out, err = cli(["tunnel", "key", "--json"])
+    assert code == 0 and json.loads(out)["data"]["agent_id"] == aid
+    assert (kept / "agent.key").exists() and not (fresh_home / "state" / "unpinned" / "tunnel").exists()
+    assert f"another tunnel identity is kept at {kept}" in err and f"this agent uses {live}" in err
+    assert "replace" in err and "delete it" in err
+    json.loads(out)                                             # stdout stayed one envelope
+
+    for argv in (["tunnel", "check", "--org", "123", "--allow", "a.corp", "--json"],
+                 ["app", "tunnel-keys", APP_ID, "--add", "--json"]):
+        code, out, err = cli(argv)
+        assert code == 0, err
+        assert f"another tunnel identity is kept at {kept}" in err, argv
+    assert pf.template()["_tunnel_agent_keys"][0].endswith(" " + (live / "agent.key").read_text().splitlines()[1])
+
+    code, out, err = cli(["tunnel", "key", "--state-dir", str(kept), "--json"])
+    assert code == 0 and json.loads(out)["data"]["agent_id"] == old_id
+    assert "another tunnel identity" not in err
+
+    shutil.rmtree(kept)
+    code, _, err = cli(["tunnel", "key", "--json"])
+    assert code == 0 and "another tunnel identity" not in err
+
+
+def test_the_tunnel_dir_resolves_the_same_with_and_without_a_pin(fresh_home, monkeypatch):
+    """The resolver itself: pinned or not, with or without $ASCEND_STATE_DIR, the tunnel
+    directory is <state base>/tunnel and never under a tenant."""
+    import tenant as TN
+    assert T.tunnel_dir() == fresh_home / "state" / "tunnel"
+    TN.pin("a" * 64, "example.test (admin)")
+    assert TN.state_root() == fresh_home / "state" / ("a" * 16)
+    assert T.tunnel_dir() == fresh_home / "state" / "tunnel"
+    monkeypatch.setenv("ASCEND_STATE_DIR", str(fresh_home / "elsewhere"))
+    assert TN.state_root() == fresh_home / "elsewhere" / ("a" * 16)
+    assert T.tunnel_dir() == fresh_home / "elsewhere" / "tunnel"
+    assert T.agent_state_dir() == fresh_home / "elsewhere" / "tunnel" / "agent"
