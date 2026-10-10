@@ -21,7 +21,6 @@ Config keys:
 """
 
 import json
-import re
 import time
 import logging
 from typing import Any, Dict
@@ -146,10 +145,8 @@ class DirectAPIAdapter(BotAdapter):
         # which this tool bakes into the endpoint itself. Never log or report the raw URL.
         def _safe(text):
             try:
-                from manual import redact_url
-                return redact_url(text) if isinstance(text, str) and text.startswith("http") \
-                    else re.sub(r"([?&](?:key|api_?key|access_token|token)=)[^&\s]+",
-                                r"\1[REDACTED]", str(text), flags=re.I)
+                from manual import redact_text    # the URL itself, or one inside an error message
+                return redact_text(str(text))     # by the shared rule: a list of four names lived here
             except Exception:
                 return text
 

@@ -28,6 +28,8 @@ import re
 import statistics
 from typing import Any, Dict, List, Optional, Tuple
 
+from target_secrets import is_secret_name, is_secret_param_name
+
 _SSE_ID_FIELDS = {"turn_id", "trace_id", "response_id", "id", "state",
                   "conversation_id", "message_id", "session_id"}
 
@@ -36,24 +38,26 @@ LAYER_NAMES = ("transport", "auth", "auth_lifecycle", "session", "identity", "ra
 # Confidence below this marks a layer "unresolved" (needs operator/agent input).
 LOW_CONF = 0.5
 
-# Header names that, if present on the chat request, carry an auth secret.
-_SECRET_HEADERS = {
-    "authorization", "x-api-key", "api-key", "apikey", "x-auth-token",
-    "x-authentication", "authentication", "x-access-token", "cookie",
-}
-_CSRF_HEADERS = {"x-csrf-token", "x-xsrf-token", "csrf-token", "x-csrftoken"}
-
-# `_SECRET_HEADERS` above is a fixed list of nine names, and it drove BOTH "is this auth?" and
-# "is this safe to bake into the config?". So a custom-named credential -- X-Tenant-Key,
+# Which header NAMES carry a credential is ONE rule, `target_secrets.is_secret_name` — the same
+# one the probe warns by, `safe_headers` redacts by and every printed config and capture file
+# masks by. A fixed list of nine names used to live here and drove BOTH "is this auth?" and "is
+# this safe to bake into the config?", so a custom-named credential -- X-Tenant-Key,
 # X-Subscription-Key, X-Nonce, X-Session-Token -- was neither recognised as auth NOR dropped, and
-# landed in the config on disk in cleartext beside `auth: none`. This module's own docstring
-# promises the opposite: secrets "carry an `env:` `value_ref` placeholder instead, and record
-# only the header". Recognition has to be open-ended, because the whole point is that the name
-# is one we have not seen before.
-_SECRETISH_NAME = re.compile(
-    r"(api[-_]?key|access[-_]?key|secret|token|signature|^x-sig|hmac|nonce|"
-    r"credential|password|passwd|pwd|bearer|session[-_]?(id|key|token)|"
-    r"subscription[-_]?key|tenant[-_]?key|client[-_]?(id|secret))", re.I)
+# landed in the config on disk in cleartext beside `auth: none`. Its open-ended successor, a
+# regex of this module's own, still missed `x-lab-code` (MEASURED 2026-10-09: the lab's access
+# code header, baked into the config in clear). Recognition has to be open-ended AND shared,
+# because the whole point is that the name is one nobody listed in advance.
+#
+# The classic API-key headers, for the auth-MODE finding below (`classify_auth`, step 3): one of
+# these is reported as `mode: api_key` with an `env:` reference the operator fills. A precedence
+# over KNOWN names, not the secret test: a credential under any other name is withheld by the
+# rule and reaches the target through the 0600 store, under a `mode: headers` block, with its
+# value intact (`captured_secret_headers`).
+_API_KEY_STYLE_HEADERS = ("x-api-key", "api-key", "apikey", "x-auth-token", "x-authentication",
+                          "authentication", "x-access-token")
+# Same kind of list, for the `csrf` mode finding (step 2): the headers a page-minted token is
+# echoed under. The rule already treats every one of them as a credential.
+_CSRF_STYLE_HEADERS = ("x-csrf-token", "x-xsrf-token", "csrf-token", "x-csrftoken")
 # Headers that routinely carry long opaque values and are NOT credentials. Without this an
 # entropy rule would strip the very headers a target needs to answer at all.
 _NEVER_SECRET = {
@@ -75,9 +79,7 @@ def _looks_secret_header(name_lower: str, value: str) -> bool:
     """
     if name_lower in _NEVER_SECRET:
         return False
-    if name_lower in _SECRET_HEADERS or name_lower in _CSRF_HEADERS:
-        return True
-    if _SECRETISH_NAME.search(name_lower):
+    if is_secret_name(name_lower):
         return True
     v = (value or "").strip()
     if name_lower.startswith("x-") and _OPAQUE_VALUE.match(v):
@@ -92,12 +94,8 @@ def _looks_secret_header(name_lower: str, value: str) -> bool:
 # place that prints one — the engine's host-call trace, the probe echo — has to know this list.
 # Mirrors `_looks_secret_header`: name first, entropy backstop, and a short allow-list so an
 # ordinary long public value (a model id, a locale) is not masked for no reason.
-_SECRET_PARAM_NAMES = frozenset({
-    "code", "key", "apikey", "api_key", "api-key", "token", "access_token", "access-token",
-    "auth", "authorization", "sig", "signature", "secret", "password", "passwd", "pwd", "jwt",
-    "bearer", "session", "sid", "session_id", "sessionid", "session-id", "client_secret",
-    "subscription-key", "subscription_key", "x-api-key", "appkey", "app_key", "passcode",
-})
+# The names are the shared rule's plus `target_secrets.QUERY_ONLY_SECRET_NAMES` (`code`, `key`,
+# `session`: credentials in a query string, nothing as a header); only the allow-list is local.
 _PLAIN_PARAM_NAMES = frozenset({
     "api-version", "api_version", "version", "v", "alt", "format", "lang", "locale", "stream",
     "model", "deployment", "id", "page", "limit", "offset", "q", "query", "type", "mode",
@@ -109,7 +107,7 @@ def _looks_secret_param(name: str, value: str) -> bool:
     n = (name or "").strip().lower()
     if not n or n in _PLAIN_PARAM_NAMES:
         return False
-    if n in _SECRET_PARAM_NAMES or _SECRETISH_NAME.search(n):
+    if is_secret_param_name(n):
         return True
     v = (value or "").strip()
     if _OPAQUE_VALUE.match(v) and len(v) >= 24:
@@ -936,7 +934,7 @@ def classify_auth(ev: Dict[str, Any], chat_idx: Optional[int]) -> Dict[str, Any]
                            "value_ref": "env:DISCOVERED_TOKEN"}}
 
     # 2) CSRF header echoed from a prior bootstrap.
-    for h in _CSRF_HEADERS:
+    for h in _CSRF_STYLE_HEADERS:
         if h in headers:
             origin = _reuse_origin(headers[h], prior_values)
             if origin is not None:
@@ -976,7 +974,7 @@ def classify_auth(ev: Dict[str, Any], chat_idx: Optional[int]) -> Dict[str, Any]
 
     # 3) API-key style headers.
     for name_lower, value in headers.items():
-        if name_lower in _SECRET_HEADERS and name_lower not in ("authorization", "cookie"):
+        if name_lower in _API_KEY_STYLE_HEADERS:
             return {"value": "static", "confidence": 0.8,
                     "evidence": f"API-key header '{name_lower}' on chat request",
                     "params": {"mode": "api_key", "in": "header",
@@ -2024,9 +2022,7 @@ def classify_evidence(evidence: Dict[str, Any]) -> Dict[str, Any]:
 def _nonsecret_headers(headers: Dict[str, str]) -> Dict[str, str]:
     """Keep request headers that are safe to bake into a config (drop secrets)."""
     keep = {}
-    drop = _SECRET_HEADERS | _CSRF_HEADERS | {
-        "content-length", "host", "connection", "accept-encoding",
-    }
+    drop = {"content-length", "host", "connection", "accept-encoding"}   # transport noise; secrets below
     for k, v in headers.items():
         if k in drop or k.startswith(":"):     # ':authority' etc. — HTTP/2 internals
             continue

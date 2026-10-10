@@ -62,6 +62,31 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ### Fixed
 
+- **One rule for which header names carry a credential.** A target whose access code arrives as
+  `x-lab-code` (and as a `Cookie`) was onboarded with `target add --header 'x-lab-code:
+  <literal>'`: the config held both literals and nothing warned — measured 2026-10-09 on the lab
+  target. The plaintext warning read the probe's own seven-name list, which only the `--api`
+  branch filled, and that list was one of five in this repo (`classify`'s regex, `manual`'s two
+  sets, `lease_client`'s capture mask, `har_chains`' report), each with its own vocabulary and
+  none with `x-lab-code`, `passcode`, `access_code` or `session_id`. The rule now lives once, in
+  `runtime/target_secrets.py` (`is_secret_name`): case-insensitive, on `-`/`_`/`.`/camelCase
+  boundaries — authorization, cookie, set-cookie, api-key, token, secret, password, credential,
+  bearer, signature, hmac, passcode, an access/lab/auth/api/app/client/invite code, session-id,
+  sid, … — and never `country_code`, `content-type`, `x-request-id`, `user-agent` or
+  `Idempotency-Key`, which a rule that withheld would 401 the target over. `codegen.safe_headers`
+  redacts by it (`[REDACTED]`, the format every other mask uses) unless the caller builds what the
+  platform sends (`redact=False`): the application record still carries the header, value
+  intact — that is what reaches the target — and the deprecated Python module keeps its literal
+  `HEADERS` for the same reason. The warning judges the headers the file will actually hold by
+  the rule, so a literal `x-lab-code` or `Cookie` on a `--config` re-run or a HAR onboarding now
+  gets the same `env:` hint an `Authorization` literal on the probe branch always did; an `env:`
+  reference and a `{{…}}` template are not literals. The classifier (what a capture withholds
+  and stores), the probe (`inline_secret_headers`), the HAR report, the printed-config and
+  host-call-trace mask, the capture file and `direct_api`'s error text all ask the one rule; the
+  private lists are deleted. Two lists stay on purpose and say so: `classify_auth`'s API-key /
+  CSRF mode findings and `_lift_api_key` pick WHICH known header is the api key — a precedence
+  that decides the auth mode and the record's `api_key`, not whether a name is a secret.
+  (`runtime/target_secrets.py`; `tests/test_secret_names.py`)
 - **A capture's mint-then-send chain derives the session shape.** `classify_session` found a
   minted id only when it reappeared in a later request's URL or body. A target that mints a
   per-conversation token and expects it back as a header (`POST …/conversations ->

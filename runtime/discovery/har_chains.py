@@ -25,12 +25,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
+from target_secrets import is_secret_name
+
 DEFAULT_IGNORE = r"\.(png|jpe?g|gif|svg|css|woff2?|ico|map)(\?|$)"
 
-# Request headers that carry a credential or a session. Reported redacted, with where the value
-# came from when an earlier response produced it.
-AUTH_HEADERS = ("authorization", "cookie", "x-api-key", "x-auth-token", "x-csrf-token",
-                "x-xsrf-token", "x-session-id", "api-key", "x-access-token", "proxy-authorization")
+# Request headers that carry a credential or a session are reported redacted, with where the
+# value came from when an earlier response produced it. Which names those are is the ONE rule,
+# `target_secrets.is_secret_name` — a list of ten names here left `x-lab-code` out of the report.
 
 # Only a value this long can be a token worth chaining; shorter strings ("ok", "en-US") match
 # everywhere and would invent steps.
@@ -128,7 +129,7 @@ def read_chains(path: str, *, ignore: Optional[str] = DEFAULT_IGNORE,
             "status": res.get("status", "?"), "content_type": ct.split(";")[0], "auth": [],
         }
         for h in req.get("headers") or []:
-            if str(h.get("name", "")).lower() not in AUTH_HEADERS:
+            if not is_secret_name(h.get("name", "")):
                 continue
             src = None
             for j, vals in produced.items():

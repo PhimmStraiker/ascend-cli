@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
+from target_secrets import REDACTED, is_secret_name
+
 logger = logging.getLogger("ascendbridge.lease")
 
 
@@ -147,19 +149,16 @@ class LeaseClient:
             self._last_call = time.time()
 
     # ---- capture ------------------------------------------------------------
-    _SENSITIVE_HEADERS = {"authorization", "cookie", "set-cookie", "x-api-key",
-                          "api-key", "x-csrf-token", "x-amz-security-token",
-                          "x-amz-access-token", "proxy-authorization"}
-
     def _redact(self, obj):
-        """Recursively redact known-sensitive header values before persisting.
-        Capture files hold whatever a target leaks — treat as sensitive, but never
-        persist request auth headers in the clear."""
+        """Recursively redact credential-shaped values before persisting — by the ONE rule,
+        `target_secrets.is_secret_name`, not a list of this file's own (which knew nine names
+        and not `x-lab-code`). Capture files hold whatever a target leaks — treat as sensitive,
+        but never persist request auth headers in the clear."""
         if isinstance(obj, dict):
             out = {}
             for k, v in obj.items():
-                if isinstance(k, str) and k.lower() in self._SENSITIVE_HEADERS:
-                    out[k] = "[REDACTED]"
+                if isinstance(k, str) and is_secret_name(k):
+                    out[k] = REDACTED
                 else:
                     out[k] = self._redact(v)
             return out
