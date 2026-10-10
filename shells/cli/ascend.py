@@ -1333,6 +1333,7 @@ def cmd_app_tunnel_keys(args):
         raw = args.add
         if raw == "@local":
             # No value: this machine's own tunnel key, exactly as `tunnel key` prints it.
+            _tunnel_leftovers(args, T, T.agent_state_dir(getattr(args, "state_dir", None)))
             runner = _tunnel_runner(args)
             raw = _tunnel_read_key(args, T, runner)
         try:
@@ -7026,6 +7027,19 @@ def _tunnel_read_key(args, T, runner, state_dir=None):
     return key
 
 
+def _tunnel_leftovers(args, T, sd):
+    """A second identity this machine once generated, kept beside the live one when the tunnel
+    directory moved out from under the per-tenant state dir: an app may list THAT key. Said by
+    every key-bearing verb until it is removed, and only for the default directory — an explicit
+    --state-dir / $TUNNEL_STATE_DIR is the operator's choice."""
+    if getattr(args, "state_dir", None) or os.environ.get("TUNNEL_STATE_DIR"):
+        return
+    for p in T.leftovers():
+        _warn(f"another tunnel identity is kept at {p} (generated before the tunnel directory "
+              f"moved beside the tenant directories; this agent uses {sd}). If an app lists that "
+              f"key rather than this agent's, replace {sd} with it; otherwise delete it.")
+
+
 def _tunnel_report(T, rec):
     """The pieces of a tunnel's state a human and an agent both need: where it runs, what it
     reaches, and the key to list."""
@@ -7039,6 +7053,7 @@ def cmd_tunnel_check(args):
     printed line for line. WAIT on the key line is the expected state until an app lists it."""
     T = _tunnel_mod()
     cfg = _tunnel_config(args)
+    _tunnel_leftovers(args, T, cfg["state_dir"])
     runner = _tunnel_runner(args)
     for n in T.docker_notes(runner, cfg["allow"]):
         _warn(n)
@@ -7101,8 +7116,9 @@ def cmd_tunnel_key(args):
     """This machine's tunnel key — the public half, as the agent prints it. The private half stays
     in the agent's state directory and is never read by the CLI."""
     T = _tunnel_mod()
-    runner = _tunnel_runner(args)
     sd = T.agent_state_dir(getattr(args, "state_dir", None))
+    _tunnel_leftovers(args, T, sd)
+    runner = _tunnel_runner(args)
     key = _tunnel_read_key(args, T, runner, state_dir=sd)
     try:
         rec = T.parse_key_line(key)
@@ -7125,6 +7141,7 @@ def cmd_tunnel_start(args):
     like a bridge), or in this terminal with --foreground."""
     T = _tunnel_mod()
     cfg = _tunnel_config(args)
+    _tunnel_leftovers(args, T, cfg["state_dir"])
     runner = _tunnel_runner(args)
     for n in T.docker_notes(runner, cfg["allow"]):
         _warn(n)
@@ -10533,7 +10550,8 @@ def build_parser():
                                 "TLS-inspecting proxy's")
         s.add_argument("--state-dir", metavar="DIR",
                        help="where the agent keeps its key (default: $TUNNEL_STATE_DIR, else "
-                            "<state dir>/tunnel/agent). Keep it, or the agent gets a new identity")
+                            "~/.ascend/state/tunnel/agent — one identity per machine, whichever "
+                            "tenant is pinned). Keep it, or the agent gets a new identity")
         s.add_argument("--runner", choices=["auto", "binary", "docker"], default="auto",
                        help="where the agent comes from: ascend-tunnel on PATH, or the Docker "
                             "image (auto: PATH first)")

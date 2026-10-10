@@ -62,6 +62,29 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ### Fixed
 
+- **The tunnel agent's identity no longer moves with the tenant pin.** The tunnel directory —
+  the agent's key, and the pid, log and status of every tunnel started here — lived under the
+  per-tenant state dir, which exists only once a platform call has pinned the tenant; and
+  `tunnel check`, `tunnel key` and `tunnel start` make none (they take `--org` and ask nothing of
+  the platform). Measured 2026-10-10 in a fresh home with the Docker runner: `tunnel check`
+  resolved `state/unpinned/tunnel/agent` and printed agent e3305088 with its key; `app
+  tunnel-keys <app> --add` then exchanged the PAT, pinned the tenant, resolved
+  `state/<fp16>/tunnel/agent`, generated a second identity (6e723448) and listed THAT one; a
+  second `check` reported 6e723448. An operator following the documented order — check, list the
+  key it printed, start — listed a key the agent never used, and a tunnel started before the pin
+  dropped out of `tunnel ls`. The directory is now `<state base>/tunnel` (`$ASCEND_STATE_DIR`,
+  else `~/.ascend/state`), beside the per-tenant directories and the same whether or not a
+  tenant is pinned: the identity is this machine's, not a tenant's — self-generated, listed on
+  apps by hand, and nothing of another tenant can surface through it. `--state-dir` and
+  `$TUNNEL_STATE_DIR` still override it. A directory an earlier CLI left under a tenant (or under
+  `unpinned`) is folded in once, the pinned tenant's first: its key becomes the live identity
+  when there is none yet, otherwise it is kept beside it as `agent-<tenant>` and the key-bearing
+  verbs name it until it is removed, since the CLI cannot tell which of two keys an app lists
+  without asking; its records come along, so `ls` and `stop` still see the tunnel. The
+  `--state-dir` help on `check`, `key` and `start` now says where the default is, so that line of
+  the command map was regenerated. (`runtime/tunnel.py`, `runtime/tenant.py`;
+  `tests/test_tunnel_command.py`, whose fake agent now mints one identity per state directory as
+  the real one does)
 - **One rule for which header names carry a credential.** A target whose access code arrives as
   `x-lab-code` (and as a `Cookie`) was onboarded with `target add --header 'x-lab-code:
   <literal>'`: the config held both literals and nothing warned — measured 2026-10-09 on the lab
