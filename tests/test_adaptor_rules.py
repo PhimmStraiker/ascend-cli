@@ -273,3 +273,39 @@ class TestShippedJavaScript:
     def test_an_unknown_kind_is_refused(self):
         with pytest.raises(ValueError):
             AD.template_js("nope")
+
+
+class TestRecordDigest:
+    """The record's basis: sha-256 of a template value as the record holds it, first 12 hex. The
+    one hashing site every verb goes through for `template_digest` and `stored_digest`."""
+
+    def test_the_recipe_is_pinned_to_known_vectors(self):
+        assert AD.record_digest("c3Jj") == "0daa5aa6a04c"
+        assert AD.record_digest("FRESH-ADAPTOR") == "354ed181b212"
+        assert AD.record_digest("v0:passthrough") == "b2bf54095507"
+
+    def test_twelve_hex_characters_of_sha256(self):
+        import hashlib
+        value = "ZnVuY3Rpb24gc2VuZFR1cm4oKSB7fQ=="
+        assert AD.record_digest(value) == hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+        assert len(AD.record_digest(value)) == 12
+
+    @pytest.mark.parametrize("value", [None, "", 0, 42, {}, [], b"c3Jj"])
+    def test_anything_but_a_non_empty_string_is_none_not_a_hash(self, value):
+        assert AD.record_digest(value) is None
+
+    def test_the_value_is_hashed_as_held_not_trimmed(self):
+        assert AD.record_digest("c3Jj\n") != AD.record_digest("c3Jj")
+        assert AD.record_digest(" c3Jj") != AD.record_digest("c3Jj")
+
+    def test_the_cli_hashes_nowhere_else(self):
+        """One hashing site (docs/CHANGE_CONTROL.md: test the call sites, not just the helper).
+        Every value the CLI puts under either key is `None` or comes out of record_digest, and the
+        CLI never imports hashlib for its own recipe."""
+        import re
+        src = (REPO / "shells" / "cli" / "ascend.py").read_text(encoding="utf-8")
+        assert "hashlib" not in src
+        sites = re.findall(r'(template_digest|stored_digest)["\'\]]*\s*[:=]\s*([^,}\n]+)', src)
+        assert len(sites) >= 5, sites            # store x2, target add x2, get x1
+        for key, value in sites:
+            assert value.strip() == "None" or value.strip().startswith("AD.record_digest("), (key, value)

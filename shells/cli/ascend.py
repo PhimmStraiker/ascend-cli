@@ -5553,9 +5553,12 @@ def _register_adaptor_app(c, args, cfg, adapter, app_name, *, existing, controls
     value = gated.get("templateValue")
     if not value:
         _die("the gate passed but returned no template value to store", code=EXIT_ERROR)
+    # The record's basis beside the gate's digest; stored_digest stays null until the read-back.
     record.update({"gated": True, "digest": gated.get("digest"),
+                   "template_digest": AD.record_digest(value), "stored_digest": None,
                    "preflight": AD.preflight_note(gated.get("gate") or {})})
-    _ok(f"gate PASS · digest {gated.get('digest')} · preflight: {record['preflight'] or 'n/a'}")
+    _ok(f"gate PASS · digest {gated.get('digest')} · template_digest {record['template_digest']} · "
+        f"preflight: {record['preflight'] or 'n/a'}")
 
     # 2. the application: URL = the transport's real address, headers = the literal credentials,
     #    template = the prompt key + a FRESH _adaptor_src (+ _adaptor_domains, parameters)
@@ -5655,6 +5658,9 @@ def _register_adaptor_app(c, args, cfg, adapter, app_name, *, existing, controls
             stored_tpl = AD.parse_template(after.get("request_template"))
         except ValueError:
             stored_tpl = {}
+    # What the record holds, measured: the gated bytes' digest when the write landed, the digest
+    # of whatever is still there (the placeholder, an older adaptor) when it did not.
+    record["stored_digest"] = AD.record_digest(stored_tpl.get(key))
     if stored_tpl.get(key) != value:
         record["stored"] = False
         _out({"ok": False, "data": {"app_id": app_id, "console_id": uuid, "adaptor": record},
@@ -5663,7 +5669,7 @@ def _register_adaptor_app(c, args, cfg, adapter, app_name, *, existing, controls
              args, human=f"FAIL  reading {app_id} back does not show the adaptor under {key}; "
                          f"nothing is proven. Check the app in the Console.")
         raise SystemExit(EXIT_ERROR)
-    _ok(f"stored · {key} confirmed on {app_id}")
+    _ok(f"stored · {key} confirmed on {app_id} · stored_digest {record['stored_digest']}")
 
     # 6. verify — what is STORED, run by the engine: the only proof the bytes landed
     try:
@@ -8788,16 +8794,27 @@ def _adaptor_engine_ref(c, ref, console_id=None):
     listing cannot be read the `aapp_` id is tried on the route anyway: the engine answers 404
     for an id it cannot read, and `_adaptor_route_error` turns that into the explanation.
     """
+    return _adaptor_engine_ref_and_app(c, ref, console_id)[0]
+
+
+def _adaptor_engine_ref_and_app(c, ref, console_id=None):
+    """`_adaptor_engine_ref`, plus the application record the resolution read on the way.
+
+    A name or an `aapp_` id is read from the platform to join it to the engine uuid; that record
+    is what `get` takes the stored adaptor's digest from, so it is handed back rather than read
+    twice. None when nothing was read: an engine uuid, or `--console-id`, goes on the route as
+    given and the platform is not asked.
+    """
     AD = _adaptor_mod()
     if console_id:
         if not AD.is_engine_uuid(console_id):
             _die("--console-id must be the engine's application uuid "
                  "(…/applications/ascend/<uuid> in the Console URL)")
-        return console_id
+        return console_id, None
     if not ref:
         _die("no application given: pass --app <name | aapp_id | engine uuid from the Console URL>")
     if AD.is_engine_uuid(ref):
-        return ref
+        return ref, None
     app_id = _resolve_app(c, ref)
     # The one join between the two id spaces: the Console's own listing, read with this PAT's
     # token. A name or aapp_ id resolves to the engine uuid here; when the listing cannot be read
@@ -8811,11 +8828,21 @@ def _adaptor_engine_ref(c, ref, console_id=None):
     if uuid:
         print(f"  note: {ref!r} is {app_id}; the engine knows it as {uuid} (resolved through the Console)",
               file=sys.stderr)
-        return uuid
+        return uuid, app or None
     why = getattr(c, "last_console_error", None)
     print(f"  note: the Console's listing did not resolve {ref!r} to an engine uuid"
           f"{f' ({why})' if why else ''}; trying {app_id} as given", file=sys.stderr)
-    return app_id
+    return app_id, app or None
+
+
+def _stored_adaptor_value(app):
+    """`_adaptor_src` as the application record holds it, or None — the value the record's
+    digest is taken over. A template that is not a JSON object holds nothing readable."""
+    AD = _adaptor_mod()
+    try:
+        return AD.parse_template((app or {}).get("request_template")).get(AD.TEMPLATE_KEY)
+    except ValueError:
+        return None
 
 
 def _adaptor_route_error(exc, app_id):
@@ -9070,9 +9097,13 @@ def cmd_adaptor_verify(args):
 
 
 def cmd_adaptor_get(args):
-    """What the engine resolves for the app: origin, digest, and the stored source."""
+    """What the engine resolves for the app: origin, digest, and the stored source — and
+    `stored_digest`, the record's own basis over `_adaptor_src` (runtime/adaptor.py,
+    record_digest), when the app was named through the platform and its record read on the way;
+    null for an engine uuid, which reads no record."""
+    AD = _adaptor_mod()
     c = _client(args)
-    app_id = _adaptor_engine_ref(c, args.app, getattr(args, "console_id", None))
+    app_id, app = _adaptor_engine_ref_and_app(c, args.app, getattr(args, "console_id", None))
     import api
     try:
         out = c.get_app_adapter(app_id)
@@ -9081,6 +9112,7 @@ def cmd_adaptor_get(args):
     if not isinstance(out, dict):
         _out({"ok": True, "data": out}, args)
         return
+    out = {**out, "stored_digest": AD.record_digest(_stored_adaptor_value(app))}
     head = {k: v for k, v in out.items() if k != "source"}
     lines = [json.dumps(head, indent=2, default=str)]
     if out.get("source"):
@@ -9184,13 +9216,18 @@ def cmd_adaptor_store(args):
     sizes = gated.get("sizes") or {}
     data = {"app": {"id": app_id, "name": app.get("name"), "api_type": app.get("api_type")},
             "address": address, "routed": kind or None, "template_key": key,
-            "digest": gated.get("digest"), "sizes": sizes,
+            "digest": gated.get("digest"), "template_digest": AD.record_digest(value),
+            "stored_digest": None, "sizes": sizes,
             "template": AD.template_for_display(merged), "reply_shape": shape, "notes": notes,
             "dry_run": bool(getattr(args, "dry_run", False)), "stored": False}
 
     def report(verb):
+        # The record's basis under the gate's digest: template_digest is of the bytes being
+        # written, stored_digest of what the record held when it was read back (n/a until then).
         lines = [f"{verb:<8} digest {gated.get('digest')}  {sizes.get('bytes')}B -> "
                  f"{sizes.get('encodedBytes')}B base64",
+                 f"record   template_digest {data['template_digest']}  stored_digest "
+                 f"{data['stored_digest'] or 'n/a'}   (sha-256 of {key}, first 12 hex)",
                  f"app      {app.get('name')}  {app_id}",
                  f"address  {address}"
                  + (f"   ({kind} name: the engine reaches it through the customer's network)"
@@ -9212,10 +9249,14 @@ def cmd_adaptor_store(args):
     c.patch_app(app_id, {"request_template": json.dumps(merged, indent=2)})
     after = c.get_app(app_id)
     try:
-        landed = AD.parse_template(after.get("request_template")).get(key) == value
+        after_tpl = AD.parse_template(after.get("request_template"))
     except ValueError:
-        landed = False
+        after_tpl = {}
+    landed = after_tpl.get(key) == value
     data["stored"] = landed
+    # Measured from the read-back, not assumed from `stored`: a write that did not land leaves the
+    # digest of whatever the record still holds.
+    data["stored_digest"] = AD.record_digest(after_tpl.get(key))
     if not landed:
         _out({"ok": False, "data": data,
               "error": {"code": "store_unverified", "exit_code": EXIT_ERROR, "hint": None,

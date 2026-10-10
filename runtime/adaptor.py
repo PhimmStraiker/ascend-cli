@@ -23,6 +23,7 @@ the whole body stringified.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
@@ -180,6 +181,26 @@ def merge_source(tpl: Dict[str, Any], key: str, value: str) -> Tuple[Dict[str, A
         notes.append("no {{PROMPT}} key in the template; the Console will refuse to save edits "
                      "to this app until there is one")
     return out, notes
+
+
+# ----------------------------------------------------------------------------- the record's basis
+def record_digest(value: Any) -> Optional[str]:
+    """sha-256 of a template value as the record holds it, first 12 hex: the gate's own recipe,
+    over the base64 instead of the source.
+
+    The gate's `digest` is of the stripped source and the engine's GET …/adapter prints a third;
+    neither can be rebuilt from the application record. A ledger that compares a workspace copy
+    of an adaptor against the record can only do it on the record's basis, so every verb that
+    holds one states it, hashed here and nowhere else: `template_digest` over the gate's
+    `templateValue` (the bytes a store writes) and `stored_digest` over `_adaptor_src` as it was
+    read back afterwards — identical when the write landed, the placeholder's hash when it did
+    not. None for anything but a non-empty string, so a value that was never read back prints as
+    null, never as the hash of ''. Not trimmed: base64 carries no whitespace, and a value is
+    hashed exactly as the record holds it.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
 
 
 # ----------------------------------------------------------------------------- the reply shape
