@@ -44,6 +44,21 @@ them is visible at a glance. A growing Regressions section is a process signal, 
   or the agent's 8-character id and refuses one that is not listed, and a bridge app is refused
   (nothing dials it). `ascend app --help` now lists the verb, so the back-compat baseline for
   that one screen was re-recorded; every recorded legacy invocation prints what it did.
+- **The record's digest beside the gate's.** The gate's `digest` is of the stripped source and
+  the engine's `GET …/adapter` prints a third; neither can be rebuilt from the application
+  record, so a ledger comparing a workspace copy of a hosted adaptor against what the app holds
+  had no basis the CLI stated and had to draft one. `ascend adaptor store --json` now carries
+  `template_digest` (sha-256 of the gate's `templateValue`, first 12 hex) and `stored_digest`
+  (the same recipe over `_adaptor_src` as the record held it when the write was read back; null
+  when nothing was read back — a dry run); the adaptor record `ascend target add --json` prints
+  on the hosted-adaptor default carries both; and `ascend adaptor get --json` carries
+  `stored_digest` when the app was named by name or aapp_ id (an engine uuid reads no platform
+  record, so it is null there). `stored_digest` is measured from the read-back, never inferred
+  from `stored`: a write that did not land leaves the digest of what the record still holds, the
+  placeholder's included. The human lines print the pair under the gate digest; `adaptor
+  verify` reports the engine's digest as before, and a refused gate carries neither key. One
+  helper, `record_digest`, is the only hashing site. (`runtime/adaptor.py`;
+  `tests/test_adaptor_rules.py`, `tests/test_adaptor_cli.py`)
 
 ### Fixed
 

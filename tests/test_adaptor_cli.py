@@ -22,6 +22,7 @@ _spec = importlib.util.spec_from_file_location("ascend_cli_adaptor", _CLI)
 cli = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(cli)
 import api  # noqa: E402
+from _onboard_harness import FakePlatform, run_target_add  # noqa: E402
 
 UUID = "3f2a9c1e-7b4d-4e8f-9a0b-1c2d3e4f5a6b"
 GATE_OK = {"ok": True, "origin": "inline", "storeAs": "SOURCE-ECHO", "summary": "accepted",
@@ -38,6 +39,11 @@ APP = {"id": "aapp_1", "name": "Support Bot", "api_type": "api",
        "url": "https://chat.example.com/v1",
        "request_template": json.dumps({"message": "{{PROMPT}}", "_adaptor_user_role": "admin"}),
        "response_template": '{"data": {"reply": "{{RESPONSE}}"}}'}
+# The record's basis (runtime/adaptor.py record_digest): sha-256 of the template value, first 12
+# hex — of the gate's "c3Jj" above, and of the placeholder a lost write leaves on the record.
+TD = "0daa5aa6a04c"
+PLACEHOLDER_D = "b2bf54095507"
+RECORD_LINE = f"record   template_digest {TD}  stored_digest {{stored}}   (sha-256 of _adaptor_src, first 12 hex)"
 
 
 class Recorder:
@@ -271,6 +277,15 @@ class TestVerify:
         assert env["ok"] is False and env["error"]["code"] == "verify_failed"
         assert "no adaptor resolved" in env["error"]["message"]
 
+    def test_json_keeps_the_engines_digest_under_its_own_key_only(self, monkeypatch, capsys):
+        """verify runs what is stored and reports the engine's digest as it came; the record's
+        basis is store's and get's to state, so neither of their keys appears here."""
+        rec = Recorder(verify={"ok": True, "summary": "1 turn ok", "digest": "d", "turns": [TURN_OK]})
+        run(monkeypatch, rec, "adaptor", "verify", "--app", UUID, json_mode=True)
+        data = json.loads(capsys.readouterr().out)["data"]
+        assert data["digest"] == "d"
+        assert "stored_digest" not in data and "template_digest" not in data
+
 
 # --------------------------------------------------------------------------- get, and the id space
 class TestGet:
@@ -279,13 +294,60 @@ class TestGet:
         run(monkeypatch, rec, "adaptor", "get", "--app", UUID)
         out = capsys.readouterr().out
         head, _, src = out.partition("--- source ---")
-        assert json.loads(head) == {"origin": "template", "digest": "d"}
+        assert json.loads(head) == {"origin": "template", "digest": "d", "stored_digest": None}
         assert src.strip() == "function sendTurn(){}"
 
     def test_json_carries_the_whole_record(self, monkeypatch, capsys):
         rec = Recorder(adapter={"origin": "template", "source": "x"})
         run(monkeypatch, rec, "adaptor", "get", "--app", UUID, json_mode=True)
-        assert json.loads(capsys.readouterr().out) == {"ok": True, "data": {"origin": "template", "source": "x"}}
+        assert json.loads(capsys.readouterr().out) == {
+            "ok": True, "data": {"origin": "template", "source": "x", "stored_digest": None}}
+
+    def test_a_uuid_reads_no_record_so_the_stored_digest_is_null(self, monkeypatch, capsys):
+        rec = Recorder(adapter={"origin": "template", "digest": "d"})
+        run(monkeypatch, rec, "adaptor", "get", "--app", UUID, json_mode=True)
+        assert json.loads(capsys.readouterr().out)["data"]["stored_digest"] is None
+        assert rec.listed == 0, "a uuid goes on the route as given; nothing was read to hash"
+
+    def test_console_id_reads_no_record_either(self, monkeypatch, capsys):
+        rec = Recorder(adapter={"origin": "inline"}, console_uuid=UUID)
+        run(monkeypatch, rec, "adaptor", "get", "--app", "Support Bot", "--console-id", UUID, json_mode=True)
+        assert json.loads(capsys.readouterr().out)["data"]["stored_digest"] is None
+
+    def test_a_name_hashes_the_adaptor_src_of_the_record_read_for_the_join(self, monkeypatch, capsys):
+        """Named through the platform, the record read to join the id spaces is the one the
+        stored digest is taken over — and the engine's own `digest` is left exactly as it came."""
+        app = {**APP, "request_template": json.dumps({"message": "{{PROMPT}}", "_adaptor_src": "c3Jj"})}
+        rec = Recorder(adapter={"origin": "template", "digest": "d", "source": "x"}, app=app, console_uuid=UUID)
+        run(monkeypatch, rec, "adaptor", "get", "--app", "Support Bot", json_mode=True)
+        data = json.loads(capsys.readouterr().out)["data"]
+        assert data["stored_digest"] == TD and data["digest"] == "d" and data["source"] == "x"
+        assert rec.listed == 1, "one platform read, handed on — not a second one for the hash"
+
+    def test_the_stored_digest_prints_in_the_head_under_the_engines_digest(self, monkeypatch, capsys):
+        app = {**APP, "request_template": json.dumps({"message": "{{PROMPT}}", "_adaptor_src": "c3Jj"})}
+        rec = Recorder(adapter={"origin": "template", "digest": "d", "source": "x"}, app=app, console_uuid=UUID)
+        run(monkeypatch, rec, "adaptor", "get", "--app", "aapp_1")
+        head, _, src = capsys.readouterr().out.partition("--- source ---")
+        assert json.loads(head) == {"origin": "template", "digest": "d", "stored_digest": TD}
+        assert src.strip() == "x"
+
+    @pytest.mark.parametrize("template", [
+        json.dumps({"message": "{{PROMPT}}"}),                        # nothing under the key
+        json.dumps({"message": "{{PROMPT}}", "_adaptor_src": ""}),    # an empty value
+        "{not json",                                                   # nothing readable
+    ])
+    def test_a_record_with_nothing_readable_under_the_key_is_null(self, monkeypatch, capsys, template):
+        rec = Recorder(adapter={"origin": "none"}, app={**APP, "request_template": template}, console_uuid=UUID)
+        run(monkeypatch, rec, "adaptor", "get", "--app", "aapp_1", json_mode=True)
+        assert json.loads(capsys.readouterr().out)["data"]["stored_digest"] is None
+
+    def test_the_placeholder_hashes_as_the_placeholder(self, monkeypatch, capsys):
+        """What the record holds, not what it should: an app still on v0:passthrough says so."""
+        app = {**APP, "request_template": json.dumps({"message": "{{PROMPT}}", "_adaptor_src": "v0:passthrough"})}
+        rec = Recorder(adapter={"origin": "alias"}, app=app, console_uuid=UUID)
+        run(monkeypatch, rec, "adaptor", "get", "--app", "aapp_1", json_mode=True)
+        assert json.loads(capsys.readouterr().out)["data"]["stored_digest"] == PLACEHOLDER_D
 
 
 ENGINE_404 = api.AscendAPIError(
@@ -408,6 +470,7 @@ class TestStore:
             "message": "{{PROMPT}}", "_adaptor_user_role": "admin", "_adaptor_src": "c3Jj"}
         out = capsys.readouterr().out
         assert out.startswith("stored   digest 0094886620bc  4912B -> 2076B base64")
+        assert out.splitlines()[1] == RECORD_LINE.format(stored=TD), "the record's basis, next line"
         assert "address  https://chat.example.com/v1" in out
         assert "return { status_code: 200, body: { data: { reply: text } } };" in out
         assert "ascend adaptor verify" in out and "NEW assessment" in out
@@ -461,6 +524,8 @@ class TestStore:
         assert rec.gated and rec.patched == []
         env = json.loads(capsys.readouterr().out)
         assert env["ok"] is True and env["data"]["dry_run"] is True and env["data"]["stored"] is False
+        assert env["data"]["template_digest"] == TD, "known from the gate alone"
+        assert env["data"]["stored_digest"] is None, "nothing was read back"
         assert env["data"]["template"] == {"message": "{{PROMPT}}", "_adaptor_user_role": "admin",
                                            "_adaptor_src": "<4b of base64>"}
         assert env["data"]["reply_shape"]["path"] == "data.reply"
@@ -472,12 +537,41 @@ class TestStore:
         env = json.loads(capsys.readouterr().out)
         assert env["ok"] is False and env["error"]["code"] == "store_unverified"
         assert env["data"]["stored"] is False
+        assert env["data"]["template_digest"] == TD
+        assert env["data"]["stored_digest"] is None, "read back: the record holds no adaptor at all"
+
+    def test_a_lost_write_reports_the_digest_of_what_the_record_still_holds(self, monkeypatch, capsys, js):
+        """Measured from the read-back, never inferred from `stored`: the record kept the
+        placeholder, so that is the digest it reports — and it is not the gate's bytes."""
+        rec = Recorder(app={**APP, "request_template": json.dumps(
+            {"message": "{{PROMPT}}", "_adaptor_src": "v0:passthrough"})}, lose_patch=True)
+        assert exits_with(monkeypatch, rec, "adaptor", "store", js, "--app", "aapp_1", json_mode=True) == 1
+        env = json.loads(capsys.readouterr().out)
+        assert env["error"]["code"] == "store_unverified" and env["data"]["stored"] is False
+        assert env["data"]["stored_digest"] == PLACEHOLDER_D
+        assert env["data"]["stored_digest"] != env["data"]["template_digest"] == TD
 
     def test_json_success_envelope(self, monkeypatch, capsys, js):
         run(monkeypatch, Recorder(), "adaptor", "store", js, "--app", "aapp_1", json_mode=True)
         env = json.loads(capsys.readouterr().out)
         assert env["ok"] is True and env["data"]["stored"] is True
         assert env["data"]["template_key"] == "_adaptor_src" and env["data"]["digest"] == "0094886620bc"
+        assert env["data"]["template_digest"] == TD, "of the gate's templateValue"
+        assert env["data"]["stored_digest"] == TD, "of _adaptor_src as read back: identical, the write landed"
+
+    def test_dry_run_prints_the_stored_digest_as_not_available(self, monkeypatch, capsys, js):
+        run(monkeypatch, Recorder(), "adaptor", "store", js, "--app", "aapp_1", "--dry-run")
+        lines = capsys.readouterr().out.splitlines()
+        assert lines[0].startswith("would    digest 0094886620bc")
+        assert lines[1] == RECORD_LINE.format(stored="n/a")
+
+    def test_a_refused_gate_carries_neither_key(self, monkeypatch, capsys, js):
+        """The gate did not pass, so there is no template value to hash: absent, not wrong."""
+        assert exits_with(monkeypatch, Recorder(gate=GATE_NO), "adaptor", "store", js, "--app", "aapp_1",
+                          json_mode=True) == 2
+        env = json.loads(capsys.readouterr().out)
+        assert env["error"]["code"] == "gate_refused"
+        assert "template_digest" not in env["data"] and "stored_digest" not in env["data"]
 
 
 # --------------------------------------------------------------------------- har / scaffold (offline)
@@ -528,3 +622,76 @@ class TestOfflineVerbs:
         assert exits_with(monkeypatch, Recorder(), "adaptor", "scaffold", "--out", str(out)) == 3
         run(monkeypatch, Recorder(), "adaptor", "scaffold", "--out", str(out), "--example", "--force")
         assert out.read_text() == (REPO / "templates" / "adaptor_example_chattie.js").read_text()
+
+
+# --------------------------------------------------------------------------- target add's adaptor record
+# The hosted-adaptor default of `target add`, driven offline through the onboarding harness (its
+# gate answers "FRESH-ADAPTOR" as the template value; its platform keeps what it is sent).
+FRESH_D = "354ed181b212"          # record_digest("FRESH-ADAPTOR")
+CAPTURED = {"adapter": "direct_api", "endpoint": "https://8.8.8.8/api/chat", "method": "POST",
+            "body": {"message": "{{PROMPT}}"}, "response_path": "message"}
+
+
+def _target_add(monkeypatch, tmp_path, capsys, platform):
+    """`ascend target add --config mybot --json` against `platform`: (exit code, stdout as JSON, stderr)."""
+    monkeypatch.setattr(sys, "argv", ["ascend", "target", "add", "--config", "mybot", "--json"])
+    code = 0
+    try:
+        run_target_add(monkeypatch, tmp_path, CAPTURED, platform, name="Retail Bot")
+    except SystemExit as e:
+        code = e.code
+    captured = capsys.readouterr()
+    return code, json.loads(captured.out), captured.err
+
+
+class TestTargetAddRecord:
+    def test_the_record_carries_both_digests_once_the_store_was_read_back(self, monkeypatch, tmp_path, capsys):
+        code, out, err = _target_add(monkeypatch, tmp_path, capsys, FakePlatform(existing=None))
+        rec = out["adaptor"]
+        assert code == 0 and rec["stored"] and rec["verified"]
+        assert rec["digest"] == "0094886620bc", "the gate's own digest, as it came"
+        assert rec["template_digest"] == FRESH_D, "of the gate's templateValue"
+        assert rec["stored_digest"] == FRESH_D, "of _adaptor_src as the platform held it when read back"
+        # the human lines: the pair beside the gate digest, the stored one where the read-back is confirmed
+        assert f"gate PASS · digest 0094886620bc · template_digest {FRESH_D} · preflight: none" in err
+        assert f"stored · _adaptor_src confirmed on aapp_new · stored_digest {FRESH_D}" in err
+
+    def test_no_read_back_leaves_the_stored_digest_null(self, monkeypatch, tmp_path, capsys):
+        """The engine uuid did not resolve, so the engine steps are skipped and the record comes
+        back before anything is read: the template digest is known, the stored one is not."""
+        code, out, _ = _target_add(monkeypatch, tmp_path, capsys, FakePlatform(existing=None, console_uuid=None))
+        rec = out["adaptor"]
+        assert code == 1 and rec["verified"] is False and rec["console_id"] is None
+        assert rec["template_digest"] == FRESH_D and rec["stored_digest"] is None
+
+    def test_a_write_that_never_lands_reports_what_the_record_holds(self, monkeypatch, tmp_path, capsys):
+        """Measured from the read-back, not inferred from `stored`: a platform that keeps the
+        placeholder whatever it is sent leaves the placeholder's digest on the record."""
+        class KeepsThePlaceholder(FakePlatform):
+            def create_app(self, spec):
+                app = super().create_app(spec)
+                self._records[app["id"]]["request_template"] = json.dumps(
+                    {"message": "{{PROMPT}}", "_adaptor_src": "v0:passthrough"})
+                return app
+
+            def patch_app(self, app_id, patch):
+                self.patches.append((app_id, json.loads(json.dumps(patch))))
+                return {}
+
+        platform = KeepsThePlaceholder(existing=None)
+        code, out, _ = _target_add(monkeypatch, tmp_path, capsys, platform)
+        rec = out["data"]["adaptor"]
+        assert code == 1 and out["error"]["code"] == "store_unverified" and rec["stored"] is False
+        assert len(platform.patches) == 1, "one PATCH to put the bytes back, read back again"
+        assert rec["template_digest"] == FRESH_D and rec["stored_digest"] == PLACEHOLDER_D
+
+    def test_a_source_the_lint_refuses_never_reaches_the_gate_and_has_neither_key(self, monkeypatch, tmp_path, capsys):
+        """Absent, not wrong: with no gate pass there is no template value and no record."""
+        import adaptor as AD
+        monkeypatch.setattr(AD, "lint_source", lambda src: ["fetch: not available inside the isolate (line 1)"])
+        platform = FakePlatform(existing=None)
+        code, out, _ = _target_add(monkeypatch, tmp_path, capsys, platform)
+        assert code == 1 and out["error"]["code"] == "adaptor_lint"
+        assert platform.gated == [] and platform.created == []
+        assert "adaptor" not in out
+        assert "template_digest" not in json.dumps(out) and "stored_digest" not in json.dumps(out)
