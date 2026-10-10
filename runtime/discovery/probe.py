@@ -50,6 +50,8 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import quote, urlsplit
 
+from target_secrets import is_secret_name
+
 # --------------------------------------------------------------------------- #
 # Constants                                                                    #
 # --------------------------------------------------------------------------- #
@@ -1998,9 +2000,9 @@ def build_config(result: ProbeResult, *, timeout_ms: Optional[int] = None) -> Di
         cfg.pop("timeout_ms", None)      # absent => the runtime default and its env knob apply
     if headers:
         cfg["headers"] = headers
-    secretish = [k for k in headers
-                 if k.lower() in ("authorization", "x-api-key", "api-key", "apikey",
-                                  "cookie", "x-auth-token", "x-access-token")]
+    # By the ONE rule (`target_secrets.is_secret_name`): a seven-name list of this module's own
+    # flagged an `Authorization` literal and let `x-lab-code` through in clear.
+    secretish = [k for k in headers if is_secret_name(k)]
     cfg["_probe"] = {
         "prompt": result.prompt,
         "verified_answer": (result.response_text or "")[:_ANSWER_PREVIEW],

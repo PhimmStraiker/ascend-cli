@@ -57,6 +57,67 @@ import tenant as _tenant
 # config file and makes the store's keys greppable in a support bundle.
 PREFIX = "ASCEND_SECRET_"
 
+# ---------------------------------------------------------------------------------------------
+# THE secret-name rule. One place, asked by everything that has to decide whether a header, a
+# body field or a config key carries a credential: `discovery/classify.py` (what a capture
+# withholds from a config and stores here), `discovery/probe.py` (what a flag-authenticated
+# onboarding echoes back), `discovery/codegen.py` (`safe_headers`), `discovery/har_chains.py`
+# (the redacted session report), `manual.py` (every printed config, host-call trace and turn
+# log), `lease_client.py` (capture files) and the plaintext warning in `shells/cli/ascend.py`.
+#
+# MEASURED 2026-10-09 on the lab target: its access code arrives as `x-lab-code` (and as a
+# `Cookie`). `target add --header 'x-lab-code: <literal>'` wrote both literals into the config and
+# warned about neither, because the warning read the probe's own seven-name list — one of FIVE
+# lists in this repo, each with its own vocabulary, none of which knew `x-lab-code`, `passcode`,
+# `access_code` or `session_id`. A name every list missed is the normal case, not the edge case:
+# the whole point of a custom credential header is that nobody listed it in advance.
+#
+# It is a WORD rule. The name is split on `-`, `_`, `.` and camelCase humps and lowercased, and a
+# credential word has to stand on a word boundary: `x-lab-code`, `X_LAB_CODE` and `xLabCode` are
+# one name; `country_code`, `content-type` and `x-request-id` carry no credential word and never
+# match. Compounds may run together the way field names do (`apikey`, `sessionid`,
+# `accesstoken`, `clientsecret`). Bare `key`, `id` and `code` say nothing on their own — an
+# `Idempotency-Key`, a request id and a country code are not credentials, and a rule that withheld
+# them from a config would 401 the target it was protecting — so they count only behind the
+# qualifiers that make them one. `token` and `cookie` are read at the END of a name only, so
+# `token_types` (a stream's frame kinds) and a cookie-consent flag stay visible.
+REDACTED = "[REDACTED]"
+
+_CAMEL_HUMP = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+_SEPARATORS = re.compile(r"[-_.\s]+")
+_SECRET_NAME = re.compile(
+    r"(?:^|-)(?:"
+    r"authorization|authentication|[a-z]*secret"
+    r"|(?:api|access|subscription|tenant|app|private|client|auth|session|secret|secret-?access)-?key"
+    r"|password|passwd|pwd|credentials?|bearer|signature|sig|hmac|nonce|jwt"
+    r"|pass-?code|(?:access|lab|auth|api|app|client|invite)-?code"
+    r"|session-?(?:id|key|token)|sid|client-?id"
+    r")(?:$|-)"
+    r"|(?:^|-)(?:[a-z]*token|(?:set-?)?cookies?|auth)$")
+
+#: Names that are a credential only as a QUERY PARAMETER — `?code=` is the lab's access code,
+#: `?key=` is Gemini's, `?session=` a session — and say nothing as a header or field name.
+QUERY_ONLY_SECRET_NAMES = frozenset({"code", "key", "session"})
+
+
+def normalize_name(name: Any) -> str:
+    """`X_LAB_CODE`, `x.lab.code` and `xLabCode` -> `x-lab-code`: the spelling the rule reads."""
+    if not isinstance(name, str):
+        return ""
+    return _SEPARATORS.sub("-", _CAMEL_HUMP.sub("-", name.strip())).strip("-").lower()
+
+
+def is_secret_name(name: Any) -> bool:
+    """Does this header / field / parameter NAME carry a credential? Case-insensitive, on
+    `-` / `_` / `.` / camelCase boundaries. Never raises: a display path may hand it anything."""
+    n = normalize_name(name)
+    return bool(n) and _SECRET_NAME.search(n) is not None
+
+
+def is_secret_param_name(name: Any) -> bool:
+    """`is_secret_name`, plus the bare names that are a credential only in a query string."""
+    return is_secret_name(name) or normalize_name(name) in QUERY_ONLY_SECRET_NAMES
+
 
 def store_path() -> Path:
     """Where a record is WRITTEN: this tenant's state dir, or the unpinned one before a pin."""

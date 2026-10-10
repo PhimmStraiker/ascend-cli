@@ -27,6 +27,8 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, Optional
 
+from target_secrets import REDACTED, is_secret_name
+
 PROMPT_TOKEN = "{{PROMPT}}"
 
 
@@ -91,7 +93,7 @@ NOISE_HEADERS = {"content-length", "host", "connection", "accept-encoding", "sec
                  "upgrade-insecure-requests", "priority", "te"}
 
 
-def safe_headers(headers: Dict[str, Any]) -> "tuple[Dict[str, Any], list[str]]":
+def safe_headers(headers: Dict[str, Any], *, redact: bool = True) -> "tuple[Dict[str, Any], list[str]]":
     """(the headers a generated adapter or a direct app may carry, the names dropped).
 
     Browser fingerprint headers (`Sec-Ch-Ua*`, `Sec-Fetch-*`) and transport noise are dropped;
@@ -99,6 +101,15 @@ def safe_headers(headers: Dict[str, Any]) -> "tuple[Dict[str, Any], list[str]]":
     it IS the credential (`/session?code=…`). Everything else — including `User-Agent`, `Accept`,
     `Origin` and `Referer` themselves, which a target may legitimately check — is kept as
     captured. Order is preserved so a config stays diff-stable.
+
+    `redact` (the default) also replaces the VALUE of every credential-shaped header with
+    `[REDACTED]` — the one rule, `target_secrets.is_secret_name`: `Cookie`, `x-lab-code`,
+    `Authorization`, an api key, a passcode … — so a header set that is printed, traced or
+    written locally never carries a credential. MEASURED 2026-10-09 on the lab target: `Cookie`
+    and `x-lab-code` are both its credential, and a record of them kept the second in clear.
+    Only the callers that build what the PLATFORM sends pass `redact=False`: the application
+    record must carry the real value, because that is what reaches the target, and the
+    deprecated Python module sends nothing but its own `HEADERS`.
     """
     out: Dict[str, Any] = {}
     dropped: list[str] = []
@@ -109,12 +120,16 @@ def safe_headers(headers: Dict[str, Any]) -> "tuple[Dict[str, Any], list[str]]":
             continue
         if lk in ("referer", "origin") and isinstance(v, str) and "?" in v:
             v = v.split("?", 1)[0]
+        if redact and is_secret_name(k):
+            v = REDACTED
         out[k] = v
     return out, dropped
 
 
 def _header_block(headers: Dict[str, str]) -> str:
-    kept, _dropped = safe_headers(headers or {})
+    # The module sends only its own HEADERS (custom_module.py calls send_prompt(prompt) and
+    # nothing else), so a masked value here would 401 the bridge: the literal stays, 0600.
+    kept, _dropped = safe_headers(headers or {}, redact=False)
     return f"HEADERS = {_py(kept)}\n"
 
 

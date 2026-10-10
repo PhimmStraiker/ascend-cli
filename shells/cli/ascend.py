@@ -661,7 +661,9 @@ def _api_contract(cfg):
     # The old Python codegen's rule, reused: a browser's Sec-Ch-Ua / Sec-Fetch-* and transport
     # noise describe the capture, not the contract, and the platform refuses an application that
     # carries them (400 "rejected by the upstream service", measured on a HAR-derived record).
-    headers, _dropped = safe_headers(dict(cfg.get("headers") or {}))
+    # `redact=False`: this is what the platform sends to the target, so the record carries the
+    # credential itself; everything printed or written locally goes through the redacting form.
+    headers, _dropped = safe_headers(dict(cfg.get("headers") or {}), redact=False)
     headers.setdefault("Content-Type", "application/json")
     out["headers"] = headers
     body = cfg.get("body") or cfg.get("request_body")
@@ -3650,8 +3652,12 @@ def _finalize_target_auth(cfg, args):
     Replaces the literal the probe used with the typed ``auth`` block ``_target_auth`` recorded
     (header removed, or the api key stripped from the URL), so the file carries ``env:NAME`` and
     the runtime resolves it per run. Then says, loudly, when a credential-shaped header is still
-    stored in plaintext — ``probe.build_config`` has recorded that list since 1.1.1 and nothing
-    ever printed it.
+    stored in plaintext — judged over the headers the file will hold, by the one rule
+    (``target_secrets.is_secret_name``). Until 2026-10-09 this read the probe's own list, which
+    only the ``--api`` branch filled and which knew seven names: a literal
+    ``--header 'x-lab-code: …'`` on a ``--config`` re-run or a HAR onboarding was never warned
+    about, while an ``Authorization`` literal on the probe branch was. MEASURED on the lab
+    target: ``Cookie`` and ``x-lab-code`` both written in clear, no warning.
     """
     recs = getattr(args, "_static_auth", None) or []
     if recs:
@@ -3683,8 +3689,12 @@ def _finalize_target_auth(cfg, args):
         prior_blocks = [b for b in prior_blocks if b.get("type") == "static" and b not in blocks]
         blocks = prior_blocks + blocks
         cfg["auth"] = blocks[0] if len(blocks) == 1 else blocks
-    inline = (cfg.get("_probe") or {}).get("inline_secret_headers") or []
-    still = [h for h in inline if any(k.lower() == h.lower() for k in (cfg.get("headers") or {}))]
+    from target_secrets import is_secret_name
+    # An `env:` reference and a `{{…}}` template are not literals; everything else under a
+    # credential-shaped name is, whichever branch wrote it.
+    still = [k for k, v in (cfg.get("headers") or {}).items()
+             if is_secret_name(k) and isinstance(v, str) and v
+             and not v.startswith("env:") and "{{" not in v]
     if still:
         _warn(f"credential-shaped header(s) stored in plaintext in the config: {', '.join(still)}\n"
               f"    keep secrets out of files with an env: reference, e.g.\n"
@@ -5485,7 +5495,9 @@ def _adaptor_app_headers(cfg, args):
     """
     from dispatch import merge_auth
     from runtime.discovery.codegen import safe_headers
-    headers, dropped = safe_headers(dict(cfg.get("headers") or {}))
+    # `redact=False` on both calls: these headers go on the application record, which is what the
+    # platform sends to the target. Nothing here is printed; the names are, the values never.
+    headers, dropped = safe_headers(dict(cfg.get("headers") or {}), redact=False)
     if dropped:
         _ok(f"browser fingerprint header(s) left off the record: {', '.join(dropped)}")
     moved, params = [], {}
@@ -5512,7 +5524,7 @@ def _adaptor_app_headers(cfg, args):
             moved.append("Cookie")
         params = dict(merged.get("params") or {})
         moved += [k for k in params if k not in moved]
-    headers, _again = safe_headers(headers)      # the final set, whatever the merge added
+    headers, _again = safe_headers(headers, redact=False)      # the final set, whatever the merge added
     headers.setdefault("Content-Type", "application/json")
     return headers, moved, params
 

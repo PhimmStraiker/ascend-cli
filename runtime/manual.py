@@ -21,34 +21,18 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
-SENSITIVE = {"authorization", "cookie", "set-cookie", "x-api-key", "api-key",
-             "x-csrf-token", "proxy-authorization", "authentication",
-             "x-amz-security-token", "x-goog-api-key", "x-auth-token", "x-access-token"}
+from target_secrets import REDACTED, is_secret_name, is_secret_param_name
 
-# Secrets do not only live in headers. A mapped config routinely carries a session token, an
-# access key or a signed blob INSIDE the request body — `map --curl` preserves the body verbatim,
-# so whatever authenticated the browser is now in the file. Redaction that only knew about header
-# names printed those in clear.
-SENSITIVE_FIELDS = {
-    "token", "access_token", "accesstoken", "refresh_token", "refreshtoken", "id_token",
-    "idtoken", "session_token", "sessiontoken", "session", "sessionid", "session_id",
-    "api_key", "apikey", "apisecret", "api_secret", "secret", "client_secret", "clientsecret",
-    "password", "passwd", "pwd", "auth", "credential", "credentials", "signature", "sig",
-    "private_key", "privatekey", "secret_access_key", "secretaccesskey", "jwt", "bearer",
-}
-
-
-# Compared after the same normalisation the key gets: `X-API-Key` -> `x_api_key`. The header set is
-# written with dashes, so comparing the normalised key against it matched only the two names with
-# no dash (authorization, cookie) — x-api-key, x-auth-token, set-cookie and x-csrf-token were
-# printed in clear by every command that promised masking.
-_SENSITIVE_NORMALISED = {s.lower().replace("-", "_") for s in SENSITIVE} | set(SENSITIVE_FIELDS)
+# Which key NAMES carry a credential — a header, or a field inside a request body that `map
+# --curl` preserved verbatim — is ONE rule, `target_secrets.is_secret_name`: the same one the
+# classifier withholds by and the probe warns by. This module used to keep two sets of its own
+# (headers with dashes, body fields with underscores), compared after a normalisation that
+# matched only the dash-less names until that was fixed, and blind to `x-lab-code`, `passcode`
+# and `access_code` after it. A display path never raises, and neither does the rule.
 
 
 def _is_sensitive_key(key: Any) -> bool:
-    if not isinstance(key, str):
-        return False
-    return key.lower().replace("-", "_") in _SENSITIVE_NORMALISED
+    return is_secret_name(key)
 
 
 def redact_url(value: Any) -> Any:
@@ -75,8 +59,8 @@ def redact_url(value: Any) -> Any:
         out = []
         for piece in parts.query.split("&"):
             k, sep, v = piece.partition("=")
-            if sep and v != "[REDACTED]" and (_is_sensitive_key(k) or _secret_param(k, unquote(v))):
-                out.append(f"{k}=[REDACTED]")
+            if sep and v != REDACTED and (_is_sensitive_key(k) or _secret_param(k, unquote(v))):
+                out.append(f"{k}={REDACTED}")
             else:
                 out.append(piece)
         return urlunsplit(parts._replace(query="&".join(out)))
@@ -93,8 +77,7 @@ def _secret_param(name: str, value: str) -> bool:
         from discovery.classify import _looks_secret_param  # noqa: PLC0415
         return _looks_secret_param(name, value)
     except Exception:                       # noqa: BLE001 - a display path never raises
-        return name.lower() in ("key", "apikey", "api_key", "code", "token", "access_token",
-                                "sig", "signature", "secret", "password", "auth")
+        return is_secret_param_name(name)   # the name half of that rule; the entropy half is the classifier's
 
 
 _URL_IN_TEXT = re.compile(r"(?:https?|wss?)://[^\s'\"<>)}]+")
@@ -117,7 +100,7 @@ def redact_text(text: Any) -> Any:
 def redact(obj: Any) -> Any:
     """Mask known-sensitive values — headers, body fields, AND credentials carried in a URL."""
     if isinstance(obj, dict):
-        return {k: ("[REDACTED]" if _is_sensitive_key(k) else redact(v))
+        return {k: (REDACTED if _is_sensitive_key(k) else redact(v))
                 for k, v in obj.items()}
     if isinstance(obj, list):
         return [redact(x) for x in obj]
