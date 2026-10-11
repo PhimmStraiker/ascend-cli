@@ -58,6 +58,9 @@ def shape_of(cfg: Dict[str, Any]) -> str:
         kind = "direct_api"
     return kind if kind in SHAPES else SCAFFOLD
 
+# Python 3.9 forbids a backslash inside an f-string expression, so the fallback is named here.
+NO_EXTRA_HEADERS = "(none beyond the application's)"
+
 
 def raw_url(cfg: Dict[str, Any]) -> str:
     """The transport's real address, placeholders included, however the adapter spells it."""
@@ -1234,7 +1237,7 @@ def _gen_scaffold(cfg: Dict[str, Any]) -> str:
         "// What the capture showed, to finish sendTurn() from (docs/CUSTOM_ADAPTOR.md has the loop):",
         f"//   method   {str(cfg.get('method') or 'POST').upper()}",
         f"//   body     keys {', '.join(keys)}  (the prompt rides in {'.'.join(prompt_path(body)) or 'the body'})",
-        f"//   headers  {', '.join(header_names) or '(none beyond the application\'s)'}",
+        f"//   headers  {', '.join(header_names) or NO_EXTRA_HEADERS}",
         "//   next     ascend adaptor test <this file> --app '<app>'   then   ascend adaptor store",
     ])
     first, rest = src.split("\n", 1) if "\n" in src else (src, "")
