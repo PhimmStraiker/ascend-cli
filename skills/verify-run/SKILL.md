@@ -2,7 +2,7 @@
 name: verify-run
 description: >-
   Prove an assessment actually reached the target before anyone trusts its score. Reads the
-  relay's own answered/delivered/failed counters and the platform's category summary, and
+  bridge's own answered/delivered/failed counters and the platform's category summary, and
   separates "clean because the target refused the attacks" from "clean because nothing was ever
   asked". Use after every run, and before any number is reported, exported, or gated on in CI.
 ---
@@ -17,7 +17,7 @@ A completed assessment with a clean score is ambiguous. It means one of two thin
 The platform cannot tell these apart for you: unanswered probes are not findings, so both look
 like `0 failed`. This skill closes that gap in one command, and it is the most-skipped step in
 practice — measured across 22 independent onboardings, every single operator eventually
-established this by hand, from relay logs, because they did not know it was already available.
+established this by hand, from bridge logs, because they did not know it was already available.
 
 ## The one command
 
@@ -28,13 +28,13 @@ ascend assess results --app '<name>'
 Read the `answered` line:
 
 ```
-  answered   8 probe(s) answered by the target  ·  8 delivered  ·  0 failed   (this machine's relay)
+  answered   8 probe(s) answered by the target  ·  8 delivered  ·  0 failed   (this machine's bridge)
 ```
 
 * **answered > 0** — the target was reached. A clean score is a real result.
 * **answered = 0** — nothing reached the target. The score is meaningless. The command says so
   outright rather than hinting.
-* **no `answered` line** — this machine has no relay record for that run. That is expected for an
+* **no `answered` line** — this machine has no bridge record for that run. That is expected for an
   `api`/`gcp`/`bedrock` app, where the platform calls the target itself; it is a red flag for a
   bridge (`thin`) app, and means you are verifying from the wrong machine.
 
@@ -54,19 +54,19 @@ score — a green gate on an unanswered run is worse than a red one, because it 
 ## When answered is zero
 
 Work down, cheapest first. Note that `ascend bridge ls` is **not** on this list as a first step:
-it shows relays that are alive right now, and a four-probe run's relay has usually self-stopped
-before you look. `assess results` reads the relay's persisted counters, which outlive it.
+it shows bridges that are alive right now, and a four-probe run's bridge has usually self-stopped
+before you look. `assess results` reads the bridge's persisted counters, which outlive it.
 
-1. `ascend assess results --app '<name>'` — the `answered` line is the relay's own count and
-   survives the relay stopping. If it is there and zero, the target was never reached.
-2. `ascend bridge logs '<name>'` — the relay records every call it made and what came back.
+1. `ascend assess results --app '<name>'` — the `answered` line is the bridge's own count and
+   survives the bridge stopping. If it is there and zero, the target was never reached.
+2. `ascend bridge logs '<name>'` — the bridge records every call it made and what came back.
    A wall of `401`/`403` is a credential problem, not a target problem.
 3. `ascend target check '<name>'` — re-prove the adapter against the live target right now.
    Targets drift; a config that worked last month is not evidence about today.
 4. If the config authenticates by `env:` reference, confirm the variable is exported **in the
-   shell that starts the relay**. `bridge start` refuses and names it, but a relay started earlier
+   shell that starts the bridge**. `bridge start` refuses and names it, but a bridge started earlier
    from a different shell will already be failing every probe.
-5. `ascend bridge ls` — only useful while the run is still going: is a relay serving this app
+5. `ascend bridge ls` — only useful while the run is still going: is a bridge serving this app
    *right now*? `ANS` is the same counter, live.
 
 ## What this skill will not do

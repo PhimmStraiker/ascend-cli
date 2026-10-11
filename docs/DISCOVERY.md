@@ -86,10 +86,10 @@ six independent classifiers. Each returns
 | **rate** (L6) | observed request spacing (HAR timestamps) → `qpm`; concurrency from the session verdict | `qpm`, `max_workers` (1 stateful / 10 stateless) |
 
 `compose` only pins `max_workers` when the classifier said **1**. Writing a
-default of 10 overrode the relay's own stateful=1 rule — `recommended_workers()`
+default of 10 overrode the bridge's own stateful=1 rule — `recommended_workers()`
 knows the full `STATEFUL_ADAPTERS` set, which the rate classifier does not — so a
 discovered websocket / sentinel / session_poll config ran ten concurrent
-conversations and corrupted every multi-turn chain. Left unset, the relay decides.
+conversations and corrupted every multi-turn chain. Left unset, the bridge decides.
 
 Secrets seen in evidence are **never** copied into a classifier's `params`. The
 auth params instead carry an `env:` `value_ref` placeholder (e.g.

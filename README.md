@@ -231,7 +231,7 @@ ascend onboard --config mybot          # register + bridge + assess, one command
 
 ## Prerequisites
 
-Runs on **macOS and Linux**. On Windows the relay must be run in the foreground (`ascend bridge start --app <name> --foreground`) or under WSL; the supervised relay is managed with POSIX signals and says so if asked to start there.
+Runs on **macOS and Linux**. On Windows the bridge must be run in the foreground (`ascend bridge start --app <name> --foreground`) or under WSL; the supervised bridge is managed with POSIX signals and says so if asked to start there.
 
 **One dependency, or none.**
 
@@ -288,8 +288,9 @@ ascend target add https://api.example.com/chat --bearer "$TOK" --name 'My Bot'
 # 5. Re-prove it whenever you are about to spend an assessment on it.
 ascend target check 'My Bot'
 
-# 6. Run the assessment, and watch it. The CLI auto-starts the relay for a bridge-type app
-#    before probes are scheduled, and self-stops it when the run ends — no manual serve step.
+# 6. Run the assessment, and watch it. A hosted-adaptor app (the default) needs no bridge; for a
+#    --via bridge app the CLI auto-starts the bridge before probes are scheduled and self-stops
+#    it when the run ends — no manual serve step.
 ascend assess run --app 'My Bot' --name 'run 1'
 ascend assess watch --all
 

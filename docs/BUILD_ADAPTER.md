@@ -347,8 +347,8 @@ those directories plus the bundled examples, in that same precedence order, so a
 one directory resolves from any other. It used to be found only in the first directory that
 *existed*; because every checkout ships a `configs/` of examples, running the CLI from a checkout
 hid `~/.ascend/configs` entirely, and a target created elsewhere came back as "config not found".
-That surfaced as a bridge failure rather than a lookup one — the relay exits before it ever leases,
-and a relay that never starts looks exactly like one that dropped, while the app's *key* kept
+That surfaced as a bridge failure rather than a lookup one — the bridge exits before it ever leases,
+and a bridge that never starts looks exactly like one that dropped, while the app's *key* kept
 resolving because keys live in `~/.ascend` and never depended on the working directory.
 
 `ascend adapter configs` lists everything that is actually resolvable and says where new ones are
@@ -399,7 +399,7 @@ the target is registered.
 
 The commands underneath are unchanged and still the way to do a step by hand. The app is a `bridge`
 type (the default), so `assess run` auto-starts the bridge before probes are scheduled and it
-self-stops when the run ends. There is no manual relay step:
+self-stops when the run ends. There is no manual bridge step:
 
 ```bash
 ./ascend app create --name 'My Target' --config target \

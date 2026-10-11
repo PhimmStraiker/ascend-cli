@@ -29,7 +29,7 @@ per-conversation lock so a stateful adapter's turns stay strictly ordered even u
 
 A probe carries **only the prompt**. Measured on 176 captured envelopes: `header.id`,
 `header.type`, `metadata.timestamp`, `metadata.version`, `payload.body.prompt` -- no conversation
-key, no turn number, no strategy. The controls API carries no multi-turn flag either. So the relay
+key, no turn number, no strategy. The controls API carries no multi-turn flag either. So the bridge
 cannot tell a single-shot probe from turn 3 of a multi-turn attack, and the platform cannot manage
 a conversation's lifecycle (a refresh, a new id) on the bridge's behalf.
 
@@ -50,7 +50,7 @@ ascend assess run --app mybot --name agentic --controls <multi-turn ids> --conve
 ascend bridge start --app mybot --conversation sequential
 ```
 
-`assess results` prints which policy the relay ran under, next to the answered line, and
+`assess results` prints which policy the bridge ran under, next to the answered line, and
 `--json` carries it as `relay_conversation`. Config form:
 
 ```json

@@ -33,7 +33,7 @@ cookie, api-key, token, secret, password, passcode, an access/lab/auth/api/app/c
 session-id, sid, … — the same names every printed config, capture file and host-call trace mask as
 `[REDACTED]`. A `country_code` or `content-type` never trips it.
 
-Any number of environment-referenced credentials per target -- a gateway passcode header and a bearer, say. Each is resolved by the relay at start from its own variable; if any is unset the relay refuses to start and names it. The config's `auth` is one block for one credential and a list past that. (Before 1.1.3 a second reference was refused.)
+Any number of environment-referenced credentials per target -- a gateway passcode header and a bearer, say. Each is resolved by the bridge at start from its own variable; if any is unset the bridge refuses to start and names it. The config's `auth` is one block for one credential and a list past that. (Before 1.1.3 a second reference was refused.)
 
 ## 2. Handshakes — a login that mints something, repeated when it expires
 

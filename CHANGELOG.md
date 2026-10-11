@@ -220,6 +220,17 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 - **The Python adapter export is the old flow.** `adapter build --code`, `codegen.py` and
   `docs/BUILD_ADAPTER.md` keep working and are labelled the bridge's flow, pointing at
   `ascend adaptor` and `docs/CUSTOM_ADAPTOR.md`.
+- **The docs say what the code does about connectivity.** `docs/APP_TYPES.md` said `target add`
+  registers a `bridge` app; it registers an `api` app carrying a hosted adaptor (`--via auto`,
+  `_choose_transport`), falls to a bridge on its own only for a `custom` or `browser` adapter or a
+  login handshake, refuses a private address naming the tunnel, and registers a tunnel or
+  private-link name as a template app from a supplied contract. `docs/CUSTOM_ADAPTOR.md` said the
+  CLI does not detect a tunnel agent; `ascend tunnel ls` lists the tunnels this machine started and
+  the state of each link, and a tunnel or private-link name is reached through the `ascend-tunnel`
+  agent or a Straiker private endpoint, not "Straiker's relay". `docs/AGENTS.md`, `docs/SKILLS.md`,
+  `docs/GLOSSARY.md`, `README.md` and the skills say the same, and the word for the process is
+  *bridge* throughout their prose. The `relay` command alias, the `--relay` flag, the `relay_*` JSON
+  keys and the `relays/` state directory are unchanged.
 
 ### Fixed
 

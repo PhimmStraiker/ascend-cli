@@ -1,7 +1,7 @@
 # Application types
 
 An Ascend application declares **how the platform reaches your target**. There are four types. The
-choice determines whether the adapter runs on your side.
+choice determines whether anything runs on your side: only `bridge` does.
 
 ```
 ascend app create --type bridge|api|gcp|bedrock --name 'My Bot' ...
@@ -9,20 +9,31 @@ ascend app create --type bridge|api|gcp|bedrock --name 'My Bot' ...
 
 | Type | How Ascend reaches the target | Bridge? | Use it when |
 |---|---|---|---|
-| `bridge` | Hands prompts to the CLI relay running on **your** side, which calls the target | **Yes** | The target is internal, behind auth/VPN, needs a browser, or speaks a protocol only your adapter knows |
-| `api` | Ascend calls your HTTP endpoint directly | No | The target is reachable from the internet with a static key and a simple request/response shape |
+| `bridge` | Hands prompts to the CLI's bridge running on **your** side, which calls the target through a local adapter (legacy, turn mode) | **Yes** | A login a person completes, device posture, a driven browser, or a Python adapter only your machine can run. A target that is merely private takes the tunnel instead |
+| `api` | Ascend calls your endpoint itself: through the request template, or through a hosted adaptor stored on the app (`request_template._adaptor_src`). Direct, or by a tunnel / private-link name | No | The platform can reach the target: a public URL, or a `.tun.straiker.ai` / `.pl.straiker.ai` name. What `target add` registers by default |
 | `gcp` | Native Vertex AI / Agent Engine integration | No | Vertex Agent Engine, ADK on Vertex |
 | `bedrock` | Native AWS Bedrock integration | No | Bedrock agents and runtimes |
 
-`bridge` is the default. The CLI's adapter layer can be configured to speak to any target, and the
-relay runs on your side of the network boundary. Pick `bridge` when **either** Ascend can't reach the
-target **or** the adapter has to run locally (code, browser, signed requests, stateful sessions).
+`bridge` is `app create`'s default when `--type` is not given, and it is the legacy path. The CLI's
+adapter layer can be configured to speak to any target, and the bridge runs on your side of the
+network boundary. Pick `bridge` only when the adapter has to run locally: a Python module, a driven
+browser, or a login handshake (`oauth2`, `csrf`, `derived_multihop`) no generated adaptor runs yet.
+A target Ascend cannot reach is no longer a reason on its own: run the tunnel agent next to it
+(`ascend tunnel`) and the platform calls it as an `api` app by its `.tun.straiker.ai` name.
 `ascend assess run` starts and stops the bridge for you (see below); you don't run one by hand for a
 normal assessment.
 
-`ascend target add` registers a `bridge` app, because that is the type that works for any target the
-CLI can reach at all. The other three are a deliberate choice you make with `app create --type`,
-for a target the platform can call itself.
+`ascend target add` registers an **`api` app carrying a hosted adaptor** by default (`--via auto`): it
+derives and proves the target's contract, generates a JavaScript adaptor from it, gates it, stores
+it on the app as `request_template._adaptor_src`, and verifies it through the engine, so nothing
+runs on this machine during the assessment. On its own it falls back to a `bridge` app only for an
+adapter that can run nowhere else (`custom`, `browser`) or a login handshake no generated adaptor
+runs yet, and says so; `--via bridge` asks for one outright and is deprecated; `--via api` registers
+a plain template app with no adaptor. A private address is refused before anything is created,
+naming the tunnel and `--via bridge` as the ways out. A tunnel or private-link name is registered as
+a template `api` app from a contract you supply (a cURL, a HAR, a saved config), since the name
+never resolves on this machine; `--via bridge` is refused for it for the same reason. `gcp` and
+`bedrock` are a deliberate choice: `app create --type`, or `ascend target cloud add`.
 
 ## Required fields per type
 
@@ -44,15 +55,16 @@ error: a 'gcp' application needs: url, service_account_info
 
 ## The four types in detail
 
-### `bridge` (default)
+### `bridge` (legacy: the adapter runs on your side)
 
 ```bash
-ascend target add https://internal.corp/chat --name 'My Bot' --bearer "$TOK" \
+ascend target add https://internal.corp/chat --name 'My Bot' --bearer "$TOK" --via bridge \
   --controls sys_prompt_leak,jailbreak
 ascend assess run --app 'My Bot' --name 'run 1'
 ```
 
-That first call is `adapter build` + `app create` + the key store, in one. The step-by-step form is
+`--via bridge` is what makes this a bridge app; without it, `target add` refuses the private address
+and names the tunnel. That first call is `adapter build` + `app create` + the key store, in one. The step-by-step form is
 unchanged and still the one to use when you want to edit the config in between:
 
 ```bash
@@ -71,7 +83,7 @@ start a process on your machine. If state changed in the Console and a bridge is
 `ascend bridge sync` reconciles: it starts bridges for running/paused apps and stops them for
 terminal ones.
 
-A bridge is per-**app**: one relay is shared across that app's assessments, with no cross-assessment
+A bridge is per-**app**: one bridge is shared across that app's assessments, with no cross-assessment
 contamination. The v2 lease/result protocol carries only an opaque `request_id`/`msg_id` that the
 bridge echoes back; the platform attributes each probe to its assessment.
 
@@ -80,12 +92,14 @@ the API ever returns a create without one, the command fails rather than leave a
 can serve.
 
 `ascend bridge start` still exists for advanced use: a remote or long-lived host, a continuous
-relay, or pre-starting before a run. It is not a step in the normal flow.
+bridge, or pre-starting before a run. It is not a step in the normal flow.
 
 ### `api` (no bridge)
 
-The url, templates and headers come straight from a mapped config, since `ascend adapter build` already
-produces exactly those fields:
+This is the type `target add` registers by default, with a hosted adaptor stored on it; `ascend adaptor`
+edits and re-proves that adaptor (`docs/CUSTOM_ADAPTOR.md`). The step-by-step form makes a plain
+template app: the url, templates and headers come straight from a mapped config, since
+`ascend adapter build` already produces exactly those fields:
 
 ```bash
 ascend adapter build --api https://api.example.com/chat --bearer "$TOK" --out mybot.json
@@ -93,9 +107,11 @@ ascend app create --type api --name 'Public Bot' --config mybot --target-api-key
 ascend assess run --app 'Public Bot' --name 'run 1'      # no bridge to start
 ```
 
-Ascend calls the target from its own infrastructure, so the target must be reachable from the
-internet and the key must be one the platform can hold. This type never appears in `bridge ls` and
-never triggers the NO-BRIDGE alarm.
+Ascend calls the target from its own infrastructure, so the target must be reachable from it — a
+public URL, or a private one behind the tunnel agent (`https://<host>.tun.straiker.ai/<path>`, see
+`ascend tunnel`) or a Straiker private link (`https://<label>.pl.straiker.ai/<path>`) — and the key
+must be one the platform can hold. This type never appears in `bridge ls` and never triggers the
+NO-BRIDGE alarm.
 
 ### `gcp`
 

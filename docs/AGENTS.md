@@ -54,20 +54,26 @@ exactly once). `assess pause`/`resume` are already safe to repeat.
 
 ```bash
 ascend status --json                                    # 1. read state
-ascend target add "$URL" --bearer "$TOK" --name Bot --json   # 2. onboard: adapter + app + key,
-                                                        #    validated. Pass a URL, a cURL/HAR
-                                                        #    file, or a config name — it detects
-                                                        #    which; do not pre-classify it.
+ascend target add "$URL" --bearer "$TOK" --name Bot --json   # 2. onboard: contract derived and
+                                                        #    proven, a hosted adaptor generated,
+                                                        #    gated, stored on a direct app and
+                                                        #    verified through the engine. Pass a
+                                                        #    URL, a cURL/HAR file, or a config
+                                                        #    name — it detects which; do not
+                                                        #    pre-classify it.
 ascend target check Bot --json                          # 3. re-prove it against the LIVE target
-ascend assess run --app Bot --name 'run 1'              # 4. run — auto-starts the bridge for a
-                                                        #    bridge-type app, self-stops at the end
+ascend assess run --app Bot --name 'run 1'              # 4. run — a hosted-adaptor app needs no
+                                                        #    bridge; for a --via bridge app it
+                                                        #    auto-starts one, self-stops at the end
 ascend assess watch --all --json                        # 5. follow (NDJSON, one object per tick)
 ascend reports --app Bot --detail --json                # 6. read results
 ascend ci --app Bot --assessment "$AID" --fail-on-severity high   # 7. decide
 ```
 
-Step 2 replaces the older three-command form, which still works unchanged and is what `target add`
-calls underneath — reach for it when you need a piece on its own:
+Step 2 replaces the older three-command form, which still works unchanged and is what
+`target add --via bridge` (the legacy path: a local adapter behind the CLI's bridge) calls
+underneath; the default path adds `ascend adaptor gate|store|verify` on top of the proven contract.
+Reach for it when you need a piece on its own:
 
 ```bash
 ascend adapter build --api "$URL" --bearer "$TOK" --out bot.json   # config only
@@ -79,7 +85,8 @@ ascend keys add --app Bot --key tc-…                               # key only
 shape moved, endpoint changed — still produces a *clean-looking* run that measured nothing. `check`
 is the difference between a pass and a false pass.
 
-`assess run` auto-manages the bridge, so there is no manual serve step. If run state changed in the
+`assess run` auto-manages the bridge for a bridge-type app, so there is no manual serve step; a
+hosted-adaptor app has nothing to manage on this machine. If run state changed in the
 Console (a Console-side pause/resume), reconcile with `ascend bridge sync` (start for running/paused
 apps, stop for terminal); `ascend assess resume` re-ensures a bridge on its own.
 

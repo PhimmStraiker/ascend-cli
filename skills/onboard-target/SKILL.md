@@ -143,7 +143,7 @@ ascend target check "<display name>"                              # the hard gat
 ascend chat "<display name>" --prompt "hello" --out ./captures/onboard_probe.jsonl
 tail -n 2 ./captures/onboard_probe.jsonl                          # redacted, 0600
 ```
-The relayed result must be the target's genuine answer — not an auth error, not an
+The result the bridge returns must be the target's genuine answer — not an auth error, not an
 empty body, not a transport parse failure. If it is wrong, go back to
 **build-adapter** step 5 (iterate the failing layer) — **do not** launch the
 assessment. This is the same gate build-adapter uses; here it doubles as an
@@ -156,13 +156,13 @@ ascend --json assess run --app <app_id> --name "onboarding run 1" \
   --controls <validated,ids>
 ```
 `assess run` does the correct lifecycle (create → pause → resume → poll) and blocks until
-terminal. **It manages the relay for you**: it starts one before probes are scheduled,
+terminal. **It manages the bridge for you**: it starts one before probes are scheduled,
 binds it to this assessment, restarts it if it dies mid-run, and stops it when the run
-ends. Stop the probe-gate runtime from step 4 first — a relay you started by hand is
-reused rather than replaced, but two relays for one app would split that app's probes
+ends. Stop the probe-gate runtime from step 4 first — a bridge you started by hand is
+reused rather than replaced, but two bridges for one app would split that app's probes
 between them.
 
-For a long run pass `--no-wait` and monitor with the **run-assessment** skill; the relay
+For a long run pass `--no-wait` and monitor with the **run-assessment** skill; the bridge
 stays up on its own and stops when *this* assessment finishes.
 
 Before trusting any result, confirm probes were actually answered:
@@ -184,9 +184,9 @@ measured nothing.
 
 ## Two gates that are not optional
 
-**Before the run — credentials must resolve where the relay will run.** If the config
-authenticates by `env:` reference, export the variable in the shell that starts the relay.
-`ascend bridge start` refuses and names a missing one, because a relay that starts without it is
+**Before the run — credentials must resolve where the bridge will run.** If the config
+authenticates by `env:` reference, export the variable in the shell that starts the bridge.
+`ascend bridge start` refuses and names a missing one, because a bridge that starts without it is
 refused by the target on every probe and scores as a clean run that measured nothing.
 
 **After the run — prove the target answered.**

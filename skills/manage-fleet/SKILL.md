@@ -2,7 +2,7 @@
 name: manage-fleet
 description: >-
   Onboard and assess several targets at once without losing track of which is which: batch
-  registration under distinct names, fleet runs, watching them together, and reconciling relays.
+  registration under distinct names, fleet runs, watching them together, and reconciling bridges.
   Use whenever there is more than one target — a customer with several bots, an environment
   matrix, or a regression sweep.
 ---
@@ -10,7 +10,7 @@ description: >-
 # manage-fleet
 
 One target is a command. Several targets is bookkeeping, and bookkeeping is where onboarding
-actually goes wrong: the wrong app assessed, two apps sharing a name, a relay serving a target you
+actually goes wrong: the wrong app assessed, two apps sharing a name, a bridge serving a target you
 thought you had stopped. Measured across a controlled trial, three targets was where the gap
 between using the CLI and driving the API by hand was widest — a mean of 2 errors against 10.5 —
 entirely because of tracking, not difficulty.
@@ -33,8 +33,8 @@ Two rules that prevent most fleet pain:
 
 ```bash
 ascend target list          # every target, its adapter, whether it is registered and serving
-ascend bridge ls            # every LIVE relay: state, and ANS = probes actually answered
-                            # (a finished relay self-stops and leaves this list; its counters stay in `assess results`)
+ascend bridge ls            # every LIVE bridge: state, and ANS = probes actually answered
+                            # (a finished bridge self-stops and leaves this list; its counters stay in `assess results`)
 ```
 
 `target list` flags same-named targets. If it does, fix that before running anything.
@@ -47,7 +47,7 @@ ascend assess run --all-bound --name 'wave 1'      # every target with a stored 
 ```
 
 A fleet run waits like the single form and prints one summary table; under `--json` it is one
-document, not a stream. Relays start and self-stop per app.
+document, not a stream. Bridges start and self-stop per app.
 
 ## Watch and verify
 
@@ -74,7 +74,7 @@ See `verify-run` for why that check is not optional.
 ascend bridge sync --app 'Support Bot A'   # one target
 ascend bridge sync                          # everything this machine knows about
 ascend bridge stop --all
-ascend target rm 'Support Bot A'            # exact name; deletes the app and forgets its relay
+ascend target rm 'Support Bot A'            # exact name; deletes the app and forgets its bridge
 ```
 
 `target rm` takes the **exact** name — never a substring — and confirms on a terminal. Deleting
