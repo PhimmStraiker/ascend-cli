@@ -149,7 +149,8 @@ another host to call.
 ### Tunnel and private-link apps
 
 `https://<real-host>.tun.straiker.ai` (tunnel) or `https://<name>.pl.straiker.ai` (private link)
-reaches a host inside the customer's network through Straiker's relay. For a tunnel the real host is
+reaches a host inside the customer's network: through the `ascend-tunnel` agent they run there, or
+through a private endpoint Straiker holds into their cloud. For a tunnel the real host is
 the name minus `.tun.straiker.ai`, and that is the host a HAR shows. `ascend adaptor shape` and
 `store` say when an app's URL is one of these.
 
@@ -380,9 +381,11 @@ When `verify` passes, tell the SE:
   role allows it; `ascend doctor` tells you what the key you have can do.
 - **Mint the engine uuid.** It is joined through the Console's listing by name; when that fails
   the Console URL is the source (`--console-id`).
-- **Detect a tunnel agent on this machine.** Whether a tunnel app's real host is reachable from here
-  is a question for the customer's network team; the adaptor reaches it through the engine either
-  way.
+- **Reach a tunnel app's real host from here.** `ascend tunnel ls` lists the tunnels this machine
+  started through the CLI and the state of each link (up, waiting for an app to list its key,
+  reconnecting); it does not see an agent started by other means or on another machine. Whether the
+  real host is reachable from this machine is a question for the customer's network team either way:
+  the adaptor reaches it through the engine.
 
 ## Where things live
 

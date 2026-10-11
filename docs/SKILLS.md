@@ -79,11 +79,13 @@ what separates a pass from a false pass on the next run.
 
 ## run-assessment and the bridge lifecycle
 
-A **bridge-type** app runs its adapter on your side; the CLI relays probes for it.
-The bridge lifecycle is now automatic. Do not add a manual start step:
+A **bridge-type** app (`target add --via bridge`, the legacy turn-mode path) runs its adapter on
+your side; the CLI's bridge carries probes to it. The default `target add` registers an `api` app
+with a hosted adaptor, which needs no bridge: nothing in this section applies to it.
+The bridge lifecycle is automatic. Do not add a manual start step:
 
-- `ascend assess run` on a bridge-type app **auto-starts the bridge** (the CLI's
-  built-in relay) before probes are scheduled, and the bridge **self-stops** when
+- `ascend assess run` on a bridge-type app **auto-starts the bridge** (built into the
+  CLI; nothing to install) before probes are scheduled, and the bridge **self-stops** when
   the assessment reaches a terminal state.
 - While an assessment is **paused** the bridge stays alive; it self-stops only when the run
   reaches a terminal state. Idle cleanup is opt-in via `--idle-timeout` (off by default).
@@ -95,7 +97,7 @@ The bridge lifecycle is now automatic. Do not add a manual start step:
 - `ascend bridge start` still exists for advanced use (remote, continuous, or
   pre-start), but is not a step in the normal flow.
 
-A bridge is **per-app**: one relay is shared across that app's assessments with no
+A bridge is **per-app**: one bridge is shared across that app's assessments with no
 cross-assessment contamination. The v2 pull protocol (`transport/`) carries only
 an opaque `request_id`/`msg_id` that the bridge echoes back, and the platform
 attributes each probe to its assessment. False-pass safety is preserved: a bridge

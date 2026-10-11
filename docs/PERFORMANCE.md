@@ -29,7 +29,7 @@ The long-lived PAT already sits in the environment; the cached JWT is a 10-minut
 - **`get_assessment`**. It is the live status; caching it would freeze `assess watch` and the
   poller.
 - **The assessments list on any liveness path**. A stale `complete` would hide a running
-  assessment whose relay died, which is how a false pass happens. `assess run`
+  assessment whose bridge died, which is how a false pass happens. `assess run`
   auto-manages the bridge, so this is now mainly a risk when auto-management is off or a remote
   bridge dies. The liveness path stays uncached so `bridge sync` and the NO-BRIDGE alarm see current state.
 - Anything non-GET, and any response carrying a one-shot `tc-` key.

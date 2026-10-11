@@ -103,7 +103,7 @@ bundled examples, in that same precedence order, so a config written from one di
 from every other. Lookup used to pick the first directory that *existed* and search only inside it;
 since every checkout ships a `configs/` of examples, running from a checkout hid `~/.ascend/configs`
 completely and a config written elsewhere came back as "config not found". It read as a bridge
-problem rather than a lookup one, because the relay exits before it ever leases and a relay that
+problem rather than a lookup one, because the bridge exits before it ever leases and a bridge that
 never starts is indistinguishable from one that dropped — while the app's key kept resolving, since
 keys live in `~/.ascend` and never depended on the working directory. `ascend adapter configs` lists
 every config that is actually resolvable and names the directory writes land in.

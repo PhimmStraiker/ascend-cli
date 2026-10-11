@@ -1,7 +1,7 @@
 # Running many engagements at once
 
 One tenant, many apps. Each Ascend app has its own `tc-` key, and **a `tc-` key selects exactly one
-application server-side**, so N bridge-type apps means N relays. For a normal run, `assess run`
+application server-side**, so N bridge-type apps means N bridges. For a normal run, `assess run`
 auto-starts a bridge per app (see
 [ASSESSMENT_LIFECYCLE.md](ASSESSMENT_LIFECYCLE.md)):
 
@@ -22,19 +22,19 @@ down after a clean run.
 
 `assess run`/`resume` cover the normal flow. The explicit fleet commands remain for advanced use:
 
-- **Pre-start** a relay before scheduling probes, or keep one running **continuously** across many
+- **Pre-start** a bridge before scheduling probes, or keep one running **continuously** across many
   assessments.
-- **Remote/detached** operation where you want the relays up independently of any `assess` call.
+- **Remote/detached** operation where you want the bridges up independently of any `assess` call.
 - **Reconcile** after Console-side state changes the CLI didn't drive.
 
 ```
-ascend bridge start --all-running   # a detached relay per live assessment — no key pasting
+ascend bridge start --all-running   # a detached bridge per live assessment — no key pasting
 ascend bridge start --app 'Bot A' --app 'Bot B'   # pre-start specific apps
-ascend bridge sync                  # start relays for running/paused apps, stop them for terminal
+ascend bridge sync                  # start bridges for running/paused apps, stop them for terminal
 ascend bridge stop --all
 ```
 
-`bridge sync` reconciles the fleet with assessment state: it starts a relay for every
+`bridge sync` reconciles the fleet with assessment state: it starts a bridge for every
 app whose assessment is running or paused and stops one for every app that has gone terminal. Use
 it after a Console-side resume/pause. The SaaS can't start a process on your machine, so the
 CLI has to reconcile.
@@ -53,8 +53,8 @@ error: this CLI is locked to tenant 'acme.com (admin)', but the supplied credent
 ```
 
 Identity comes from your PAT-exchanged JWT (`iss` + `straikerId`). Only a **SHA-256 fingerprint** is
-stored, never the raw id or the PAT. `tenant switch --confirm` refuses while relays are running,
-then archives and clears the stored keys so nothing can leak forward. All state (keys, relay records)
+stored, never the raw id or the PAT. `tenant switch --confirm` refuses while bridges are running,
+then archives and clears the stored keys so nothing can leak forward. All state (keys, bridge records)
 lives under the tenant's fingerprint directory.
 
 ## The key store
@@ -72,7 +72,7 @@ so if it isn't captured the app can never be served.
 `ascend target rm X` does both halves at once: it deletes the application and drops its stored key,
 which is the state you want when an engagement ends.
 
-Keys live in a 0600 file under the tenant's state dir. They are **never** put on a relay's command
+Keys live in a 0600 file under the tenant's state dir. They are **never** put on a bridge's command
 line, because argv is world-readable via `ps`; they go into the child's environment.
 
 `ascend app bind <config> --app <app>` records the config↔app link inside the config's `_ascend`
@@ -94,18 +94,18 @@ Check an app's type with `ascend app list` (the `TYPE` column shows `bridge` for
 $ ascend bridge start --app 'Bot A' --app 'Bot B' --qpm-total 60
   started  Bot A  pid=25502  log=~/.ascend/state/<tenant>/relays/aapp_….log
   started  Bot B  pid=25503  log=…
-  2 relay(s) started, qpm=30 each
+  2 bridge(s) started, qpm=30 each
   they survive this terminal closing.  check:  ascend bridge ls
 ```
 
 Processes are used instead of threads for several reasons: the CLI's signal handler closes over one
 client (so N-1 would never stop), `logging.basicConfig` is global and first-call-wins with app-less
-logger names, the conversation router has no teardown (each relay would leak a loop, a thread and
+logger names, the conversation router has no teardown (each bridge would leak a loop, a thread and
 cached adapters, including live Chromium), and a native adapter crash would take the whole fleet
 down. Processes give per-app logs and isolation.
 
-`--qpm-total N` splits the rate across the relays it starts. Rate limiting is per-relay, so without
-this, three relays pointed at one customer host hit it at 3× your intended rate.
+`--qpm-total N` splits the rate across the bridges it starts. Rate limiting is per-bridge, so without
+this, three bridges pointed at one customer host hit it at 3× your intended rate.
 
 ```
 $ ascend bridge ls
@@ -141,7 +141,7 @@ and a config written elsewhere was "config not found", while the same app's key 
 (keys live in `~/.ascend` and never depended on the working directory). Configs are searched per
 *file* across every config directory now, and `ascend adapter configs` lists all of them. When a
 row in `bridge ls` looks wrong, `ascend target check <t>` proves the config against the live
-endpoint before you go looking at the relay.
+endpoint before you go looking at the bridge.
 
 ## Many assessments
 

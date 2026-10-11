@@ -71,7 +71,7 @@ run and an idle bridge — which reads as "the bridge died".
 Declare it instead of pasting a token. For a credential that does not expire, give it on
 the command line as an environment reference — `--bearer env:MY_TOKEN`,
 `--api-key 'X-API-Key:env:MY_KEY'`, `--basic 'user:env:MY_PW'` — and the config carries the
-reference, never the value; the relay resolves it on every run. For a credential that is
+reference, never the value; the bridge resolves it on every run. For a credential that is
 minted by a login, two separate blocks, because they answer two different questions —
 **`auth`** is *who mints the credential* (Layer 2), and **`auth_lifecycle`** is *when to
 re-acquire it* (Layer 3):
@@ -376,7 +376,7 @@ the raw evidence and escalate that specific layer — do **not** ship a guess.
 
 **Read this before re-building anything.** Nearly every failure in this tool presents as a
 different failure than it is: a platform pause reads as a dead bridge, an expired token reads
-as a well-behaved bot refusing, and probes split across two relays read as nothing at all.
+as a well-behaved bot refusing, and probes split across two bridges read as nothing at all.
 Diagnose in the order below, because step 1 rules out most of the table.
 
 **Step 1 — always: `ascend bridge ls`. Read `ANS`.** It counts probes the target actually
@@ -385,7 +385,7 @@ anything yet.
 
 | symptom | what it actually is | what to do |
 |---|---|---|
-| `answered=0`, `failed` climbing | the **adapter** is failing every probe, not the bridge | fix the adapter (timeout, credential). Restarting the relay changes nothing |
+| `answered=0`, `failed` climbing | the **adapter** is failing every probe, not the bridge | fix the adapter (timeout, credential). Restarting the bridge changes nothing |
 | worked for N probes, then everything "refuses" | a short-lived credential expired mid-run | `auth_lifecycle: reauth_on_401` (or `refresh_on_ttl`) |
 | run sits at `paused`, bridge is healthy | the **platform** auto-paused after repeated probe failures | fix the adapter failure, then `assess resume` |
 | every probe fails against a slow target | `timeout_ms` shorter than the reply time — 100% failure, not refusal | remove the pin; agents take 2-3 min. Then check the per-probe window below |
@@ -395,7 +395,7 @@ anything yet.
 | the "answer" looks like protocol, not prose | marker-framed stream misdetected as REST | `sentinel_stream` with the BEGIN/END markers |
 | first turn passes, later turns lose context | session/conversation not carried | set the session id lifecycle; some targets also need `warmup_message` |
 | every probe 403s but the same request works in a browser | anti-automation on the endpoint | `adapter build --url` (browser), `--manual` to drive it yourself |
-| probes seem to vanish, throughput is half | two relays serving one app, splitting its probes | `bridge ls`; stop the one you started by hand |
+| probes seem to vanish, throughput is half | two bridges serving one app, splitting its probes | `bridge ls`; stop the one you started by hand |
 | a create call errors but the thing exists | the response was dropped after the server acted | check `app list` before retrying, or you will duplicate it |
 
 **When the tool is unhelpful rather than wrong.** Several failures above once surfaced only as

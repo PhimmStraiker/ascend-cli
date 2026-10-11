@@ -55,7 +55,7 @@ An adapter config is exactly: **one choice per layer** (+ that choice's paramete
 > the `auth_lifecycle` block by `AuthLifecycle`, both at the shared call seam in
 > `runtime/call_target.py`, so every adapter in the registry gets them — including the vendor
 > presets that also mint their own credentials. That seam is why `adapter validate` and the live
-> relay send identical credentials, and why an expired token re-authenticates and retries the probe
+> bridge send identical credentials, and why an expired token re-authenticates and retries the probe
 > once instead of scoring as a target refusal.
 
 ## Layer 4: Session / conversation (how turns bind)

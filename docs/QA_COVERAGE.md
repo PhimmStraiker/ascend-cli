@@ -29,7 +29,7 @@ Last regenerated: 2026-09-07. Command paths: 71.
 | `ascend assess list` | live, by 31 agent invocations in the 62-agent trial (2026-09-04/05) |
 | `ascend assess pause` | live by hand 2026-09-06: a `created` run -> `paused`, confirmed by `assess status` |
 | `ascend assess results` | live, by 70 agent invocations in the 62-agent trial (2026-09-04/05) |
-| `ascend assess resume` | live by hand 2026-09-06: the paused run -> `running`, then completed against the relay |
+| `ascend assess resume` | live by hand 2026-09-06: the paused run -> `running`, then completed against the bridge |
 | `ascend assess run` | live, by 70 agent invocations in the 62-agent trial (2026-09-04/05) |
 | `ascend assess status` | live, by 7 agent invocations in the 62-agent trial (2026-09-04/05) |
 | `ascend assess watch` | live, by 19 agent invocations in the 62-agent trial (2026-09-04/05) |

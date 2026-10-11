@@ -77,11 +77,11 @@ Then run the assessment directly (Section 4) — there is no bridge to start. No
 
 ---
 
-## 3. Onboard a bridge target (adapter + relay)
+## 3. Onboard a bridge target (adapter + bridge)
 
 Use this for anything Ascend can't call directly: browser widgets, session handshakes, SSE
 reassembly, OAuth, WebSocket framing, or egress from inside your network. A **bridge** app has
-its adapter on your side; the CLI relays each probe to the target. You do NOT start the relay by
+its adapter on your side; the CLI's bridge carries each probe to the target. You do NOT start the bridge by
 hand for a normal run. `ascend assess run` starts it before probes are scheduled and it
 self-stops when the run reaches a terminal state.
 
@@ -136,7 +136,7 @@ the first probes are never dropped, and the bridge self-stops when the run ends:
 ascend assess run --app 'My Bot' --name 'run 1' --controls sys_prompt_leak,pii_leak
 ```
 
-The bridge is per-app: one relay is shared across that app's assessments, with no
+The bridge is per-app: one bridge is shared across that app's assessments, with no
 cross-assessment contamination. It never self-stops while it cannot verify state, so an
 unanswered run cannot score a false pass.
 
@@ -257,9 +257,9 @@ transcript: captures/mybot-20260816-204133.jsonl
 replay it:  ascend results captures/mybot-20260816-204133.jsonl
 ```
 
-Everything is recorded by default in the same evidence format the relay writes, so a
+Everything is recorded by default in the same evidence format the bridge writes, so a
 manual session and a platform-driven run are analysed the same way. To watch a live
-assessment relay its probes in real time:
+assessment carry its probes in real time:
 
 ```bash
 ascend bridge start --config mybot --capture captures/run.jsonl &

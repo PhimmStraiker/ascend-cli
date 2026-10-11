@@ -41,7 +41,7 @@ flowchart LR
 Two different things get called "the bridge" in conversation, and keeping them apart is
 the difference between a five-minute diagnosis and an hour: the **lease service** is
 Straiker-side and always up; **the bridge** is the process on your machine that leases
-probes and calls your agent (this repo also calls it the relay). When someone says "the
+probes and calls your agent (older code paths and JSON keys in this repo still say `relay`). When someone says "the
 bridge dropped", they nearly always mean their own bridge process is not running —
 `ascend bridge ls` says which.
 
@@ -54,7 +54,7 @@ bridge dropped", they nearly always mean their own bridge process is not running
 | Where do my credentials live? | Target credentials stay in your adapter config / environment and are used only by the bridge. Straiker never receives them. |
 | Can I stop it instantly? | Yes — stopping the bridge stops delivery immediately. |
 | What if the bridge dies mid-probe? | The probe is reclaimed server-side after ~90s and redelivered. Nothing is lost. |
-| How long may my agent take to answer? | Each probe has a bounded window of roughly **110–120s**, and the clock starts when the probe is **queued**, not when your relay calls the agent. See §6. |
+| How long may my agent take to answer? | Each probe has a bounded window of roughly **110–120s**, and the clock starts when the probe is **queued**, not when your bridge calls the agent. See §6. |
 
 ---
 
@@ -170,17 +170,17 @@ them. See [`DISCOVERY.md`](DISCOVERY.md) for the capture pipeline and its limits
 ## 6. Two limits worth knowing before you debug
 
 **The per-probe window.** The platform gives each probe roughly **110–120s**, measured from
-when it is *queued* — not from when your relay calls your agent. A probe that exceeds it comes
+when it is *queued* — not from when your bridge calls your agent. A probe that exceeds it comes
 back as a synthetic timeout that looks exactly like your target failing, and enough of those
 auto-pause the assessment. So a slow agent presents as a broken one. `adapter validate` and
 `target check` time the call and say so plainly when a target is at or beyond the window.
 Agents that think for two or three minutes are common; if yours does, lower concurrency or
-raise QPM headroom rather than assuming the relay is at fault.
+raise QPM headroom rather than assuming the bridge is at fault.
 
 **Where configs are found.** Adapter configs are searched per *file*, in this order:
 `$ASCEND_CONFIG_DIR`, then `./configs`, then `~/.ascend/configs`, then the bundled examples.
 New configs are written to one directory (`ascend adapter configs` prints which). This is
 worth knowing because the failure is misleading: a config that cannot be resolved makes
-`runtime start` exit *before it ever leases*, and a relay that never starts is
+`runtime start` exit *before it ever leases*, and a bridge that never starts is
 indistinguishable from one that dropped — while `ascend keys` keeps working, since keys live
 in `~/.ascend` and never depended on the working directory.

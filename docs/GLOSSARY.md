@@ -13,8 +13,8 @@ left-hand column.
 | **adapter** | The code that talks to one *shape* of target: `direct_api`, `sse_stream`, `bedrock`… 15 of them. | connector, driver |
 | **adapter config** (or **config**) | A saved JSON file describing one specific target: its URL, body shape, where the answer lives, its auth. Produced by `ascend adapter build`. | profile, target file |
 | **adaptor** | One JavaScript file the Ascend **engine** runs to talk to a target no template can drive (a login, a token mint, a conversation to open, a reply to poll for). Stored on the app as `request_template._adaptor_src`; built with `ascend adaptor`. Spelled differently from *adapter* on purpose: an adapter runs on your side, an adaptor on the engine's. See [CUSTOM_ADAPTOR.md](CUSTOM_ADAPTOR.md). | custom adapter, engine adapter |
-| **bridge (app type)** | An app whose adapter runs on **your** side; the CLI relays its probes. One of `bridge\|api\|gcp\|bedrock`, and the default. See [APP_TYPES.md](APP_TYPES.md). | thin (the old name, gone from the user surface) |
-| **the bridge** (process) | The CLI running that relay: it leases probes from Ascend and puts them through your adapter. The CLI **is** the bridge, baked in; there is no separate binary to install. Managed by `ascend bridge`. | relay (the old name; still works as an alias) |
+| **bridge (app type)** | An app whose adapter runs on **your** side; the CLI's bridge carries its probes. One of `bridge\|api\|gcp\|bedrock`; `app create`'s default and the legacy path — `target add` registers an `api` app with a hosted adaptor. See [APP_TYPES.md](APP_TYPES.md). | thin (the old name, gone from the user surface) |
+| **the bridge** (process) | The CLI running that bridge: it leases probes from Ascend and puts them through your adapter. The CLI **is** the bridge, baked in; there is no separate binary to install. Managed by `ascend bridge`. | relay (the old name; still works as an alias) |
 | **lease service** | The Straiker-side endpoint the bridge leases probes from and posts results to (`/v2/lease`, `/v2/result`). Always up; not something you run. Naming it separately is what stops "the bridge is down" from being ambiguous. | the bridge (it is the other end of it) |
 | **bridge key** (`tc-…`) | The credential the bridge presents. Returned **once**, when a bridge app is created. | thin key, thin API key, tc key, relay key |
 | **tunnel** | The L4 path to a private or local app: the open-source `ascend-tunnel` agent runs on a machine in your network, dials out to Straiker once over HTTPS, and Ascend reaches the app through it at `https://<host>.tun.straiker.ai/<path>` — speaking to the app itself, through a request template or a hosted adaptor. The agent dials only the hosts on its allow list and sees only ciphertext. Managed by `ascend tunnel`. | the bridge, proxy, agent (alone; that is the target) |
@@ -29,8 +29,8 @@ left-hand column.
 | **transcript** | A recorded prompt/response file, written by `chat --out` or `bridge start --capture`. | evidence log, capture file, recorded session |
 
 **"bridge" has two senses.** One-word-per-concept can't collapse them, so both are
-defined above: the **app type** (an app the CLI relays for) and **the bridge** (the relay process
-itself). Read "a bridge app" as the type; "the bridge" or "start the bridge" as the process.
+defined above: the **app type** (an app the CLI's bridge carries probes for) and **the bridge** (the
+process itself). Read "a bridge app" as the type; "the bridge" or "start the bridge" as the process.
 `ascend assess run` on a bridge app auto-starts the bridge and it self-stops when
 the assessment reaches a terminal state. `ascend bridge` is the manual control surface.
 

@@ -20,14 +20,14 @@ one-line rationale per reclassification.
 ## 0. First: did the run measure anything at all?
 
 A clean score is only meaningful if the target actually answered. An assessment whose
-probes went unanswered — no relay serving, an adapter timing out, an expired credential —
+probes went unanswered — no bridge serving, an adapter timing out, an expired credential —
 still completes and still reports a score, and that score is **LOW risk with zero
 findings**. Reporting it as a good result is the worst failure mode in this whole pipeline,
 because it tells a customer they are safe on the basis of nothing.
 
 ```
-ascend assess results --app <app>    # the `answered` line: must be > 0 (survives the relay stopping)
-ascend bridge ls                     # same counter, live view — only while the relay is still serving
+ascend assess results --app <app>    # the `answered` line: must be > 0 (survives the bridge stopping)
+ascend bridge ls                     # same counter, live view — only while the bridge is still serving
 ```
 
 If `answered = 0`, or `failed` is a large fraction of the probes, stop. There is nothing to

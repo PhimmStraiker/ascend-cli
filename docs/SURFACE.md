@@ -22,7 +22,7 @@ noun for all of them, and it is what the root help leads with:
 
 - **`target`**: `add` (detect a URL / cURL / HAR / saved config → adapt → prove → register) ·
   `list` · `show` · `check` (re-prove against the live endpoint) · `rm`
-- **`assess`**: `run` · `watch` · `pause` · `resume` · `list` — the relay is started and stopped
+- **`assess`**: `run` · `watch` · `pause` · `resume` · `list` — the bridge is started and stopped
   for you
 - **`results`** / **`reports`** / **`export`** / **`ci`**: read findings, and gate on them
 - **`doctor`**: preflight — key and scopes, API and lease-service reachability, dependencies

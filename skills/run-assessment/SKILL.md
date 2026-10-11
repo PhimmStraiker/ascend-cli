@@ -56,9 +56,9 @@ ascend --json assess run --app <app_or_name> --name "<run label>" \
 `assess run` performs the whole lifecycle correctly (create → pause → resume →
 poll) and blocks until terminal, printing tick progress to stderr; it exits non-zero
 if the run could not be followed to the end, so a green exit means a finished run.
-While it waits it also keeps the bridge honest: a relay that stops answering is
-replaced, a run the platform paused during that outage is resumed once the relay is
-back, and a run left paused with no relay startable ends the wait with exit 1 and the
+While it waits it also keeps the bridge honest: a bridge that stops answering is
+replaced, a run the platform paused during that outage is resumed once the bridge is
+back, and a run left paused with no bridge startable ends the wait with exit 1 and the
 two commands that continue it. `--app` is repeatable — a fleet waits the same way and
 ends with one summary table. For a long run you want to monitor separately, add
 `--no-wait` — it returns after resume with the assessment id, and you drive steps 4–5
@@ -84,7 +84,7 @@ ascend assess resume --app <app> --assessment <id>
 `ascend bridge ls` is the ground truth for whether anything is actually being tested:
 
 ```
-ascend bridge ls        # STATE, ANS (answered), DELIV, FAIL, LEASE-ERR per relay
+ascend bridge ls        # STATE, ANS (answered), DELIV, FAIL, LEASE-ERR per bridge
 ```
 
 **`ANS` (answered) is the number that matters** — probes the target answered with a 200.
@@ -95,7 +95,7 @@ ascend bridge ls        # STATE, ANS (answered), DELIV, FAIL, LEASE-ERR per rela
   `timeout_ms` (agentic targets take 2-3 minutes and often much more), or a short-lived
   credential expired mid-run. Fix the adapter (see **build-adapter**: Layer 3, Timeouts).
   Restarting the bridge will not help.
-- `answered = 0` and nothing moving at all → no relay is serving this app. Unanswered
+- `answered = 0` and nothing moving at all → no bridge is serving this app. Unanswered
   probes are not findings: the run finishes **clean having measured nothing** (false pass).
 
 **The trap: a run that goes `paused` by itself.** When probes keep failing the platform
@@ -104,22 +104,22 @@ failed 5/5 probes, the run flipped `running → paused` and sat there while the 
 perfectly healthy. That reads as "the bridge died" and it is not — it is an adapter failure
 the platform reacted to. Diagnose in this order:
 
-1. `ascend bridge ls` → is a relay `serving`, and is `ANS` above zero?
+1. `ascend bridge ls` → is a bridge `serving`, and is `ANS` above zero?
 2. If `ANS = 0`, fix the adapter (timeout / auth). Do **not** restart the bridge.
 3. Then `ascend assess resume --app <app> --assessment <id>`.
 
 When `assess run` is the one following the run it does this for you: it resumes a run
-the platform paused during a relay outage it repaired, and it exits 1 naming the cause
+the platform paused during a bridge outage it repaired, and it exits 1 naming the cause
 when nothing could be repaired. The steps above are for a run you follow by hand.
 
-A relay is bound to the assessment it was started for and stays up for that whole run,
-including while it is paused. A relay started by hand (`ascend bridge start`) stays up until stopped.
-Never run two relays for one app — they split that app's probes between them.
+A bridge is bound to the assessment it was started for and stays up for that whole run,
+including while it is paused. A bridge started by hand (`ascend bridge start`) stays up until stopped.
+Never run two bridges for one app — they split that app's probes between them.
 
 Keep the host awake for long runs; a sleeping Mac drops the connection.
 
 The full symptom table — including the failures that present as something else entirely (protocol
-captured as the answer, probes split across two relays, a create that errored but succeeded) — is in
+captured as the answer, probes split across two bridges, a create that errored but succeeded) — is in
 **build-adapter**, under *Troubleshooting: symptom -> what it actually is*. Start there rather than
 guessing, and start with `ANS`.
 
@@ -153,6 +153,6 @@ no need to re-issue the run or follow up with `assess results`:
 ascend assess run --app '<name>' --name r1 --controls sys_prompt_leak --detail
 ```
 
-The result carries an `answered` line from the relay's own counters. Treat a clean score with
+The result carries an `answered` line from the bridge's own counters. Treat a clean score with
 `answered = 0` as a failed run, not a passing one — the guard says so explicitly, and it now only
 fires on evidence rather than on probe count, so when it speaks it means it.
