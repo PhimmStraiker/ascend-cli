@@ -71,6 +71,7 @@ import sys
 import threading
 import time
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 import requests
 
@@ -424,6 +425,21 @@ class AscendAPI:
 
     def list_apps(self) -> Any:
         return self._req("GET", "/ascend/applications?limit=100")
+
+    def list_inventory_agents(self, *, limit: int = 100, pages: int = 10) -> List[Dict[str, Any]]:
+        """Every Discover inventory agent, the v3 list envelope (`data`, `has_more`,
+        `next_cursor`) followed to its end (capped). Read-only; this is the name join
+        `target cloud` uses to say which cloud resource a Discover row is."""
+        rows: List[Dict[str, Any]] = []
+        cursor = None
+        for _ in range(pages):
+            path = f"/inventory/agents?limit={limit}" + (f"&cursor={quote(str(cursor))}" if cursor else "")
+            got = self._req("GET", path) or {}
+            rows.extend(self._rows(got))
+            cursor = got.get("next_cursor") if isinstance(got, dict) else None
+            if not (isinstance(got, dict) and got.get("has_more")) or not cursor:
+                break
+        return rows
 
     @staticmethod
     def _rows(payload: Any) -> List[Dict[str, Any]]:
