@@ -27,8 +27,11 @@ def helpfor(path):
     return _help[key]
 
 
-# `ascend <verb> [<sub>] rest…` — stop at a newline, a backtick, a pipe, or a shell separator
-INVOKE = re.compile(r"(?<![\w./-])ascend[ \t]+([a-z][a-z-]*)(?:[ \t]+([a-z][a-z-]*))?([^\n`|;&#]*)")
+# `ascend <verb> [<sub> [<sub>]] rest…` — stop at a newline, a backtick, a pipe, or a shell
+# separator. Three levels since `ascend target cloud list|add`: the deepest path argparse
+# accepts wins, so a positional that happens to be a word (`add support_agent`) is tried as a
+# verb first and falls back to the shorter path when it is not one.
+INVOKE = re.compile(r"(?<![\w./-])ascend[ \t]+([a-z][a-z-]*)(?:[ \t]+([a-z][a-z-]*))?(?:[ \t]+([a-z][a-z-]*))?([^\n`|;&#]*)")
 BOX = re.compile(r"[\u2500-\u257f]")           # box-drawing: a diagram, not a command
 # flags mentioned in prose outside a command are not checked; only those on the same invocation
 FLAG = re.compile(r"(?<![\w-])(--[a-z][a-z0-9-]*)")
@@ -40,11 +43,12 @@ def check(text, where):
         line_text = text[text.rfind("\n", 0, m.start()) + 1: text.find("\n", m.end()) if text.find("\n", m.end()) != -1 else len(text)]
         if BOX.search(line_text):
             continue
-        v1, v2, rest = m.group(1), m.group(2), m.group(3) or ""
-        path = [v1] + ([v2] if v2 else [])
+        v1, v2, v3, rest = m.group(1), m.group(2), m.group(3), m.group(4) or ""
+        path = [v1] + ([v2] if v2 else []) + ([v3] if v3 else [])
         ok, accepted = helpfor(path)
-        if not ok and len(path) == 2:
-            path, (ok, accepted) = [v1], helpfor([v1])
+        while not ok and len(path) > 1:
+            path = path[:-1]
+            ok, accepted = helpfor(path)
         line = text.count("\n", 0, m.start()) + 1
         if not ok:
             out.append(f"{where}:{line}: not a command: `ascend {' '.join(path)}`")

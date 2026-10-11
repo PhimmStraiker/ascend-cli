@@ -5951,6 +5951,278 @@ def cmd_target_rm(args):
          human=f"removed {app_id}  (app_deleted=True, key_removed={r['key_removed']})")
 
 
+# ----------------------------------------------------------------------------- target cloud
+# The agents the operator's OWN cloud credentials can see — AgentCore runtimes, classic Bedrock
+# agents, Vertex Agent Engine deployments — listed with the console's words for where each one
+# stands, and registered as the NATIVE application type the platform calls itself. Discover knows
+# these agents exist but carries no endpoint for them (measured: 126 cloud-platform rows on a
+# live tenant, none with a URL or an ARN); the operator's `aws` session or `gcloud` login does.
+# All the cloud logic is runtime/cloud_targets.py; this is the command shape and the record.
+
+def _cloud_regions_default():
+    """Which AWS regions to list when none was given: the environment's, else the default chain's.
+    Never a hard-coded one — the wrong region lists nothing and reads as 'no agents'."""
+    r = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    if r:
+        return [r]
+    try:
+        import boto3  # noqa: PLC0415
+        r = boto3.Session(profile_name=os.environ.get("AWS_PROFILE") or None).region_name
+    except Exception:  # noqa: BLE001 - no boto3, or no profile: the operator names the region
+        r = None
+    return [r] if r else []
+
+
+def _cloud_listing(args, CT):
+    """One cloud per call, enumerated read-only on this machine's credentials."""
+    if getattr(args, "aws", False) and getattr(args, "gcp", False):
+        _die("one cloud per call: --aws or --gcp")
+    if not (getattr(args, "aws", False) or getattr(args, "gcp", False)):
+        _die("say which cloud to look in: --aws [--region R ...]  or  --gcp --project P --region R",
+             hint="ascend target cloud list --aws --region us-east-2")
+    try:
+        if args.aws:
+            regions = args.region or _cloud_regions_default()
+            if not regions:
+                _die("pass --region (e.g. --region us-east-2): AWS lists per region, and no region is "
+                     "set in AWS_REGION, AWS_DEFAULT_REGION or the profile", error_code="no_region")
+            return CT.aws_list(regions, prefer=getattr(args, "via", "auto") or "auto",
+                               profile=getattr(args, "profile", None))
+        return CT.gcp_list(getattr(args, "project", None), args.region or [])
+    except CT.CloudError as e:
+        _die(str(e), code=EXIT_ERROR, error_code=e.code)
+
+
+def _cloud_platform_side(args, c=None):
+    """The platform's half of the join when a PAT is present: the registered applications (an
+    ARN or endpoint already on one = onboarded) and the Discover rows (a name match = potential ·
+    testable now). Without a PAT nothing is claimed: (None, None, None)."""
+    if c is None and not _has_token(args):
+        return None, None, None
+    c = c or _client(args)
+    try:
+        apps = _unwrap_list(c.list_apps())
+    except Exception as e:  # noqa: BLE001 - the listing is the point; say why it failed
+        _die(f"could not read the applications: {type(e).__name__}: {e}", code=EXIT_ERROR)
+    try:
+        rows = c.list_inventory_agents()
+    except Exception as e:  # noqa: BLE001 - a PAT without inventory scope still sees the apps
+        print(f"  (Discover inventory not readable with this PAT: {type(e).__name__} — "
+              f"STATE can only say onboarded or cloud candidate)", file=sys.stderr)
+        rows = []
+    return c, apps, rows
+
+
+def cmd_target_cloud_list(args):
+    """What this machine's cloud credentials can see, with the console's word for each."""
+    import cloud_targets as CT
+    listed = _cloud_listing(args, CT)
+    c, apps, rows = _cloud_platform_side(args)
+    if apps is None:
+        print("  (no PAT in this shell: STATE not checked against the platform)", file=sys.stderr)
+    prow = CT.platform_rows(rows, listed["platform"]) if rows is not None else None
+    cands = [{**cand, **CT.state_of(cand, apps, prow)} for cand in listed["candidates"]]
+    needs = CT.unmatched_rows(prow, listed["candidates"]) if prow is not None else []
+    result = {**listed, "candidates": cands, "platform_checked": apps is not None, "needs_access": needs}
+    if args.json:
+        _out(result, args)
+        return
+    where = (f"project {listed['project']} · " if listed.get("project") else "") + ", ".join(listed["regions"])
+    if not cands:
+        print(f"no agents visible to these credentials in {where} (via {listed['via']}).")
+        for e in listed.get("errors") or []:
+            print(f"  ! {e['region']}: {e['error']}")
+        return
+    print(f"  {'PLATFORM':9} {'KIND':10} {'NAME':34} {'REGION':12} {'STATUS':13} STATE")
+    for r in cands:
+        state = r["state"] or "-"
+        if r.get("discover"):
+            state += f"   ← Discover {r['discover']['label']} ({r['discover']['id']})"
+        if r.get("app"):
+            state += f"   ← app {r['app']['name']} ({r['app']['id']})"
+        print(f"  {r['platform']:9} {r['kind']:10} {str(r['name'])[:34]:34} {str(r.get('region') or '-')[:12]:12} "
+              f"{str(r.get('status') or '-')[:13]:13} {state}")
+        print(f"  {'':9} {'':10} ref {r['ref']}")
+    if needs:
+        print(f"\n  {len(needs)} Discover row(s) on this platform match none of these — {CT.NEEDS_ACCESS} "
+              f"(another account or region, or since deleted):")
+        for n in needs[:12]:
+            print(f"      {n['label']} ({n['id']})")
+        if len(needs) > 12:
+            print(f"      … and {len(needs) - 12} more")
+    for e in listed.get("errors") or []:
+        print(f"  ! {e['region']}: {e['error']}")
+    print(f"\n{len(cands)} candidate(s) via {listed['via']} · {where}")
+    first = next((r for r in cands if r["state"] != CT.ONBOARDED), None)
+    if first:
+        how = ("--auth assume-role --role-arn arn:aws:iam::<account>:role/<role> --external-id env:EXT_ID"
+               if first["platform"] == "bedrock" else "--service-account @/path/to/sa.json")
+        print(f"  register one:  ascend target cloud add '{first['ref']}' --name '{first['name']}' {how}")
+
+
+def cmd_target_cloud_add(args):
+    """Register one cloud agent as the native application type the platform calls itself."""
+    import api
+    import cloud_targets as CT
+    import creds as C
+    ref = str(args.candidate or "").strip()
+    cand = CT.parse_ref(ref)
+    if cand is None:
+        if not (getattr(args, "aws", False) or getattr(args, "gcp", False)):
+            _die(f"{ref!r} is not an ARN, an engine resource name or a streamQuery URL. To resolve a name, "
+                 f"say where to look: --aws --region R  or  --gcp --project P --region R",
+                 error_code="unknown_candidate", hint="ascend target cloud list --aws --region us-east-2")
+        listed = _cloud_listing(args, CT)
+        same = [x for x in listed["candidates"] if CT.same_name(x["name"], ref)]
+        if not same:
+            _die(f"no candidate named {ref!r} in {', '.join(listed['regions'])} (via {listed['via']})",
+                 error_code="candidate_not_found", hint="ascend target cloud list shows what these credentials see")
+        if len(same) > 1:
+            _die(f"{len(same)} candidates are named {ref!r}; pass the ref instead:\n  "
+                 + "\n  ".join(x["ref"] for x in same), error_code="candidate_ambiguous")
+        cand = same[0]
+    elif cand["platform"] == "bedrock" and args.region and not cand.get("region"):
+        cand["region"] = args.region[0]
+
+    dry = bool(getattr(args, "dry_run", False))
+    c = apps = rows = None
+    if not dry or _has_token(args):
+        c, apps, rows = _cloud_platform_side(args, _client(args))
+    prow = CT.platform_rows(rows, cand["platform"]) if rows is not None else None
+
+    # The Discover row this is. Named with --match, else the name join the console itself uses.
+    discover = None
+    match_note = None
+    if getattr(args, "match", None):
+        if prow is None:
+            discover = {"id": None, "label": args.match}
+            match_note = "match not checked: no PAT in this shell"
+        else:
+            hit = [r for r in prow if CT.same_name(r.get("label"), args.match) and not r.get("killed")]
+            if not hit:
+                _die(f"no Discover row named {args.match!r} on {cand['platform']}",
+                     error_code="discover_row_not_found",
+                     hint="ascend target cloud list shows which rows these candidates match")
+            discover = {"id": str(hit[0].get("id") or ""), "label": str(hit[0].get("label") or "")}
+    else:
+        st = CT.state_of(cand, apps, prow)
+        discover = st.get("discover")
+        if st.get("app") and not getattr(args, "if_not_exists", False) and not dry:
+            a = st["app"]
+            _die(f"this target is already onboarded as {a['name']!r} ({a['id']}): the same "
+                 f"{'ARN' if cand['platform'] == 'bedrock' else 'endpoint'} is on that application",
+                 error_code="already_onboarded", hint=f"ascend assess run --app '{a['name']}'   ·   or --if-not-exists")
+
+    name = (getattr(args, "name", None) or (discover or {}).get("label") or cand["name"]).strip()
+    sa_arg = getattr(args, "service_account", None)
+    try:
+        kw = CT.spec_kwargs(cand, name=name, auth=getattr(args, "auth", None),
+                            role_arn=getattr(args, "role_arn", None), external_id=getattr(args, "external_id", None),
+                            role_session_name=getattr(args, "role_session_name", None),
+                            access_key_id=getattr(args, "access_key_id", None),
+                            secret_access_key=getattr(args, "secret_access_key", None),
+                            session_token=getattr(args, "session_token", None),
+                            region=(args.region[0] if getattr(args, "region", None) else None),
+                            service_account_info=_read_maybe_file(sa_arg),
+                            system_prompt=getattr(args, "system_prompt", None),
+                            business_purpose=getattr(args, "purpose", None))
+    except CT.CloudError as e:
+        _die(str(e), error_code=e.code, hint="see docs/APP_TYPES.md, 'Cloud targets'")
+
+    ctrl = [x.strip() for x in args.controls.split(",") if x.strip()] if getattr(args, "controls", None) else None
+    if c is not None:
+        if ctrl:
+            ctrl = _validated_control_ids(c, ctrl, force=getattr(args, "force", False), what="this app")
+        ctrl = _resolve_all_controls(c, args, ctrl)
+    try:
+        spec = api.build_app_spec(**kw, control_ids=ctrl, assessment_size=args.size, qpm=args.qpm)
+    except api.SpecError as e:
+        _die(str(e), error_code="invalid_spec", hint=f"see docs/APP_TYPES.md for what a '{kw['api_type']}' application needs")
+
+    join_note = None
+    if discover and discover.get("label") and not CT.same_name(name, discover["label"]):
+        join_note = (f"the console joins a target to its Discover row by name: this one is {name!r}, the row is "
+                     f"{discover['label']!r}, so the board will not join them — pass --name {discover['label']!r} to join")
+    auth_line = (f"{spec.get('bedrock_authentication_method')}"
+                 + (f" · role {spec.get('role_arn')}" if spec.get("role_arn") else "")
+                 if spec["api_type"] == "bedrock" else "service account on the record")
+    base = {"target": name, "api_type": spec["api_type"], "url": spec["url"], "region": spec.get("region") or cand.get("region"),
+            "auth": spec.get("bedrock_authentication_method") or "service-account", "kind": cand["kind"],
+            "discover": discover, "join_note": join_note, "match_note": match_note}
+
+    if dry:
+        note = ("control ids are resolved at registration (no PAT here)" if c is None and not ctrl else None)
+        payload = {**base, "dry_run": True, "sent": False, "spec": CT.masked(spec), "note": note,
+                   "state_after": CT.ONBOARDED}
+        lines = [f"dry run — nothing sent. `ascend target cloud add` would register:",
+                 f"  target    {name}",
+                 f"  type      {spec['api_type']} — Ascend calls it itself; nothing runs on this machine",
+                 f"  url       {spec['url']}" + (f"   ({base['region']})" if base["region"] else ""),
+                 f"  auth      {auth_line}"]
+        if discover:
+            lines.append(f"  discover  {discover['label']}" + (f" ({discover['id']})" if discover.get("id") else "")
+                         + (f"   [{match_note}]" if match_note else ""))
+        lines.append(f"  spec      {json.dumps(CT.masked(spec), sort_keys=True)}")
+        if note:
+            lines.append(f"  note      {note}")
+        if join_note:
+            lines.append(f"  note      {join_note}")
+        _out(payload, args, human="\n".join(lines))
+        return
+
+    if getattr(args, "if_not_exists", False):
+        existing = [a for a in apps or [] if CT.same_name(a.get("name"), name)]
+        if existing:
+            a = existing[0]
+            _out({**base, "app_id": a.get("id"), "created": False, "reused": True, "state": CT.ONBOARDED,
+                  "reason": "an app with this name already exists"}, args,
+                 human=f"app_id:  {a.get('id')}   (already existed — not re-created)")
+            return
+
+    _say(args, f"Registering {spec['api_type']} application {name!r}...")
+    app = c.create_app(spec)
+    if app.get("recovered"):
+        print(f"note: {app.get('recovery_note')} — not re-created.", file=sys.stderr)
+    app_id = app.get("id")
+    if not app_id:
+        _die(f"the platform answered the create without an id: {json.dumps(app)[:300]}", code=EXIT_ERROR)
+    _say(args, f"registered {name!r}  ({app_id})", done=True)
+
+    # The local record, so `target list / show / check / rm` know this target: the CLI's own
+    # adapter config proves the runtime or engine answers from THIS machine on its credentials.
+    sa_path = os.path.expanduser(str(sa_arg)[1:]) if sa_arg and str(sa_arg).startswith("@") else None
+    cfg = CT.check_config(cand, name=name, sa_key_file=sa_path, discover=discover)
+    cfg_name = CT.slug(name)
+    cfg_path = config_dir() / f"{cfg_name}.json"
+    stored = False
+    try:
+        _write_private(cfg_path, json.dumps(cfg, indent=2))
+        C.save(app_id, None, app_name=name, config=cfg_name, adapter=cfg["adapter"])
+        _bind_config(cfg_name, app_id, name)
+        stored = True
+    except Exception as e:  # noqa: BLE001 - the registration is real either way; say what is missing
+        print(f"warning: registered, but could not write the local record ({e}); "
+              f"`ascend target check` will not know this target", file=sys.stderr)
+
+    result = {**base, "app_id": app_id, "created": True, "reused": False, "state": CT.ONBOARDED,
+              "config": cfg_name if stored else None, "path": str(cfg_path) if stored else None,
+              "needs_bridge": False, "key_stored": False, "controls": spec.get("control_ids"),
+              "size": spec.get("assessment_size")}
+    lines = [f"\ntarget '{name}' is ready", f"  app       {app_id}",
+             f"  type      {spec['api_type']} — Ascend calls it itself; nothing runs on this machine",
+             f"  url       {spec['url']}" + (f"   ({base['region']})" if base["region"] else ""),
+             f"  auth      {auth_line}"]
+    if discover:
+        lines.append(f"  discover  {discover['label']}" + (f" ({discover['id']})" if discover.get("id") else "")
+                     + f" — {CT.ONBOARDED}")
+    if join_note:
+        lines.append(f"  note      {join_note}")
+    lines += [f"  check     ascend target check '{name}'   (from this machine, on its own cloud credentials — "
+              f"the platform's path uses the credentials on the record)",
+              f"  run it    ascend assess run --app '{name}'"]
+    _out(result, args, human="\n".join(lines))
+
+
 def _looks_like_jsonl(path, sample=20):
     """Does this file actually contain JSON records? Checked before trusting a zero-turn result."""
     seen = 0
@@ -10369,6 +10641,97 @@ def build_parser():
     tg.add_parser("types", parents=[GLOBALS], formatter_class=_Fmt,
                   help="the kinds of target this can speak to (adapter types)"
                   ).set_defaults(func=cmd_adapter_list)
+
+    # target cloud — the agents the operator's OWN cloud credentials can see, as native targets.
+    # Discover lists them but carries no endpoint; the aws session / gcloud login that deployed
+    # them can name the ARN or the engine, and from that a `bedrock` / `gcp` application follows.
+    cl = tg.add_parser("cloud", parents=[GLOBALS], formatter_class=_Fmt,
+                       help="the agents your own cloud credentials can see (AgentCore, Bedrock agents, "
+                            "Vertex Agent Engine), listed and registered as native targets",
+                       description=(
+                           "Discover knows an AgentCore runtime, a Bedrock agent or a Vertex Agent Engine "
+                           "exists, but its inventory row carries no endpoint. This machine's own cloud "
+                           "credentials do: `list` enumerates what they can see (read-only) and says, in the "
+                           "console's words, where each one stands — onboarded (an application already "
+                           "carries it), potential · testable now with your cloud credentials (it matches a "
+                           "Discover row by name), or a cloud candidate (it matches nothing in Discover). "
+                           "`add` registers one as the native type the platform calls itself (`bedrock` "
+                           "with the ARN and how Ascend authenticates; `gcp` with the engine's streamQuery "
+                           "endpoint and a service account), after which it is onboarded. AWS is read "
+                           "through boto3 when it is installed (the bedrock adapter's own dependency; it "
+                           "signs and pages for free), else the aws CLI; GCP through the Vertex REST list "
+                           "with the token gcloud mints. No credential is ever printed.")
+                       ).add_subparsers(dest="cloud_verb", required=True)
+    s = cl.add_parser("list", parents=[GLOBALS], formatter_class=_Fmt,
+                      help="what these credentials can see, and where each one stands",
+                      epilog=("examples:\n"
+                              "  ascend target cloud list --aws --region us-east-2\n"
+                              "  ascend target cloud list --aws --region us-east-1 --region us-west-2 --profile lab\n"
+                              "  ascend target cloud list --gcp --project my-project --region us-east4\n"
+                              "  ascend target cloud list --aws --region us-east-2 --json"))
+    s.add_argument("--aws", action="store_true", help="AgentCore runtimes and classic Bedrock agents, per --region")
+    s.add_argument("--gcp", action="store_true", help="Vertex Agent Engine reasoning engines in --project, per --region")
+    s.add_argument("--region", action="append", metavar="REGION",
+                   help="repeatable. AWS: the region(s) to list (default: AWS_REGION / the profile's). "
+                        "GCP: the Vertex location, e.g. us-east4")
+    s.add_argument("--project", metavar="PROJECT_ID", help="the GCP project that holds the engines (--gcp)")
+    s.add_argument("--profile", metavar="NAME", help="AWS profile to use (default: AWS_PROFILE, else the default chain)")
+    s.add_argument("--via", choices=["auto", "boto3", "cli"], default="auto",
+                   help="how AWS is read: boto3 when installed, else the aws CLI (default: auto)")
+    s.set_defaults(func=cmd_target_cloud_list)
+
+    s = cl.add_parser("add", parents=[GLOBALS], formatter_class=_Fmt,
+                      help="register one as a native target (bedrock: the ARN + how Ascend authenticates; "
+                           "gcp: the streamQuery endpoint + a service account)",
+                      epilog=("examples:\n"
+                              "  ascend target cloud add arn:aws:bedrock-agentcore:us-east-2:123456789012:runtime/support_agent-AbCd123456 \\\n"
+                              "      --name 'Support Agent' --auth assume-role \\\n"
+                              "      --role-arn arn:aws:iam::123456789012:role/StraikerAscend --external-id env:STRAIKER_EXTERNAL_ID\n"
+                              "  ascend target cloud add support_agent --aws --region us-east-2 --dry-run      # a name from `list`\n"
+                              "  ascend target cloud add projects/my-project/locations/us-east4/reasoningEngines/1234567890 \\\n"
+                              "      --service-account @sa.json --match 'support-bot-v1'\n"
+                              "  ascend target cloud add arn:aws:bedrock:us-east-2:123456789012:agent-alias/AGENT12345/ALIAS12345 \\\n"
+                              "      --auth access-key --access-key-id env:AK --secret-access-key env:SK"))
+    s.add_argument("candidate",
+                   help="an AgentCore runtime ARN, a Bedrock agent ARN (agent/ID, or agent-alias/ID/ALIAS to name "
+                        "the alias), a reasoning-engine resource name or its streamQuery URL — or a name from "
+                        "`target cloud list`, with the same --aws/--gcp flags to resolve it")
+    s.add_argument("--name", help="application name in Ascend (default: the Discover row's name, else the candidate's)")
+    s.add_argument("--match", metavar="DISCOVER_NAME",
+                   help="the Discover inventory row this is, by its name in the console (default: the row with "
+                        "the candidate's own name, when there is one)")
+    s.add_argument("--auth", choices=["assume-role", "access-key"],
+                   help="how Ascend authenticates to AWS for this target (default: assume-role)")
+    s.add_argument("--role-arn", help="the IAM role Ascend assumes in your account (assume-role)")
+    s.add_argument("--external-id", help="the external id on that role's trust policy (a literal, or env:NAME)")
+    s.add_argument("--role-session-name", help="session name for the assumed role")
+    s.add_argument("--access-key-id", help="AWS access key id (access-key; a literal, or env:NAME)")
+    s.add_argument("--secret-access-key", help="AWS secret access key (access-key; a literal, or env:NAME)")
+    s.add_argument("--session-token", help="AWS session token (access-key; a literal, or env:NAME)")
+    s.add_argument("--service-account", metavar="@FILE|JSON",
+                   help="the GCP service-account key Ascend calls the engine with: @path to the JSON (read "
+                        "once; only a file you name), or the JSON itself (--gcp targets)")
+    s.add_argument("--aws", action="store_true", help="resolve a bare name among AgentCore runtimes and Bedrock agents")
+    s.add_argument("--gcp", action="store_true", help="resolve a bare name among the engines in --project")
+    s.add_argument("--region", action="append", metavar="REGION",
+                   help="repeatable. The AWS region on the record (default: the ARN's), or where to resolve a name; "
+                        "for --gcp, the Vertex location")
+    s.add_argument("--project", metavar="PROJECT_ID", help="the GCP project, when resolving a name with --gcp")
+    s.add_argument("--profile", metavar="NAME", help="AWS profile, when resolving a name with --aws")
+    s.add_argument("--via", choices=["auto", "boto3", "cli"], default="auto", help=argparse.SUPPRESS)
+    s.add_argument("--system-prompt", default=None,
+                   help="what the target is — the scorer compares responses against this (default: the app name)")
+    s.add_argument("--purpose", default=None, help="business purpose, for assessment context")
+    s.add_argument("--controls", help="comma-separated control ids (validated before the create)")
+    s.add_argument("--size", default="small", choices=["small", "medium", "large"], help="assessment size")
+    s.add_argument("--qpm", type=int, default=20, metavar="N", help="max queries per minute against the target")
+    s.add_argument("--if-not-exists", action="store_true",
+                   help="reuse an app with this name (or this ARN / endpoint) instead of creating a duplicate")
+    s.add_argument("--force", action="store_true",
+                   help="create the app even if its controls generate zero probes")
+    s.add_argument("--dry-run", action="store_true",
+                   help="print the application spec (credentials masked) and send nothing")
+    s.set_defaults(func=cmd_target_cloud_add)
 
     s = sub.add_parser("results", parents=[GLOBALS], formatter_class=_Fmt,
                        help="read results: a Console CSV export, or a local capture",

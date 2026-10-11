@@ -2,7 +2,7 @@
 
 *Generated from the CLI's argparse tree by `scripts/gen_command_map.py`. A test fails if this file is stale, so every flag here is a flag that exists.*
 
-25 command groups · 84 commands. Sections follow `ascend --help`.
+25 command groups · 85 commands. Sections follow `ascend --help`.
 
 ## Flags every command accepts
 
@@ -1310,6 +1310,11 @@ re-prove a target against its live endpoint (the hard gate)
 | `--expect` | `EXPECT` | — | require this substring in the reply |
 | `--timeout` | `TIMEOUT` | `60.0` | per-request timeout in seconds |
 | `--adapter` | `ADAPTER` | — | override the adapter type (default: from the config) |
+
+### `ascend target cloud`
+
+Discover knows an AgentCore runtime, a Bedrock agent or a Vertex Agent Engine exists, but its inventory row carries no endpoint. This machine's own cloud credentials do: `list` enumerates what they can see (read-only) and says, in the console's words, where each one stands — onboarded (an application already carries it), potential · testable now with your cloud credentials (it matches a Discover row by name), or a cloud candidate (it matches nothing in Discover). `add` registers one as the native type the platform calls itself (`bedrock` with the ARN and how Ascend authenticates; `gcp` with the engine's streamQuery endpoint and a service account), after which it is onboarded. AWS is read through boto3 when it is installed (the bedrock adapter's own dependency; it signs and pages for free), else the aws CLI; GCP through the Vertex REST list with the token gcloud mints. No credential is ever printed.
+
 
 ### `ascend target inspect`
 

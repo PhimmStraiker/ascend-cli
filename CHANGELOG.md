@@ -13,6 +13,36 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ### Added
 
+- **`ascend target cloud list | add` — the agents the operator's own cloud credentials can see,
+  as native targets.** Discover lists an organisation's Bedrock AgentCore runtimes, classic Bedrock
+  agents and Vertex Agent Engine deployments, but an inventory row for one carries no endpoint and
+  no resource id (measured 2026-10-10 on a live tenant: 126 cloud-platform rows, none with a URL
+  or an ARN); the connector's role can list them and not invoke them, and the one-click Ascend
+  button exists only where the platform publishes a ready target. The `aws` session or `gcloud`
+  login that deployed the agent can name it. `list --aws [--region …]` enumerates AgentCore
+  runtimes (ARN, name, status, region) and classic agents (id, aliases, name) through boto3 when
+  it is installed — the bedrock adapter's own dependency; it signs and pages for free — else the
+  aws CLI, and says which; `list --gcp --project P --region R` reads the Vertex REST list of
+  reasoning engines (resource name, display name, the `:streamQuery?alt=sse` endpoint each one
+  answers on) with the token gcloud mints or `GOOGLE_OAUTH_ACCESS_TOKEN`. Read-only; a missing or
+  rejected credential is one plain line naming what to set. Each candidate carries the console's
+  own word for where it stands: `onboarded` (an application already carries the ARN or endpoint),
+  `potential · testable now with your cloud credentials` (a Discover row of that platform has the
+  name), or `cloud candidate` (nothing in Discover); a row no candidate matched is `potential ·
+  needs access`; with no PAT nothing is claimed. `add <ref>` registers the native application —
+  `bedrock` with the ARN and `--auth assume-role` (`--role-arn`, `--external-id`) or `access-key`;
+  `gcp` with the endpoint and `--service-account @file` (only a file the operator named) — the
+  per-method requirement named locally, `env:NAME` keeping a value off the command line, a bare
+  name resolved by listing with the same flags, `--match` naming the Discover row (the console's
+  join is the name, and the command says when a different `--name` breaks it), `--dry-run`
+  printing the masked spec and sending nothing, `--if-not-exists` reusing, and an ARN already on
+  an application refused as already onboarded. It prints the record the way `target add` does,
+  stores the local record and the CLI's own bedrock / vertex_ai check config, so `target list`,
+  `show`, `rm` and `check` know the target — `check` proving from this machine on its own
+  credentials, which the output says is a different path from the platform's. `ascend target
+  --help` gained the verb, so that one golden screen was re-recorded; docs/APP_TYPES.md gained
+  "Cloud targets". (`runtime/cloud_targets.py`, `control/api.py` `list_inventory_agents`;
+  `tests/test_cloud_targets.py`)
 - **`ascend tunnel` — the Ascend tunnel agent, run from the CLI.** `ascend-tunnel` is Straiker's
   open-source agent (github.com/straiker-ai/ascend-tunnel) for a private or local target: it runs
   on a machine that can reach the target, opens one outbound HTTPS connection to Straiker, and

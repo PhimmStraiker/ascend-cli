@@ -125,6 +125,78 @@ ascend app create --type bedrock --name 'Bedrock Agent' --url 'arn:…' \
 
 Credential fields you do not pass are omitted from the request rather than sent empty.
 
+## Cloud targets: `ascend target cloud`
+
+Discover lists an organisation's Bedrock AgentCore runtimes, classic Bedrock agents and Vertex Agent
+Engine deployments, but an inventory row for one of them carries **no endpoint and no resource id**
+(measured on a live tenant: 126 cloud-platform rows, none with a URL or an ARN). The Discover
+connector's role can list those resources; it cannot invoke them, and the one-click Ascend button
+exists only where the platform publishes a ready target. The operator's **own** cloud credentials can
+finish the job: the `aws` session that deployed a runtime can name its ARN, and the `gcloud` login
+that deployed an ADK agent can name its engine. From either, a native application follows.
+
+```bash
+ascend target cloud list --aws --region us-east-2                  # AgentCore runtimes + Bedrock agents
+ascend target cloud list --gcp --project my-project --region us-east4   # reasoning engines
+```
+
+`list` is read-only and prints, in the console's words, where each candidate stands:
+
+| STATE | Meaning |
+|---|---|
+| `onboarded` | an Ascend application already carries this ARN or endpoint |
+| `potential · testable now with your cloud credentials` | a Discover row of that platform has this name; `cloud add` registers it |
+| `cloud candidate` | it matches nothing in Discover |
+
+A Discover row on that platform which **no** candidate matched is `potential · needs access`: an
+account or region these credentials do not reach, or a resource since deleted. With no PAT in the
+shell nothing is claimed and the column reads `-`.
+
+AWS is read through **boto3** when it is installed (`pip install 'ascend-cli[aws]'` — the same
+dependency the bedrock adapter needs; it signs and pages for free), else through the **aws CLI** on
+PATH; the output says which (`via`). GCP is read through the Vertex REST list (current `gcloud`
+releases have no `ai reasoning-engines` verb) with the token `gcloud auth print-access-token` mints,
+or `GOOGLE_OAUTH_ACCESS_TOKEN`. A missing credential is one line naming what to set:
+
+```
+error: no AWS credential: export AWS_PROFILE (or AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY), or run `aws sso login`
+error: no GCP credential: run `gcloud auth login` (or set GOOGLE_OAUTH_ACCESS_TOKEN)
+```
+
+No credential value is ever printed, by `list`, by `add`, or under `--dry-run`.
+
+```bash
+# an AgentCore runtime (or a classic agent: agent/ID, or agent-alias/ID/ALIAS to name the alias)
+ascend target cloud add arn:aws:bedrock-agentcore:us-east-2:123456789012:runtime/support_agent-AbCd123456 \
+  --name 'Support Agent' --auth assume-role \
+  --role-arn arn:aws:iam::123456789012:role/StraikerAscend --external-id env:STRAIKER_EXTERNAL_ID
+
+# a name from `list`, resolved with the same flags; --dry-run prints the spec and sends nothing
+ascend target cloud add support_agent --aws --region us-east-2 --role-arn arn:aws:iam::123456789012:role/StraikerAscend --dry-run
+
+# a reasoning engine: its resource name or its streamQuery URL, with the service account Ascend will use
+ascend target cloud add projects/my-project/locations/us-east4/reasoningEngines/1234567890 \
+  --service-account @sa.json --match 'support-bot-v1'
+```
+
+`add` registers the native type — `bedrock` with the ARN and how Ascend authenticates (`assume-role`,
+the default, needs `--role-arn`; `access-key` needs `--access-key-id` and `--secret-access-key`), or
+`gcp` with the engine's `:streamQuery?alt=sse` endpoint and the service-account JSON — and prints
+the record the way `target add` does. A value given as `env:NAME` is read from that variable so it
+never sits on a command line; `--service-account @path` reads only the file you name. The role you
+pass must trust Straiker's cross-account role with your external id and allow
+`bedrock-agentcore:InvokeAgentRuntime` (or `bedrock:InvokeAgent`); the Discover connector's role
+has the list permissions and not the invoke one.
+
+`--match` names the Discover row this is (by its name in the console); without it, the row with the
+candidate's own name is used when there is one. The console joins a registered target to its row
+**by name**, so the application is named after the row unless you pass `--name` — and then the
+command says the board will not join them. After `add`, `target list`, `target show` and `target rm`
+know the target, and `ascend target check <name>` proves from this machine, on its own cloud
+credentials, that the runtime or engine answers (the CLI's own bedrock / vertex_ai adapter). That is
+a different path from the platform's, which assumes the role or uses the keys on the record; the
+check says so.
+
 ## Which apps need a bridge
 
 ```bash
