@@ -22,8 +22,8 @@ ran a scored assessment against a live target:
     scaffold          everything else: the shipped onboarding scaffold with the captured request
                       described in its header, for a person or an agent to finish
 
-Rules every generated file obeys (the gate refuses the rest; iris prober/adaptor/isolate/
-gate.core.js is the authority): synchronous host calls only, no `async`/`await`/`Promise`, no
+Rules every generated file obeys (the gate refuses the rest; the engine's own gate.core.js is
+the authority): synchronous host calls only, no `async`/`await`/`Promise`, no
 `fetch`/`require`/`import`, no timers, no global the isolate does not have (only the names
 host.d.ts lists — `console` IS one, routed to host.log), no `this` outside a class body, no
 `with`, no `host[expr]`, no `__`-prefixed name, plain JavaScript (not TypeScript), and `sendTurn`

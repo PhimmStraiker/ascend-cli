@@ -95,8 +95,8 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 - **A routed name gets the hosted adaptor its contract needs.** `_choose_transport` answered
   `api` for every `.tun.straiker.ai` / `.pl.straiker.ai` target before looking at the derived
   shape, so a stream, a socket, a session API or a poll behind a tunnel was registered as a plain
-  template app that could not render its contract (audit vs iris harness/custom-adaptor,
-  2026-10-13). The shape now decides exactly as for a public name — a `direct_api` request stays
+  template app that could not render its contract (audit against the engine's
+  custom-adaptor harness, 2026-10-13). The shape now decides exactly as for a public name — a `direct_api` request stays
   a template app; anything else, and a login handshake, gets the generated adaptor — and only the
   local reachability gate is skipped, since Straiker reaches the name. `--via api` on such a
   contract is refused (`direct_not_possible`), `--via bridge` still is. The hard gate reads the

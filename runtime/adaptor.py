@@ -254,7 +254,7 @@ def reply_shape(response_template: Any) -> Optional[Dict[str, str]]:
 
 # ----------------------------------------------------------------------------- the local lint
 # What the publish gate refuses (docs/CUSTOM_ADAPTOR.md, "Rules the gate enforces"; the authority
-# is iris prober/adaptor/isolate/gate.core.js): the host is synchronous and sandboxed, so these
+# is the engine's own gate.core.js): the host is synchronous and sandboxed, so these
 # identifiers are either a false affordance (`await` on a non-promise resolves immediately) or a
 # capability that does not exist in the isolate. Checked on the source with comments stripped,
 # because the JSDoc typedef legitimately says `import("./host")`. The engine's gate is the
