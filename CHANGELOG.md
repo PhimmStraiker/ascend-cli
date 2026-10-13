@@ -59,7 +59,7 @@ them is visible at a glance. A growing Regressions section is a process signal, 
   the key listed on the app). `--env dev|stage|prod` selects the Straiker endpoint — by default
   the environment `--base` names — with `--relay` / `--host-key` overriding it and `--ca-file` for
   a TLS-inspecting proxy; HTTPS_PROXY / NO_PROXY are honoured as the agent honours them. The agent
-  is `ascend-tunnel` on PATH, else `ghcr.io/straiker-ai/ascend-tunnel:0.1.0` with the agent's
+  is `ascend-tunnel` on PATH, else `ghcr.io/straiker-ai/ascend-tunnel:0.1.2` (pinned by digest) with the agent's
   state directory as the container's volume, run as this user, the proxy variables passed in by
   name and host.docker.internal mapped; every verb says which it used, and neither available
   prints the install paths. An allow entry the agent would refuse is refused here first, in the
@@ -91,6 +91,56 @@ them is visible at a glance. A growing Regressions section is a process signal, 
   `tests/test_adaptor_rules.py`, `tests/test_adaptor_cli.py`)
 
 ### Fixed
+
+- **`ascend tunnel --env stage` dials the real stage relay, with its host key pinned.** The
+  environment table named `ascendai-bridge.staging.straiker.ai`, which does not resolve
+  (MEASURED 2026-10-13: `lookup … no such host` on every stage check); the relay is
+  `ascendai-bridge.stage.straiker.ai`, and its published ed25519 host key is now the table's
+  `host_key`, so a stage check reads `PASS relay host key matches the pinned key` instead of the
+  "not pinned" warning. `tests/test_tunnel_rules.py` pins the exact endpoint per environment,
+  not a prefix (the prefix test let the typo through). (`runtime/tunnel.py` ENVIRONMENTS;
+  audit against the tunnel agent v0.1.2)
+- **The install hints name what exists.** The Homebrew tap, the winget manifest and the scoop
+  bucket do not exist yet (MEASURED: "Repository not found"), and they led the list. The order is
+  now the GitHub Releases archive — with `shasum -a 256 -c checksums.txt` and
+  `gh attestation verify` — then the Docker image, then the deb/rpm, with brew / winget / scoop
+  last and marked "when published". The macOS archive binary is ad-hoc signed, not notarized, so
+  the hint gives the `xattr -d com.apple.quarantine` step and prefers Docker on macOS until it
+  is. (`runtime/tunnel.py` INSTALL_HINTS)
+- **A prod check says the tunnel is not enabled there yet.** Prod's relay answers 403 at the
+  WebSocket upgrade (MEASURED; the platform's prod values have the tunnel off), and `tunnel check
+  --env prod` turned that into the generic "allow outbound HTTPS / set HTTPS_PROXY" hint — a
+  network problem the operator does not have. On env prod with a 403 at the upgrade the check
+  says "the tunnel is not enabled on this environment yet", names `--env stage` / `dev`, and
+  `--json` carries `tunnel_not_enabled` with `relay_status: 403`; any other environment or status
+  keeps the generic hint. (`runtime/tunnel.py` `relay_refusal`, `relay_not_enabled`;
+  `shells/cli/ascend.py` `cmd_tunnel_check`)
+- **A key the agent made by hand is the identity the CLI runs with.** The CLI always passed its own
+  `--state-dir <state>/tunnel/agent`; a customer who had run the `ascend-tunnel` binary per its
+  README had a key at the binary's per-OS default directory, listed THAT key on the app, and a
+  tunnel started from the CLI ran under a second identity and stayed `waiting`. When the CLI's
+  directory holds no `agent.key` and the binary's default does, the default is used and said
+  (`identity_source: binary-default` in `--json`); when both hold one, the CLI's is used and the
+  other is named with the `--state-dir` that would switch. `--state-dir` and `$TUNNEL_STATE_DIR`
+  win as before. (`runtime/tunnel.py` `binary_default_state_dir`, `resolve_identity`)
+- **The Docker image is 0.1.2, pinned by digest.** `ghcr.io/straiker-ai/ascend-tunnel:0.1.2@sha256:37ac60f6…`,
+  the digest of the multi-arch index (linux/amd64 + linux/arm64) measured with `docker buildx
+  imagetools inspect`, so a re-pushed tag cannot change what runs; `image inspect`, `pull` and
+  `run` take the reference as-is.
+- **`--fanout N` (1-16) on `tunnel check` and `tunnel start`** is passed to the agent, recorded
+  on the tunnel's status, and refused outside the agent's range before anything is spawned.
+- **The host cap is 85 characters, as the agent enforces it.** The relay-side socket name is
+  `/run/t/<12-hex slug>/<host>~<link>` inside sun_path's 107 bytes: 85 with up to ten links, 84
+  above (MEASURED: the 0.1.2 binary refuses an 86-character host as "too long for a relay socket
+  name"; the CLI's cap of 97 let it through to be refused there). `parse_allow` takes the fanout
+  into account.
+- **An IP literal is refused as Straiker's rule.** The agent itself would dial an IPv4 literal;
+  it is the platform that refuses the tunnel name built from one, so the message now says
+  "Straiker does not route an IP-literal tunnel name" rather than blaming the agent.
+- **When a listed key starts working.** `app tunnel-keys` and `tunnel ls` said the agent is
+  refused "until its key is here"; it is refused until the app lists it AND Straiker has used the
+  app once (Test Connection in the Console, `ascend adaptor test`, or a run start). Both say so,
+  and `tunnel start` says it under the key line.
 
 - **A routed name gets the hosted adaptor its contract needs.** `_choose_transport` answered
   `api` for every `.tun.straiker.ai` / `.pl.straiker.ai` target before looking at the derived
