@@ -372,12 +372,15 @@ class TestEveryGeneratedSource:
         assert any("export" in p for p in AD.lint_source("export function sendTurn(t, h) {}"))
         assert AD.lint_source("// fetch in a comment\nfunction sendTurn(t, h) { return 1; }") == []
 
-    def test_send_turn_must_be_defined_not_exactly_once(self):
-        """The gate's contract rule is `must define sendTurn`; a second declaration is legal
-        JavaScript (the last one wins) and the gate does not refuse it, so neither does the lint."""
-        assert AD.lint_source("function sendTurn(a, b) {}\nfunction sendTurn(c, d) {}") == []
+    def test_send_turn_must_be_defined_and_a_redeclaration_is_a_parse_error(self):
+        """The gate's contract rule is `must define sendTurn` (not "exactly one"). A second
+        declaration is still refused — MEASURED on the live gate 2026-10-13 as `parse: Identifier
+        'sendTurn' has already been declared`, module code being strict — so the lint says that,
+        and not a contract rule it never had."""
         [problem] = AD.lint_source("function other() {}")
         assert "must be defined" in problem
+        [problem] = AD.lint_source("function sendTurn(a, b) {}\nfunction sendTurn(c, d) {}")
+        assert "declared 2 times" in problem and "parse error" in problem and "exactly one" not in problem
 
     @pytest.mark.parametrize("src,kind", [
         ("function sendTurn(t, h) { return atob(t); }", "atob"),

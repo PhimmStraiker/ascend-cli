@@ -320,8 +320,8 @@ def lint_source(source: str) -> List[str]:
     Mirrors the gate's rules on the operator's side: the banned identifiers and the globals the
     isolate does not have, the denied members, `with`, `host[expr]`, `__`-prefixed names, `this`
     outside a class body, TypeScript, no `export`/`module.exports` (the file is one plain
-    script), and `sendTurn` defined — defined, not "exactly one": a second declaration is legal
-    JavaScript and the gate does not refuse it.
+    script), and `sendTurn` defined (the gate's `contract` rule). A redeclared `sendTurn` is
+    refused too, as the parse error it is in module code — not as a contract rule.
     """
     problems: List[str] = []
     code = strip_comments(source)
@@ -360,8 +360,15 @@ def lint_source(source: str) -> List[str]:
     if m:
         problems.append(f"this looks like TypeScript; an adaptor is JavaScript (type annotations are "
                         f"refused — use // @ts-check with JSDoc against host.d.ts) (line {_line_of(code, m.start())})")
-    if not _SEND_TURN.search(code):
+    n = len(_SEND_TURN.findall(code))
+    if n == 0:
         problems.append("`function sendTurn(turn, host)` must be defined; none found")
+    elif n > 1:
+        # Not a contract rule: the gate parses the file as module code, where a redeclared
+        # function is a SyntaxError. MEASURED on the live gate 2026-10-13: "parse: Identifier
+        # 'sendTurn' has already been declared".
+        problems.append(f"`sendTurn` is declared {n} times: module code refuses a redeclaration "
+                        f"(the gate reports a parse error)")
     if _EXPORTED.search(code):
         problems.append("no `export` or `module.exports`: the adaptor is one plain script")
     return problems
