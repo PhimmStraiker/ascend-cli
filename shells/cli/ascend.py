@@ -1474,7 +1474,9 @@ def cmd_app_tunnel_keys(args):
     print(f"  {app.get('name') or app_id}  {app_id}" + (f"   url {url}" if url else "   (no URL)"))
     print(f"  {T.TEMPLATE_KEY} ({len(keys)} of {T.MAX_KEYS}):")
     if not keys:
-        print("    none — the tunnel agent on the app's host is refused until its key is here:")
+        print("    none — the tunnel agent on the app's host is refused until its key is here AND "
+              "Straiker has used the app once (Test Connection in the Console, `ascend adaptor "
+              "test`, or a run start):")
         print(f"      ascend app tunnel-keys {args.app} --add \"$(ascend tunnel key)\"")
     for k in keys:
         mark = ""
@@ -7382,7 +7384,11 @@ def _tunnel_config(args):
     environment resolved to an endpoint and a pinned host key, the state directory."""
     T = _tunnel_mod()
     try:
-        allow = T.parse_allow(args.allow or [])
+        fanout = T.check_fanout(getattr(args, "fanout", None))
+    except ValueError as e:
+        _die(str(e), error_code="bad_fanout")
+    try:
+        allow = T.parse_allow(args.allow or [], fanout=fanout)
     except T.AllowError as e:
         _die(str(e), error_code="bad_allow")
     env = getattr(args, "env", None) or T.default_env(getattr(args, "base", None))
@@ -7393,11 +7399,19 @@ def _tunnel_config(args):
     ca = getattr(args, "ca_file", None)
     if ca and not Path(ca).is_file():
         _die(f"--ca-file {ca}: no such file", error_code="bad_ca_file")
-    return {"org": str(args.org).strip(), "allow": allow, "env": env,
+    identity = T.resolve_identity(getattr(args, "state_dir", None))
+    return {"org": str(args.org).strip(), "allow": allow, "env": env, "fanout": fanout,
             "endpoint": ep["endpoint"], "host_key": ep["host_key"],
             "host_key_source": ep["host_key_source"],
-            "state_dir": T.agent_state_dir(getattr(args, "state_dir", None)),
+            "state_dir": identity["dir"], "identity": identity,
             "ca_file": str(Path(ca).resolve()) if ca else None}
+
+
+def _tunnel_identity_note(identity):
+    """Which key the agent runs with, when it is not simply the CLI's own: the binary's default
+    directory adopted (a customer ran the agent by hand first), or a second identity named."""
+    if identity and identity.get("note"):
+        _warn(identity["note"])
 
 
 def _tunnel_read_key(args, T, runner, state_dir=None):
@@ -7441,6 +7455,7 @@ def cmd_tunnel_check(args):
     printed line for line. WAIT on the key line is the expected state until an app lists it."""
     T = _tunnel_mod()
     cfg = _tunnel_config(args)
+    _tunnel_identity_note(cfg["identity"])
     _tunnel_leftovers(args, T, cfg["state_dir"])
     runner = _tunnel_runner(args)
     for n in T.docker_notes(runner, cfg["allow"]):
@@ -7448,7 +7463,7 @@ def cmd_tunnel_check(args):
     cfg["state_dir"].mkdir(parents=True, exist_ok=True)
     argv = T.build_argv(runner, "check", org=cfg["org"], allow=[f["entry"] for f in cfg["allow"]],
                         endpoint=cfg["endpoint"], host_key=cfg["host_key"],
-                        state_dir=cfg["state_dir"], ca_file=cfg["ca_file"])
+                        state_dir=cfg["state_dir"], ca_file=cfg["ca_file"], fanout=cfg["fanout"])
     _say(args, f"Checking org {cfg['org']} ({cfg['env']}) -> {', '.join(f['entry'] for f in cfg['allow'])}...")
     rc, lines, err = T.run_lines(argv, echo=None if args.json else sys.stdout)
     parsed = T.parse_check_lines(lines)
@@ -7459,17 +7474,27 @@ def cmd_tunnel_check(args):
         _die(f"the agent's check did not run (exit {rc}): {tail[-400:]}", code=EXIT_ERROR,
              error_code="check_did_not_run")
     passed = rc == 0 and parsed["failed"] == 0
+    # A prod relay that answers 403 at the upgrade is the tunnel not being switched on there yet,
+    # not this machine's proxy or firewall: said as that, instead of the generic hint. Any other
+    # environment or status keeps the generic hint, because then it may well be the network.
+    not_enabled = T.relay_not_enabled(cfg["env"], lines)
     data = {"runner": T.runner_public(runner), "org": cfg["org"], "env": cfg["env"],
             "endpoint": cfg["endpoint"], "host_key_pinned": bool(cfg["host_key"]),
             "proxy": T.proxy_in_use(), "allow": [f["entry"] for f in cfg["allow"]],
+            "fanout": cfg["fanout"],
             "app_urls": parsed["app_urls"] or [f["app_url"] for f in cfg["allow"]],
             "key": parsed["key"], "agent_id": parsed["agent_id"], "state_dir": str(cfg["state_dir"]),
+            "identity_source": cfg["identity"]["source"],
             "lines": parsed["lines"], "counts": parsed["counts"], "failed": parsed["failed"],
             "passed": passed, "waiting": parsed["waiting"], "listed": parsed["listed"],
+            "relay_status": T.relay_refusal(lines), "tunnel_enabled": not_enabled is None,
             "exit_code": rc}
     if args.json:
         env = {"ok": passed, "data": data}
-        if not passed:
+        if not passed and not_enabled:
+            env["error"] = {"code": "tunnel_not_enabled", "exit_code": EXIT_ERROR,
+                            "hint": "use --env stage or --env dev", "message": not_enabled}
+        elif not passed:
             env["error"] = {"code": "check_failed", "exit_code": EXIT_ERROR, "hint":
                             "send the lines to support@straiker.ai",
                             "message": f"{parsed['failed']} line(s) read FAIL"}
@@ -7493,6 +7518,8 @@ def cmd_tunnel_check(args):
         print("  check passed: every line PASS. Run the agent:  ascend tunnel start --org "
               f"{cfg['org']} {' '.join('--allow ' + f['entry'] for f in cfg['allow'])}"
               + (f" --env {cfg['env']}" if cfg['env'] != T.DEFAULT_ENV else ""))
+    elif not_enabled:
+        print(f"  check failed: {not_enabled}")
     else:
         print(f"  check failed: {parsed['failed']} line(s) read FAIL. Send the lines above to "
               f"support@straiker.ai.")
@@ -7504,7 +7531,9 @@ def cmd_tunnel_key(args):
     """This machine's tunnel key — the public half, as the agent prints it. The private half stays
     in the agent's state directory and is never read by the CLI."""
     T = _tunnel_mod()
-    sd = T.agent_state_dir(getattr(args, "state_dir", None))
+    identity = T.resolve_identity(getattr(args, "state_dir", None))
+    sd = identity["dir"]
+    _tunnel_identity_note(identity)
     _tunnel_leftovers(args, T, sd)
     runner = _tunnel_runner(args)
     key = _tunnel_read_key(args, T, runner, state_dir=sd)
@@ -7514,7 +7543,8 @@ def cmd_tunnel_key(args):
         rec = {"type": None, "agent_id": None, "line": key, "blob": None}
         _warn(f"the agent printed a key this CLI cannot parse ({e}); shown as printed")
     data = {"key": key, "line": rec["line"], "type": rec["type"], "agent_id": rec["agent_id"],
-            "state_dir": str(sd), "runner": T.runner_public(runner)}
+            "state_dir": str(sd), "identity_source": identity["source"],
+            "runner": T.runner_public(runner)}
     if args.json:
         _out({"ok": True, "data": data}, args)
         return
@@ -7529,6 +7559,7 @@ def cmd_tunnel_start(args):
     like a bridge), or in this terminal with --foreground."""
     T = _tunnel_mod()
     cfg = _tunnel_config(args)
+    _tunnel_identity_note(cfg["identity"])
     _tunnel_leftovers(args, T, cfg["state_dir"])
     runner = _tunnel_runner(args)
     for n in T.docker_notes(runner, cfg["allow"]):
@@ -7539,7 +7570,7 @@ def cmd_tunnel_start(args):
         cfg["state_dir"].mkdir(parents=True, exist_ok=True)
         argv = T.build_argv(runner, "run", org=cfg["org"], allow=allow_entries,
                             endpoint=cfg["endpoint"], host_key=cfg["host_key"],
-                            state_dir=cfg["state_dir"], ca_file=cfg["ca_file"])
+                            state_dir=cfg["state_dir"], ca_file=cfg["ca_file"], fanout=cfg["fanout"])
         _say(args, f"Running the agent in this terminal (Ctrl-C stops it): org {cfg['org']} "
                    f"({cfg['env']}) -> {', '.join(allow_entries)}")
         for f in cfg["allow"]:
@@ -7552,7 +7583,7 @@ def cmd_tunnel_start(args):
     _say(args, f"Starting the tunnel for org {cfg['org']} ({cfg['env']}) -> {', '.join(allow_entries)}...")
     r = T.start(org=cfg["org"], env=cfg["env"], allow=cfg["allow"], runner=runner,
                 endpoint=cfg["endpoint"], host_key=cfg["host_key"], state_dir=cfg["state_dir"],
-                ca_file=cfg["ca_file"])
+                ca_file=cfg["ca_file"], fanout=cfg["fanout"])
     if r.get("error"):
         hint = ""
         if r.get("pid"):
@@ -7565,9 +7596,11 @@ def cmd_tunnel_start(args):
     data = {"id": r["id"], "pid": r["pid"], "log": r["log"], "runner": T.runner_public(runner),
             "org": cfg["org"], "env": cfg["env"], "endpoint": cfg["endpoint"],
             "host_key_pinned": bool(cfg["host_key"]), "proxy": T.proxy_in_use(),
-            "allow": allow_entries, "app_urls": [f["app_url"] for f in cfg["allow"]],
+            "allow": allow_entries, "fanout": cfg["fanout"],
+            "app_urls": [f["app_url"] for f in cfg["allow"]],
             "key": ident.get("key"), "agent_id": ident.get("agent_id"),
-            "state_dir": str(cfg["state_dir"]), "container": r.get("container")}
+            "state_dir": str(cfg["state_dir"]), "identity_source": cfg["identity"]["source"],
+            "container": r.get("container")}
     if args.json:
         _out({"ok": True, "data": data}, args)
         return
@@ -7584,6 +7617,9 @@ def cmd_tunnel_start(args):
               f"{cfg['env']}); pass --host-key when Straiker publishes one")
     key_arg = f"'{ident['key']}'" if ident.get("key") else "\"$(ascend tunnel key)\""
     print(f"\n  list the key on each app it serves:  ascend app tunnel-keys <app> --add {key_arg}")
+    print("  the key becomes usable once the app lists it AND Straiker uses the app once (Test "
+          "Connection in the Console, `ascend adaptor test`, or a run start); until then the "
+          "agent is refused and retries.")
     print("  it survives this terminal closing.  check:  ascend tunnel ls   stop:  ascend tunnel stop")
 
 
@@ -7639,8 +7675,9 @@ def cmd_tunnel_ls(args):
             print(f"      app URL {u}/<path>")
         if r["alive"] and r.get("link") == "waiting":
             key = r.get("key") or "$(ascend tunnel key)"
-            print(f"      ! no app lists this agent's key yet — it is refused until one does:  "
-                  f"ascend app tunnel-keys <app> --add '{key}'")
+            print(f"      ! waiting: the agent is refused until an app lists its key AND Straiker uses "
+                  f"that app once (Test Connection in the Console, `ascend adaptor test`, or a run "
+                  f"start):  ascend app tunnel-keys <app> --add '{key}'")
         elif not r["alive"]:
             print(f"      ! not running — log: {r['log']}")
     print(f"\n  {sum(1 for r in rows if r['alive'])} running, "
@@ -11042,10 +11079,15 @@ def build_parser():
             s.add_argument("--ca-file", metavar="PEM",
                            help="an extra CA to trust besides the system store, e.g. a "
                                 "TLS-inspecting proxy's")
+            s.add_argument("--fanout", metavar="N", type=int, default=None,
+                           help="links to the relay, for throughput (1-16; the agent's default "
+                                "is 1). Above 10 the longest allowed host is one character shorter")
         s.add_argument("--state-dir", metavar="DIR",
                        help="where the agent keeps its key (default: $TUNNEL_STATE_DIR, else "
                             "~/.ascend/state/tunnel/agent — one identity per machine, whichever "
-                            "tenant is pinned). Keep it, or the agent gets a new identity")
+                            "tenant is pinned; a key the ascend-tunnel binary made by hand in its "
+                            "own default directory is used when the CLI has none). Keep it, or "
+                            "the agent gets a new identity")
         s.add_argument("--runner", choices=["auto", "binary", "docker"], default="auto",
                        help="where the agent comes from: ascend-tunnel on PATH, or the Docker "
                             "image (auto: PATH first)")
