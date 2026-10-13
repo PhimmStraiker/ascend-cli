@@ -11080,8 +11080,8 @@ def build_parser():
                            help="an extra CA to trust besides the system store, e.g. a "
                                 "TLS-inspecting proxy's")
             s.add_argument("--fanout", metavar="N", type=int, default=None,
-                           help="links to the relay, for throughput (1-16; the agent's default "
-                                "is 1). Above 10 the longest allowed host is one character shorter")
+                           help="parallel links to Straiker, for throughput (1-16; the agent's "
+                                "default is 1). Above 10 the longest allowed host is one character shorter")
         s.add_argument("--state-dir", metavar="DIR",
                        help="where the agent keeps its key (default: $TUNNEL_STATE_DIR, else "
                             "~/.ascend/state/tunnel/agent — one identity per machine, whichever "

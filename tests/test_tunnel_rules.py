@@ -137,7 +137,7 @@ class TestAllowList:
         assert T.MAX_HOST_LEN == 85 and T.max_host_len() == 85 and T.max_host_len(1) == 85
         ok = "a" * 80 + ".corp"                                           # 85
         assert T.parse_allow([ok])[0]["host"] == ok
-        with pytest.raises(T.AllowError, match=r"too long for a relay socket name \(85 characters"):
+        with pytest.raises(T.AllowError, match=r"too long for the tunnel's socket name \(85 characters"):
             T.parse_allow(["a" * 81 + ".corp"])                          # 86
 
     def test_above_ten_links_the_cap_is_one_shorter(self):

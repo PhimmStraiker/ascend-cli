@@ -92,9 +92,9 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ### Fixed
 
-- **`ascend tunnel --env stage` dials the real stage relay, with its host key pinned.** The
+- **`ascend tunnel --env stage` dials the real stage endpoint, with its host key pinned.** The
   environment table named `ascendai-bridge.staging.straiker.ai`, which does not resolve
-  (MEASURED 2026-10-13: `lookup … no such host` on every stage check); the relay is
+  (MEASURED 2026-10-13: `lookup … no such host` on every stage check); the endpoint is
   `ascendai-bridge.stage.straiker.ai`, and its published ed25519 host key is now the table's
   `host_key`, so a stage check reads `PASS relay host key matches the pinned key` instead of the
   "not pinned" warning. `tests/test_tunnel_rules.py` pins the exact endpoint per environment,
@@ -107,7 +107,7 @@ them is visible at a glance. A growing Regressions section is a process signal, 
   last and marked "when published". The macOS archive binary is ad-hoc signed, not notarized, so
   the hint gives the `xattr -d com.apple.quarantine` step and prefers Docker on macOS until it
   is. (`runtime/tunnel.py` INSTALL_HINTS)
-- **A prod check says the tunnel is not enabled there yet.** Prod's relay answers 403 at the
+- **A prod check says the tunnel is not enabled there yet.** Prod's endpoint answers 403 at the
   WebSocket upgrade (MEASURED; the platform's prod values have the tunnel off), and `tunnel check
   --env prod` turned that into the generic "allow outbound HTTPS / set HTTPS_PROXY" hint — a
   network problem the operator does not have. On env prod with a 403 at the upgrade the check
@@ -129,10 +129,10 @@ them is visible at a glance. A growing Regressions section is a process signal, 
   `run` take the reference as-is.
 - **`--fanout N` (1-16) on `tunnel check` and `tunnel start`** is passed to the agent, recorded
   on the tunnel's status, and refused outside the agent's range before anything is spawned.
-- **The host cap is 85 characters, as the agent enforces it.** The relay-side socket name is
+- **The host cap is 85 characters, as the agent enforces it.** The socket name on Straiker's side is
   `/run/t/<12-hex slug>/<host>~<link>` inside sun_path's 107 bytes: 85 with up to ten links, 84
-  above (MEASURED: the 0.1.2 binary refuses an 86-character host as "too long for a relay socket
-  name"; the CLI's cap of 97 let it through to be refused there). `parse_allow` takes the fanout
+  above (MEASURED: the 0.1.2 binary refuses an 86-character host as too long for its socket
+  name; the CLI's cap of 97 let it through to be refused there). `parse_allow` takes the fanout
   into account.
 - **An IP literal is refused as Straiker's rule.** The agent itself would dial an IPv4 literal;
   it is the platform that refuses the tunnel name built from one, so the message now says

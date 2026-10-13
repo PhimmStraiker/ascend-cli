@@ -246,7 +246,7 @@ def parse_allow(entries, fanout: Optional[int] = None) -> List[Dict[str, Any]]:
             raise AllowError(f"invalid forward {host}:{p}: a host is letters, digits, dots and "
                              f"hyphens, and starts and ends with a letter or digit")
         if len(host) > cap:
-            raise AllowError(f"host {host!r} is too long for a relay socket name ({cap} characters at "
+            raise AllowError(f"host {host!r} is too long for the tunnel's socket name ({cap} characters at "
                              f"most{f' with --fanout {fanout}' if fanout and fanout > 10 else ''}; "
                              f"the agent refuses it too)")
         if host in seen:
@@ -608,7 +608,7 @@ def relay_not_enabled(env: str, lines: List[str]) -> Optional[str]:
     a real proxy or firewall problem keeps the generic hint."""
     if env != "prod" or relay_refusal(lines) != 403:
         return None
-    return ("the tunnel is not enabled on this environment yet: Straiker's prod relay answered 403 "
+    return ("the tunnel is not enabled on this environment yet: Straiker's prod endpoint answered 403 "
             "at the WebSocket upgrade. Nothing on this machine or network is wrong, and no proxy "
             "setting changes it. Use --env stage (or dev) for now, or ask support@straiker.ai when "
             "prod is switched on.")

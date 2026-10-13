@@ -1395,7 +1395,7 @@ The agent's own `check`, printed line for line: the connection to Straiker throu
 | `--relay` | `WSS_URL` | — | the Straiker endpoint the agent dials (wss://…), instead of the one --env selects |
 | `--host-key` | `'TYPE BASE64'` | — | the endpoint's SSH host key to pin, when Straiker publishes it |
 | `--ca-file` | `PEM` | — | an extra CA to trust besides the system store, e.g. a TLS-inspecting proxy's |
-| `--fanout` | `N` | — | links to the relay, for throughput (1-16; the agent's default is 1). Above 10 the longest allowed host is one character shorter |
+| `--fanout` | `N` | — | parallel links to Straiker, for throughput (1-16; the agent's default is 1). Above 10 the longest allowed host is one character shorter |
 | `--state-dir` | `DIR` | — | where the agent keeps its key (default: $TUNNEL_STATE_DIR, else ~/.ascend/state/tunnel/agent — one identity per machine, whichever tenant is pinned; a key the ascend-tunnel binary made by hand in its own default directory is used when the CLI has none). Keep it, or the agent gets a new identity |
 | `--runner` | `auto|binary|docker` | `auto` | where the agent comes from: ascend-tunnel on PATH, or the Docker image (auto: PATH first) |
 
@@ -1455,7 +1455,7 @@ Run the agent for one org, allowing the targets given. Detached by default: it s
 | `--relay` | `WSS_URL` | — | the Straiker endpoint the agent dials (wss://…), instead of the one --env selects |
 | `--host-key` | `'TYPE BASE64'` | — | the endpoint's SSH host key to pin, when Straiker publishes it |
 | `--ca-file` | `PEM` | — | an extra CA to trust besides the system store, e.g. a TLS-inspecting proxy's |
-| `--fanout` | `N` | — | links to the relay, for throughput (1-16; the agent's default is 1). Above 10 the longest allowed host is one character shorter |
+| `--fanout` | `N` | — | parallel links to Straiker, for throughput (1-16; the agent's default is 1). Above 10 the longest allowed host is one character shorter |
 | `--state-dir` | `DIR` | — | where the agent keeps its key (default: $TUNNEL_STATE_DIR, else ~/.ascend/state/tunnel/agent — one identity per machine, whichever tenant is pinned; a key the ascend-tunnel binary made by hand in its own default directory is used when the CLI has none). Keep it, or the agent gets a new identity |
 | `--runner` | `auto|binary|docker` | `auto` | where the agent comes from: ascend-tunnel on PATH, or the Docker image (auto: PATH first) |
 | `--foreground` | — | — | run in this terminal (output here, Ctrl-C stops it) instead of detaching |
