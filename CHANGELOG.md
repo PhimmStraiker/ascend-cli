@@ -109,6 +109,31 @@ them is visible at a glance. A growing Regressions section is a process signal, 
   Two golden screens were re-recorded for the wording (`tunnel_url`, `help_tunnel_url`).
   (`runtime/tunnel.py` `app_url`, `scheme_hint`, `url_rule`, `URL_RULES`, `docker_notes`;
   `runtime/discovery/codegen_js.py` `tunnel_url`)
+- **`tunnel check` says the scheme the 0.1.4 agent found, and says "every line PASS" only when
+  no line read WARN.** The CLI runs `ascend-tunnel` from PATH before the pinned Docker image, so
+  a machine with the latest release (v0.1.4) runs that agent. Its check names each app's URL in a
+  new form (`app  host:port is reached at …`) and probes each target's scheme. MEASURED
+  2026-10-14 with the v0.1.4 release binary and a plain-HTTP server on 18089: the agent warned
+  `answers plain HTTP, not TLS -> Use http://`. The CLI read neither line, so it printed the 0.1.0
+  fallback `app URL for localhost:18089: https://…   <- the app's URL`, called the scheme assumed
+  and ended `check passed: every line PASS` (`--json`: `app_urls` on `https://`, `counts.WARN`
+  1). Both forms of the app line are now read, and so is the scheme each target answered in
+  (`reachable (TLS)`, `reachable (plain HTTP)`, `answers plain HTTP, not TLS`, `answers TLS on
+  port 80`). They were captured from the published 0.1.4 image over six targets; the 0.1.2 and
+  0.1.3 images print none of them. Where the scheme the agent found is not the port's default,
+  the app's URL is printed as found (`http://localhost.tun.straiker.ai/<path> … the agent found
+  plain HTTP there`), and `--json` `app_urls` carries it, with an additive
+  `schemes_found`. The "assumed" line stays only where nothing settled the scheme. A passed check
+  with a WARN line says `check passed, but N line(s) read WARN: read them above` (under the WAIT
+  note: `N line(s) read WARN`). Before, it said every line passed whatever WARN came first, such
+  as the agent's `relay host key … is not pinned` where no host key is published.
+  (`runtime/tunnel.py` `parse_check_lines`, `checked_app_urls`; `cmd_tunnel_check`)
+- **The tunnel help says the agent sees only ciphertext for a target that speaks TLS, and what a
+  plain-HTTP target's traffic is.** `ascend tunnel --help`, the glossary and the module note
+  claimed that of every target. Behind `http://`, Straiker relays a plain-HTTP app's bytes as
+  they are (MEASURED 2026-10-14), so its requests and replies cross the agent as they are, inside
+  the agent's TLS link to Straiker. A test now holds every such sentence in a shipped text to a
+  TLS target. One golden screen was re-recorded for the wording (`help_tunnel`).
 - **`ascend tunnel --env stage` dials the real stage endpoint, with its host key pinned.** The
   environment table named `ascendai-bridge.staging.straiker.ai`, which does not resolve
   (MEASURED 2026-10-13: `lookup … no such host` on every stage check); the endpoint is
