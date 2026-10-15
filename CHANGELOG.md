@@ -92,6 +92,23 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ### Fixed
 
+- **A plain-HTTP target keeps `http://` in its tunnel URL, on any port.** `ascend tunnel url
+  http://host:8089` printed `https://host.tun.straiker.ai/<path>`: the rule picked the scheme from
+  the port alone (http only on 80) and dropped the real URL's own. MEASURED 2026-10-14 on a live
+  tunnel: a plain-HTTP target behind `https://` fails, because Straiker starts TLS with it, and
+  behind `http://` it works (the hop to Straiker is TLS either way). A real URL's scheme is now
+  kept on any port (`http://host:8089` → `http://host.tun.straiker.ai`, `https://host:8443` →
+  `https://…`, `ws://` and `wss://` likewise). A bare `host:port` keeps the old default (https,
+  http on 80), and on a port other than 80 or 443 a `scheme` line says it is assumed and names the
+  `http://` URL a plain-HTTP target needs: in `tunnel url` (`--json` carries it as `hint`, with
+  `scheme_given`) and under the app URLs `tunnel check`, `tunnel start` and `tunnel ls` print. The
+  0.1.2 agent this CLI pins prints `https://` for such a target and warns of nothing; the 0.1.4
+  agent's `check app` probes and warns (both MEASURED). The Docker note for `localhost` names
+  both schemes. The adaptor generator routes a second host by the same rule (it also sent a
+  plain-HTTP host off 80 to `https://`), and a test holds the two copies to the same answers.
+  Two golden screens were re-recorded for the wording (`tunnel_url`, `help_tunnel_url`).
+  (`runtime/tunnel.py` `app_url`, `scheme_hint`, `url_rule`, `URL_RULES`, `docker_notes`;
+  `runtime/discovery/codegen_js.py` `tunnel_url`)
 - **`ascend tunnel --env stage` dials the real stage endpoint, with its host key pinned.** The
   environment table named `ascendai-bridge.staging.straiker.ai`, which does not resolve
   (MEASURED 2026-10-13: `lookup … no such host` on every stage check); the endpoint is
