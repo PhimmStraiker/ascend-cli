@@ -7507,6 +7507,12 @@ def cmd_tunnel_check(args):
         # The 0.1.0 agent's check prints no app URL line; the rule is deterministic, so say it.
         for f in cfg["allow"]:
             print(f"  app URL for {f['entry']}: {f['app_url']}/<path>   <- the app's URL, plus its path")
+    # An allow entry carries no scheme, so off 80 and 443 the https:// above is a guess, and the
+    # 0.1.2 agent warns of nothing for a plain-HTTP target: say it once per such entry.
+    for f in cfg["allow"]:
+        hint = T.scheme_hint(f["host"], f["port"])
+        if hint:
+            print(f"  scheme   {hint}")
     if passed and parsed["waiting"]:
         print("  check passed. WAIT on the key line is expected: no app lists this agent's key yet.")
         if parsed["key"]:
@@ -7575,6 +7581,9 @@ def cmd_tunnel_start(args):
                    f"({cfg['env']}) -> {', '.join(allow_entries)}")
         for f in cfg["allow"]:
             _say(args, f"  app URL for {f['entry']}: {f['app_url']}/<path>")
+            hint = T.scheme_hint(f["host"], f["port"])
+            if hint:
+                _say(args, f"  scheme   {hint}")
         try:
             rc = sp.call(argv, env=dict(os.environ))
         except KeyboardInterrupt:
@@ -7612,6 +7621,9 @@ def cmd_tunnel_start(args):
         print("  key      not printed yet — read it with:  ascend tunnel key")
     for f in cfg["allow"]:
         print(f"  app URL  {f['app_url']}/<path>   <- the app's URL for {f['entry']}, plus its path")
+        hint = T.scheme_hint(f["host"], f["port"])
+        if hint:
+            print(f"  scheme   {hint}")
     if not cfg["host_key"]:
         print("  note     the Straiker side's host key is not pinned (none published for "
               f"{cfg['env']}); pass --host-key when Straiker publishes one")
@@ -7673,6 +7685,11 @@ def cmd_tunnel_ls(args):
               f"{', '.join(r.get('allow') or []) or '-'}")
         for u in r.get("app_urls") or []:
             print(f"      app URL {u}/<path>")
+        for entry in r.get("allow") or []:
+            host, _, port = str(entry).rpartition(":")
+            hint = T.scheme_hint(host, int(port)) if host and port.isdigit() else None
+            if hint:
+                print(f"      scheme  {hint}")
         if r["alive"] and r.get("link") == "waiting":
             key = r.get("key") or "$(ascend tunnel key)"
             print(f"      ! waiting: the agent is refused until an app lists its key AND Straiker uses "

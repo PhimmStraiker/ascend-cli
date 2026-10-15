@@ -435,6 +435,9 @@ class TestRunner:
         assert T.docker_notes(self.BIN, [{"host": "localhost"}]) == []
         notes = T.docker_notes(self.DOCKER, [{"host": "localhost"}])
         assert len(notes) == 1 and "host.docker.internal" in notes[0]
+        # an app on this machine is often plain HTTP on a dev port: the note names both schemes
+        assert "https://host.docker.internal.tun.straiker.ai/<path>" in notes[0]
+        assert "http://host.docker.internal.tun.straiker.ai/<path> for a target that speaks plain HTTP" in notes[0]
         monkeypatch.setenv("HTTPS_PROXY", "http://user:secret@127.0.0.1:3128")
         notes = T.docker_notes(self.DOCKER, [{"host": "chat.corp.internal"}])
         assert len(notes) == 1 and "127.0.0.1" in notes[0]

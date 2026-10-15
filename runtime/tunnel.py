@@ -497,7 +497,9 @@ def docker_notes(runner: Dict[str, Any], forwards: List[Dict[str, Any]]) -> List
     if loop:
         notes.append("localhost in --allow is the container's own loopback under Docker, not this "
                      "machine's. To reach an app on this machine allow host.docker.internal:<port> "
-                     "(the app's URL is then https://host.docker.internal." + TUNNEL_SUFFIX + "/<path>).")
+                     "(the app's URL is then https://host.docker.internal." + TUNNEL_SUFFIX + "/<path>, "
+                     "or http://host.docker.internal." + TUNNEL_SUFFIX + "/<path> for a target that "
+                     "speaks plain HTTP).")
     proxy = proxy_in_use()
     if proxy:
         h = (urlparse(proxy if "://" in proxy else f"http://{proxy}").hostname or "").lower()

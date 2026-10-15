@@ -370,6 +370,44 @@ def test_url_a_bare_host_port_says_the_scheme_is_assumed(cli):
         assert code == 0 and _scheme_lines(out) == [], settled
 
 
+def test_check_says_when_an_app_urls_scheme_is_assumed(cli, agent, state):
+    """The 0.1.2 agent prints https:// for a plain-HTTP target off 80 and warns of nothing
+    (MEASURED 2026-10-14), so the CLI says the scheme is a guess, once per such entry."""
+    code, out, err = cli(["tunnel", "check", "--org", "123", "--allow", "chat.corp.internal",
+                          "--allow", "localhost:8089", "--env", "dev"])
+    assert code == 0, err
+    [line] = _scheme_lines(out)
+    assert "https:// is assumed on port 8089" in line and line.endswith("http://localhost.tun.straiker.ai/<path>")
+    assert out.index("PASS  target localhost:8089 reachable") < out.index(line) < out.index("check passed")
+
+
+def test_start_says_when_an_app_urls_scheme_is_assumed(cli, agent, state):
+    try:
+        code, out, err = cli(["tunnel", "start", "--org", "123", "--allow", "chat.corp.internal",
+                              "--allow", "localhost:8089", "--env", "dev"])
+        assert code == 0, err
+        [line] = _scheme_lines(out)
+        assert "https:// is assumed on port 8089" in line and line.endswith("http://localhost.tun.straiker.ai/<path>")
+        lines = out.splitlines()
+        url_line = next(i for i, ln in enumerate(lines) if "app URL  https://localhost.tun.straiker.ai/<path>" in ln)
+        assert lines[url_line + 1] == line, "the hint sits under the app URL it is about"
+        code, out, _ = cli(["tunnel", "ls"])                 # where the URL is looked up later
+        assert code == 0
+        [line] = _scheme_lines(out)
+        assert "https:// is assumed on port 8089" in line and line.endswith("http://localhost.tun.straiker.ai/<path>")
+    finally:
+        _stop_all(cli)
+
+
+def test_a_foreground_start_says_it_too(cli, agent, state, monkeypatch):
+    monkeypatch.setenv("FAKE_TUNNEL_DIE", "1")          # the fake agent exits at once
+    code, out, err = cli(["tunnel", "start", "--org", "123", "--allow", "localhost:8089", "--foreground"])
+    assert code == 2
+    assert "app URL for localhost:8089: https://localhost.tun.straiker.ai/<path>" in err
+    [line] = _scheme_lines(err)
+    assert "https:// is assumed on port 8089" in line
+
+
 # --------------------------------------------------------------------------- check
 def test_check_streams_the_agents_lines_and_wait_is_exit_0(cli, agent, state):
     code, out, err = cli(["tunnel", "check", "--org", "123", "--allow", "localhost:8080", "--env", "dev"])
