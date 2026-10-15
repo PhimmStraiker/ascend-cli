@@ -7478,11 +7478,14 @@ def cmd_tunnel_check(args):
     # not this machine's proxy or firewall: said as that, instead of the generic hint. Any other
     # environment or status keeps the generic hint, because then it may well be the network.
     not_enabled = T.relay_not_enabled(cfg["env"], lines)
+    # Each app's URL in the scheme the agent found its target answering in, where it probed one
+    # (0.1.4): its WARN that a target off 80 answers plain HTTP is the http:// URL, not https://.
+    app_urls = T.checked_app_urls(parsed, cfg["allow"])
+    found = parsed["schemes_found"]
     data = {"runner": T.runner_public(runner), "org": cfg["org"], "env": cfg["env"],
             "endpoint": cfg["endpoint"], "host_key_pinned": bool(cfg["host_key"]),
             "proxy": T.proxy_in_use(), "allow": [f["entry"] for f in cfg["allow"]],
-            "fanout": cfg["fanout"],
-            "app_urls": parsed["app_urls"] or [f["app_url"] for f in cfg["allow"]],
+            "fanout": cfg["fanout"], "app_urls": app_urls, "schemes_found": found,
             "key": parsed["key"], "agent_id": parsed["agent_id"], "state_dir": str(cfg["state_dir"]),
             "identity_source": cfg["identity"]["source"],
             "lines": parsed["lines"], "counts": parsed["counts"], "failed": parsed["failed"],
@@ -7503,27 +7506,38 @@ def cmd_tunnel_check(args):
             sys.exit(EXIT_ERROR)
         return
     print()
-    if not parsed["app_urls"]:
+    if not parsed["app_url_for"]:
         # The 0.1.0 agent's check prints no app URL line; the rule is deterministic, so say it.
         for f in cfg["allow"]:
             print(f"  app URL for {f['entry']}: {f['app_url']}/<path>   <- the app's URL, plus its path")
-    # An allow entry carries no scheme, so off 80 and 443 the https:// above is a guess, and the
-    # 0.1.2 agent warns of nothing for a plain-HTTP target: say it once per such entry.
-    for f in cfg["allow"]:
+    for f, url in zip(cfg["allow"], app_urls):
+        if f["entry"] in found:
+            # The agent probed the target and named its scheme. Where that is not the port's
+            # default (its WARN), the app's URL is the one it found, said as found.
+            if url != f["app_url"]:
+                print(f"  app URL for {f['entry']}: {url}/<path>   <- the app's URL, plus its path: "
+                      f"the agent found {'plain HTTP' if found[f['entry']] == 'http' else 'TLS'} there")
+            continue
+        # An allow entry carries no scheme, so off 80 and 443 the https:// is a guess, and the
+        # 0.1.2 agent warns of nothing for a plain-HTTP target: say it once per such entry.
         hint = T.scheme_hint(f["host"], f["port"])
         if hint:
             print(f"  scheme   {hint}")
+    warned = parsed["counts"]["WARN"]
+    run_it = (f"ascend tunnel start --org {cfg['org']} "
+              f"{' '.join('--allow ' + f['entry'] for f in cfg['allow'])}"
+              + (f" --env {cfg['env']}" if cfg['env'] != T.DEFAULT_ENV else ""))
     if passed and parsed["waiting"]:
         print("  check passed. WAIT on the key line is expected: no app lists this agent's key yet.")
+        if warned:
+            print(f"  {warned} line(s) read WARN: read them above.")
         if parsed["key"]:
             print(f"  list it:  ascend app tunnel-keys <app> --add '{parsed['key']}'")
-        print("  then run the agent:  ascend tunnel start --org "
-              f"{cfg['org']} {' '.join('--allow ' + f['entry'] for f in cfg['allow'])}"
-              + (f" --env {cfg['env']}" if cfg['env'] != T.DEFAULT_ENV else ""))
+        print(f"  then run the agent:  {run_it}")
+    elif passed and warned:
+        print(f"  check passed, but {warned} line(s) read WARN: read them above. Run the agent:  {run_it}")
     elif passed:
-        print("  check passed: every line PASS. Run the agent:  ascend tunnel start --org "
-              f"{cfg['org']} {' '.join('--allow ' + f['entry'] for f in cfg['allow'])}"
-              + (f" --env {cfg['env']}" if cfg['env'] != T.DEFAULT_ENV else ""))
+        print(f"  check passed: every line PASS. Run the agent:  {run_it}")
     elif not_enabled:
         print(f"  check failed: {not_enabled}")
     else:

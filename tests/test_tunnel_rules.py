@@ -16,7 +16,9 @@ here, before anything is spawned, in the agent's words. Pins:
     where the port does not settle it;
   * the environment table and `--base` following, the argv for either runner — the Docker form
     mounts the state directory, runs as this user, and passes the proxy variables by name only
-    when they are set — and the runner search order.
+    when they are set — and the runner search order;
+  * the agent's `check` lines in the 0.1.2 and the 0.1.4 forms: each app's URL and, from 0.1.4,
+    the scheme each target answered in, which then decides the app's URL.
 """
 import base64
 import os
@@ -458,6 +460,12 @@ PASS  target chat.corp.internal:443 reachable
 FAIL  target api.corp.internal:8080 not reachable from this machine: dial tcp: connection refused
 """
 
+# MEASURED 2026-10-14: the 0.1.4 agent's `check`, word for word. The published image
+# (ghcr.io/straiker-ai/ascend-tunnel:0.1.4) ran it once over six targets in a Docker network:
+# plain HTTP on 8089 and on 80, TLS on 8443 and on 80, a socket that accepts and closes on 9000,
+# nothing listening on 9999. The 0.1.2 and 0.1.3 images, over the same six, print the form above.
+CHECK_014 = (REPO / "tests" / "fixtures" / "tunnel_check_0.1.4_targets.txt").read_text()
+
 
 PROD_403 = ("FAIL  relay WebSocket: relay wss://ascendai-bridge.prod.straiker.ai/tunnel: failed to "
             "WebSocket dial: expected handshake response status code 101 but got 403 (allow outbound "
@@ -568,6 +576,50 @@ class TestAgentOutput:
     def test_a_listed_key_reads_as_listed(self):
         p = T.parse_check_lines(["PASS  an Ascend app lists this agent's key: the relay accepts it"])
         assert p["listed"] is True and p["waiting"] is False
+
+    def test_the_0_1_2_agent_names_each_app_url_and_no_scheme(self):
+        p = T.parse_check_lines(CHECK_OUTPUT.splitlines())
+        assert p["app_url_for"] == {"chat.corp.internal:443": "https://chat.corp.internal.tun.straiker.ai",
+                                    "api.corp.internal:8080": "https://api.corp.internal.tun.straiker.ai"}
+        assert p["schemes_found"] == {}           # `target … reachable` says nothing of the scheme
+
+    def test_the_0_1_4_agents_app_lines_and_the_scheme_each_target_answered_in(self):
+        """0.1.4 names an app's URL as `app  host:port is reached at …` (0.1.2: `app URL for
+        host:port: …`) and says which scheme each target answered in. Neither was read, so with
+        0.1.4 `tunnel check` printed the 0.1.0 fallback's https:// line after the agent had
+        warned that the target answers plain HTTP."""
+        p = T.parse_check_lines(CHECK_014.splitlines())
+        assert p["app_url_for"] == {
+            "plain.corp.internal:8089": "https://plain.corp.internal.tun.straiker.ai",
+            "tls.corp.internal:8443": "https://tls.corp.internal.tun.straiker.ai",
+            "tls80.corp.internal:80": "http://tls80.corp.internal.tun.straiker.ai",
+            "web.corp.internal:80": "http://web.corp.internal.tun.straiker.ai",
+            "raw.corp.internal:9000": "https://raw.corp.internal.tun.straiker.ai",
+            "down.corp.internal:9999": "https://down.corp.internal.tun.straiker.ai"}
+        assert p["app_urls"] == list(p["app_url_for"].values())
+        assert p["schemes_found"] == {
+            "plain.corp.internal:8089": "http",       # WARN  answers plain HTTP, not TLS
+            "tls.corp.internal:8443": "https",        # PASS  reachable (TLS)
+            "tls80.corp.internal:80": "https",        # WARN  answers TLS on port 80
+            "web.corp.internal:80": "http"}           # PASS  reachable (plain HTTP)
+        # raw.corp.internal answered neither clearly and down.corp.internal was not reached:
+        # nothing settles their scheme
+        assert p["counts"] == {"PASS": 9, "FAIL": 1, "WARN": 2, "WAIT": 0, "INFO": 9}
+        assert p["failed"] == 1
+
+    def test_the_app_url_after_a_check_is_in_the_scheme_the_agent_found(self):
+        allow = T.parse_allow(["plain.corp.internal:8089", "tls.corp.internal:8443",
+                               "tls80.corp.internal:80", "web.corp.internal:80",
+                               "raw.corp.internal:9000", "down.corp.internal:9999"])
+        assert T.checked_app_urls(T.parse_check_lines(CHECK_014.splitlines()), allow) == [
+            "http://plain.corp.internal.tun.straiker.ai", "https://tls.corp.internal.tun.straiker.ai",
+            "https://tls80.corp.internal.tun.straiker.ai", "http://web.corp.internal.tun.straiker.ai",
+            "https://raw.corp.internal.tun.straiker.ai", "https://down.corp.internal.tun.straiker.ai"]
+        # nothing found (0.1.2): the URL the agent printed; nothing printed (0.1.0): the rule's
+        allow = T.parse_allow(["chat.corp.internal", "api.corp.internal:8080"])
+        assert T.checked_app_urls(T.parse_check_lines(CHECK_OUTPUT.splitlines()), allow) == [
+            "https://chat.corp.internal.tun.straiker.ai", "https://api.corp.internal.tun.straiker.ai"]
+        assert T.checked_app_urls(T.parse_check_lines([]), allow) == [f["app_url"] for f in allow]
 
     def test_key_output_is_the_first_non_empty_line(self):
         assert T.key_from_output(f"\n{ED25519_BLOB}\n") == ED25519_BLOB

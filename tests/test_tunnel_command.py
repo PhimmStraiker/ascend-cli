@@ -11,7 +11,9 @@ is exercised end to end without a daemon. The platform is the suite's fake HTTP,
 Pins:
   * every verb parses and answers --json with one envelope on stdout, for success and failure;
   * check streams the agent's lines, exits 0 on WAIT and 1 on FAIL, and refuses a bad allow
-    entry before anything is spawned;
+    entry before anything is spawned; it claims every line passed only when no line read WARN,
+    and it reads the 0.1.4 agent's lines (played back from a capture): an app URL in the scheme
+    the agent found the target answering in is said as found, never as assumed;
   * --env resolves to the endpoint (and follows --base when not given), --relay / --host-key
     override it, and the agent's state directory is always passed explicitly;
   * key prints exactly what the agent printed and never the private half;
@@ -113,6 +115,11 @@ FAKE_AGENT = textwrap.dedent(f'''\
               file=sys.stderr)
         sys.exit(0)
     if cmd == "check":
+        canned = os.environ.get("FAKE_TUNNEL_CHECK_OUT")
+        if canned:
+            # A real agent's stdout, captured into the fixtures directory, played back.
+            sys.stdout.write(open(canned).read())
+            sys.exit(int(os.environ.get("FAKE_TUNNEL_CHECK_RC", "0")))
         if not org or not allows:
             print("ascend-tunnel: tenant (your Straiker org id) is required", file=sys.stderr)
             sys.exit(2)
@@ -208,7 +215,7 @@ def state(tmp_path, monkeypatch):
     monkeypatch.setenv("NO_COLOR", "1")
     for v in ("TUNNEL_STATE_DIR", "STRAIKER_API_BASE", "FAKE_TUNNEL_FAIL", "FAKE_TUNNEL_LISTED",
               "FAKE_TUNNEL_DIE", "FAKE_TUNNEL_MINT", "FAKE_TUNNEL_UPGRADE", "FAKE_DOCKER_NO_IMAGE",
-              *T.PROXY_VARS):
+              "FAKE_TUNNEL_CHECK_OUT", "FAKE_TUNNEL_CHECK_RC", *T.PROXY_VARS):
         monkeypatch.delenv(v, raising=False)
     # The binary's own default directory is the real home's (~/Library/… on macOS): never let a
     # test read or write it. An empty stand-in means "the binary never ran here" unless a test
@@ -381,6 +388,68 @@ def test_check_says_when_an_app_urls_scheme_is_assumed(cli, agent, state):
     assert out.index("PASS  target localhost:8089 reachable") < out.index(line) < out.index("check passed")
 
 
+def test_check_with_the_0_1_4_agent_says_the_scheme_it_found(cli, agent, monkeypatch):
+    """MEASURED 2026-10-14 with the v0.1.4 release binary on PATH (the runner the CLI picks
+    first), against a plain-HTTP server on 127.0.0.1:18089: the agent printed its app line in a
+    new form and WARNed `answers plain HTTP, not TLS`, and the CLI went on to print the 0.1.0
+    fallback's https:// URL as "the app's URL", call the scheme assumed, and say every line
+    passed. The played-back stdout is that agent's, word for word but for its state directory."""
+    monkeypatch.setenv("FAKE_TUNNEL_CHECK_OUT",
+                       str(REPO / "tests" / "fixtures" / "tunnel_check_0.1.4_plain_http.txt"))
+    argv = ["tunnel", "check", "--org", "123", "--allow", "localhost:18089", "--env", "stage"]
+    code, out, err = cli(argv)
+    assert code == 0, err
+    assert "WARN   target    localhost:18089 answers plain HTTP, not TLS" in out   # streamed as is
+    mine = out[out.rindex("RESULT PASS"):]               # what the CLI says after the agent's lines
+    assert "https://" not in mine
+    assert ("app URL for localhost:18089: http://localhost.tun.straiker.ai/<path>   <- the app's "
+            "URL, plus its path: the agent found plain HTTP there") in mine
+    assert _scheme_lines(out) == []                      # found, so not "assumed"
+    assert "every line PASS" not in out
+    assert "check passed, but 1 line(s) read WARN: read them above. Run the agent:" in mine
+    code, out, _ = cli(argv + ["--json"])
+    d = json.loads(out)["data"]
+    assert d["app_urls"] == ["http://localhost.tun.straiker.ai"]
+    assert d["schemes_found"] == {"localhost:18089": "http"}
+    assert d["passed"] is True and d["counts"]["WARN"] == 1
+
+
+def test_check_reads_every_outcome_of_the_0_1_4_agents_target_probe(cli, agent, monkeypatch):
+    """One check over six targets, captured from the published 0.1.4 image (see
+    test_tunnel_rules.CHECK_014). Where the agent found the target in the other scheme than the
+    port's default, the app's URL is said as found; where it found the port's own, nothing is
+    added; where it found none (a target that answered neither clearly, one it could not reach),
+    the CLI's "assumed" line stays."""
+    monkeypatch.setenv("FAKE_TUNNEL_CHECK_OUT",
+                       str(REPO / "tests" / "fixtures" / "tunnel_check_0.1.4_targets.txt"))
+    monkeypatch.setenv("FAKE_TUNNEL_CHECK_RC", "1")       # the agent exits 1: one target is down
+    allow = ["plain.corp.internal:8089", "tls.corp.internal:8443", "tls80.corp.internal:80",
+             "web.corp.internal:80", "raw.corp.internal:9000", "down.corp.internal:9999"]
+    argv = ["tunnel", "check", "--org", "123", "--env", "stage"] + [x for a in allow for x in ("--allow", a)]
+    code, out, _ = cli(argv)
+    assert code == ascend.EXIT_ERROR and "check failed: 1 line(s) read FAIL" in out
+    mine = out[out.rindex("RESULT FAIL"):]
+    assert ("app URL for plain.corp.internal:8089: http://plain.corp.internal.tun.straiker.ai/<path>"
+            "   <- the app's URL, plus its path: the agent found plain HTTP there") in mine
+    assert ("app URL for tls80.corp.internal:80: https://tls80.corp.internal.tun.straiker.ai/<path>"
+            "   <- the app's URL, plus its path: the agent found TLS there") in mine
+    assert "tls.corp.internal" not in mine and "web.corp.internal" not in mine
+    raw, down = _scheme_lines(mine)
+    assert "https:// is assumed on port 9000" in raw and raw.endswith("http://raw.corp.internal.tun.straiker.ai/<path>")
+    assert "https:// is assumed on port 9999" in down
+    code, out, _ = cli(argv + ["--json"])
+    d = json.loads(out)["data"]
+    assert d["app_urls"] == ["http://plain.corp.internal.tun.straiker.ai",
+                             "https://tls.corp.internal.tun.straiker.ai",
+                             "https://tls80.corp.internal.tun.straiker.ai",
+                             "http://web.corp.internal.tun.straiker.ai",
+                             "https://raw.corp.internal.tun.straiker.ai",
+                             "https://down.corp.internal.tun.straiker.ai"]
+    assert d["schemes_found"] == {"plain.corp.internal:8089": "http", "tls.corp.internal:8443": "https",
+                                  "tls80.corp.internal:80": "https", "web.corp.internal:80": "http"}
+    assert d["passed"] is False and d["failed"] == 1
+
+
 def test_start_says_when_an_app_urls_scheme_is_assumed(cli, agent, state):
     try:
         code, out, err = cli(["tunnel", "start", "--org", "123", "--allow", "chat.corp.internal",
@@ -543,10 +612,20 @@ def test_check_fail_exits_1_with_the_envelope(cli, agent, monkeypatch):
     assert code == ascend.EXIT_ERROR and "check failed: 1 line(s) read FAIL" in out
 
 
-def test_check_says_every_line_passed_once_the_key_is_listed(cli, agent, monkeypatch):
+def test_check_says_every_line_passed_only_when_every_line_did(cli, agent, monkeypatch):
+    """This said "every line PASS" over the agent's WARN: prod publishes no host key yet, so
+    the agent warns that the relay's key is not pinned."""
     monkeypatch.setenv("FAKE_TUNNEL_LISTED", "1")
+    code, out, _ = cli(["tunnel", "check", "--org", "123", "--allow", "chat.corp.internal", "--env", "stage"])
+    assert code == 0 and "WARN" not in out and "check passed: every line PASS" in out
     code, out, _ = cli(["tunnel", "check", "--org", "123", "--allow", "chat.corp.internal"])
-    assert code == 0 and "check passed: every line PASS" in out
+    assert code == 0 and "WARN  relay host key SHA256:abc is not pinned (set host_key)" in out
+    assert "every line PASS" not in out
+    assert "check passed, but 1 line(s) read WARN: read them above. Run the agent:  ascend tunnel start" in out
+    monkeypatch.delenv("FAKE_TUNNEL_LISTED")             # WAIT as well: both are said
+    code, out, _ = cli(["tunnel", "check", "--org", "123", "--allow", "chat.corp.internal"])
+    assert code == 0 and "check passed. WAIT on the key line is expected" in out
+    assert "  1 line(s) read WARN: read them above." in out and "every line PASS" not in out
 
 
 def test_check_refuses_a_bad_allow_entry_before_spawning(cli, agent):

@@ -288,8 +288,9 @@ def scheme_hint(host: str, port: int, path: str = "/<path>") -> Optional[str]:
     """One line for an app URL whose scheme was assumed (no real URL was given), or None where
     the port settles it (80 is plain HTTP, 443 is TLS). On any other port the target may speak
     either, and a plain-HTTP target behind https:// fails, so the line names the http:// URL it
-    needs. The 0.1.4 agent's `check app` probes the target and warns the same way; 0.1.2 does not
-    (MEASURED 2026-10-14)."""
+    needs. The 0.1.4 agent's `check` probes the target and says which scheme it answered in, and
+    `tunnel check` then says that as found instead (parse_check_lines); 0.1.2 and 0.1.3 probe
+    nothing (MEASURED 2026-10-14)."""
     if port in (80, 443):
         return None
     return (f"https:// is assumed on port {port}: if the target speaks plain HTTP there, the "
@@ -591,17 +592,40 @@ def run_lines(argv: List[str], *, echo=None, timeout: float = 180.0) -> Tuple[in
     return rc, lines, "".join(err_buf)
 
 
+# Each app's URL as the agent's `check` prints it, in either form, and from 0.1.4 on the scheme each
+# target answered in (the agent dials the target and tries TLS). MEASURED 2026-10-14 over six
+# targets with the published 0.1.2, 0.1.3 and 0.1.4 images:
+#   0.1.2, 0.1.3  INFO  app URL for web.corp.internal:80: http://web.corp.internal.tun.straiker.ai/... (…)
+#                 PASS  target web.corp.internal:80 reachable
+#   0.1.4         INFO   app       web.corp.internal:80 is reached at http://web.corp.internal.tun.straiker.ai/... (…)
+#                 PASS   target    web.corp.internal:80 reachable (plain HTTP)
+# 0.1.4 says `reachable (TLS)` likewise, WARNs where the target answers in the other scheme than the
+# port's default (`answers plain HTTP, not TLS` off 80, `answers TLS on port 80`), and says only
+# `reachable` where it could not tell. Only an answer it named settles the scheme.
+_CHECK_APP_URL = (re.compile(r"app URL for (\S+):\s*(\S+?)/\.\.\."),             # 0.1.2, 0.1.3
+                  re.compile(r"^app\s+(\S+) is reached at (\S+?)/\.\.\."))        # 0.1.4
+_CHECK_SCHEME = (
+    (re.compile(r"^target\s+(\S+) (?:answers plain HTTP, not TLS|reachable \(plain HTTP\))"), "http"),
+    (re.compile(r"^target\s+(\S+) (?:answers TLS on port 80|reachable \(TLS\))"), "https"),
+)
+
+
 def parse_check_lines(lines: List[str]) -> Dict[str, Any]:
-    """What the agent's `check` said: every status line, the key and app URLs it printed, and
-    whether anything failed or the key is merely not listed yet (WAIT, the expected state before
-    an app lists it)."""
-    rows, key, aid, org, urls = [], None, None, None, []
+    """What the agent's `check` said: every status line, the key and app URLs it printed (and
+    each app URL by its allow entry), the scheme it found each target answering in where it
+    named one, and whether anything failed or the key is merely not listed yet (WAIT, the
+    expected state before an app lists it)."""
+    rows, key, aid, org, urls, found = [], None, None, None, {}, {}
     for ln in lines:
         m = re.match(r"^(PASS|FAIL|WARN|WAIT|INFO)\s+(.*)$", ln)
         if not m:
             continue
         status, text = m.group(1), m.group(2).strip()
         rows.append({"status": status, "text": text})
+        for rx, scheme in _CHECK_SCHEME:
+            ms = rx.match(text)
+            if ms:
+                found[ms.group(1)] = scheme
         if status != "INFO":
             continue
         mk = re.search(r"agent key \([^)]*\):\s*(\S+)", text)
@@ -610,14 +634,26 @@ def parse_check_lines(lines: List[str]) -> Dict[str, Any]:
         mo = re.match(r"org (\S+), agent ([0-9a-f]{8})", text)
         if mo:
             org, aid = mo.group(1).rstrip(","), mo.group(2)
-        mu = re.search(r"app URL for \S+:\s*(\S+?)/\.\.\.", text)
-        if mu:
-            urls.append(mu.group(1))
+        for rx in _CHECK_APP_URL:
+            mu = rx.search(text)
+            if mu:
+                urls.setdefault(mu.group(1), mu.group(2))
+                break
     counts = {s: sum(1 for r in rows if r["status"] == s) for s in CHECK_STATUSES}
     listed = any(r["status"] == "PASS" and "lists this agent's key" in r["text"] for r in rows)
     return {"lines": rows, "counts": counts, "failed": counts["FAIL"],
             "waiting": counts["WAIT"] > 0, "listed": listed, "key": key, "agent_id": aid,
-            "org": org, "app_urls": urls}
+            "org": org, "app_urls": list(urls.values()), "app_url_for": urls,
+            "schemes_found": found}
+
+
+def checked_app_urls(parsed: Dict[str, Any], allow: List[Dict[str, Any]]) -> List[str]:
+    """Each allow entry's app URL after `check`: in the scheme the agent found the target
+    answering in, where it named one (0.1.4), else as the agent printed it, else by the rule
+    (the 0.1.0 agent prints no app URL)."""
+    found, printed = parsed.get("schemes_found") or {}, parsed.get("app_url_for") or {}
+    return [app_url(f["host"], f["port"], found[f["entry"]]) if f["entry"] in found
+            else printed.get(f["entry"]) or f["app_url"] for f in allow]
 
 
 _UPGRADE_STATUS = re.compile(r"expected handshake response status code 101 but got (\d{3})")
