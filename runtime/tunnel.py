@@ -3,9 +3,10 @@ tunnel.py — the CLI's wrapper around `ascend-tunnel`, Straiker's open-source t
 
 The agent runs on a machine inside the customer's network, dials OUT to Straiker over one HTTPS
 connection, and Ascend reaches an app through it at https://<host>.tun.straiker.ai/<path>. It is an
-L4 path: the agent splices bytes and sees only ciphertext. The bridge (supervisor.py) is the L7
-path: it runs an adapter here and answers probes itself. The tunnel carries a connection; the bridge
-carries a conversation.
+L4 path: the agent splices bytes, and sees only ciphertext for a target that speaks TLS; a
+plain-HTTP target's requests and replies cross it as they are, inside its TLS link to Straiker.
+The bridge (supervisor.py) is the L7 path: it runs an adapter here and answers probes itself. The
+tunnel carries a connection; the bridge carries a conversation.
 
 What this module owns:
 

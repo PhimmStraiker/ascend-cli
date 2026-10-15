@@ -36,9 +36,11 @@ import base64
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import struct
+import subprocess
 import sys
 import textwrap
 import time
@@ -303,6 +305,32 @@ def test_the_group_help_says_what_a_tunnel_is_and_is_not(cli):
     assert code == 0
     assert "https://<host>.tun.straiker.ai/<path>" in out
     assert "(L4)" in out and "(L7)" in out and "github.com/straiker-ai/ascend-tunnel" in out
+
+
+def test_ciphertext_is_claimed_for_a_tls_target_only(cli):
+    """Behind http:// Straiker relays a plain-HTTP app's bytes as they are, inside the agent's
+    TLS link (MEASURED 2026-10-14), and the agent writes them to the target as plain HTTP. So
+    "the agent sees only ciphertext" holds for a TLS target only: every sentence that says it,
+    in the group help, the module note or a tracked text file, limits it to TLS in the same
+    clause and says what a plain-HTTP target's traffic is. The group help, the glossary and the
+    module note said it of every target. Only tracked files are read: an untracked virtualenv
+    in the checkout is not shipped."""
+    code, out, _ = cli(["tunnel", "--help"])
+    assert code == 0
+    texts = {"ascend tunnel --help": out, "runtime/tunnel.py": T.__doc__}
+    tracked = subprocess.run(["git", "ls-files", "-z", "--", "*.md", "*.mdx", "*.html", "*.txt"],
+                             cwd=REPO, capture_output=True, text=True, check=True).stdout
+    for rel in filter(None, tracked.split("\0")):
+        texts[rel] = (REPO / rel).read_text(encoding="utf-8", errors="ignore")
+    said = set()
+    for name, text in texts.items():
+        for sentence in re.split(r"(?<=\.)\s+", " ".join(text.split())):
+            if "ciphertext" in sentence:
+                said.add(name)
+                assert re.search(r"ciphertext (?:for|when|from)\b[^;.]{0,40}\bTLS\b", sentence) \
+                    and "plain-HTTP" in sentence, f"{name}: {sentence}"
+    # the texts that say it are among those read, so a pass is not a pattern that matched nothing
+    assert {"ascend tunnel --help", "runtime/tunnel.py", "docs/GLOSSARY.md"} <= said
 
 
 def test_check_needs_org_and_the_usage_error_is_an_envelope(cli, agent):
