@@ -113,9 +113,14 @@ INSTALL_HINTS = [
 
 # The URL rule, as the agent and the Console enforce it. Printed by `tunnel url`, so it is written
 # once here rather than paraphrased per command.
+#
+# MEASURED 2026-10-14 on a live tunnel: the scheme on the tunnel name is the target's own. A
+# plain-HTTP target (on 8089) behind https:// fails, because Straiker starts TLS with it; behind
+# http:// it works (the hop to Straiker is TLS either way). The rule said http only on port 80.
 URL_RULES = [
-    f"the app's URL is https://<host>.{TUNNEL_SUFFIX}/<path>: the real host rides inside the name "
-    "(http:// only for an app that speaks plain HTTP on port 80; wss:// for a WebSocket app)",
+    f"the app's URL is https://<host>.{TUNNEL_SUFFIX}/<path>, or http:// for a target that speaks "
+    "plain HTTP on any port: the real host rides inside the name, and the scheme is the target's "
+    "own (https:// makes Straiker start TLS with it; wss:// or ws:// for a WebSocket target)",
     "no port in the URL: the app's port lives in the agent's allow list (--allow host:port), "
     "one entry per host",
     "the host is a DNS name, never an IP address: the name is what the agent dials",
@@ -259,27 +264,54 @@ def parse_allow(entries, fanout: Optional[int] = None) -> List[Dict[str, Any]]:
     return out
 
 
-def app_url(host: str, port: int, ws: bool = False) -> str:
-    """The URL an app reaches host:port at through the tunnel, before the app's own path. A tunnel
-    name carries no port: plain HTTP on 80 is http (ws), anything else https (wss)."""
-    scheme = ("ws" if ws else "http") + ("" if port == 80 else "s")
-    return f"{scheme}://{host}.{TUNNEL_SUFFIX}"
+TUNNEL_SCHEMES = ("http", "https", "ws", "wss")
+
+
+def app_url(host: str, port: int, scheme: Optional[str] = None) -> str:
+    """The URL Ascend reaches host:port at through the tunnel, before the app's own path.
+
+    The tunnel name carries no port (the port lives in the agent's allow list), so the scheme is
+    what tells Straiker how to speak to the target: https:// (wss://) starts TLS with it, http://
+    (ws://) carries its plain HTTP as it is, on any port. `scheme` is the target's own, read off
+    its real URL, and is kept as given: http://host:8089 is http://host.tun.straiker.ai. Without
+    one (a bare host[:port], an allow entry) it is assumed from the port, the agent's own
+    default: http on 80, https on any other. scheme_hint() says so where the port does not
+    settle it.
+    """
+    s = (scheme or ("http" if port == 80 else "https")).lower()
+    if s not in TUNNEL_SCHEMES:
+        raise AllowError(f"{s}:// is not an http(s) or ws(s) URL")
+    return f"{s}://{host}.{TUNNEL_SUFFIX}"
+
+
+def scheme_hint(host: str, port: int, path: str = "/<path>") -> Optional[str]:
+    """One line for an app URL whose scheme was assumed (no real URL was given), or None where
+    the port settles it (80 is plain HTTP, 443 is TLS). On any other port the target may speak
+    either, and a plain-HTTP target behind https:// fails, so the line names the http:// URL it
+    needs. The 0.1.4 agent's `check app` probes the target and warns the same way; 0.1.2 does not
+    (MEASURED 2026-10-14)."""
+    if port in (80, 443):
+        return None
+    return (f"https:// is assumed on port {port}: if the target speaks plain HTTP there, the "
+            f"Ascend app's URL is {app_url(host, port, 'http')}{path}")
 
 
 def url_rule(target: str, path: Optional[str] = None) -> Dict[str, Any]:
     """The app's URL and the allow entry for a target given as host[:port] or as its real URL.
 
     A real URL may carry a port and a path: the port moves into the allow entry (the tunnel name
-    never carries one) and the path stays on the URL. Refusals are the allow list's.
+    never carries one), the path stays on the URL, and the scheme is kept on any port, since it
+    is what the target speaks (`http://host:8089` -> `http://host.tun.straiker.ai`). A bare
+    host[:port] has no scheme to keep: app_url() assumes one from the port, and `hint` says so
+    where the port does not settle it. Refusals are the allow list's.
     """
     s = str(target).strip()
-    ws, url_path, port, moved = False, "", "", False
+    scheme, url_path, port, moved = None, "", "", False
     if "://" in s:
         u = urlparse(s)
         scheme = (u.scheme or "").lower()
-        if scheme not in ("http", "https", "ws", "wss"):
+        if scheme not in TUNNEL_SCHEMES:
             raise AllowError(f"{scheme or '?'}:// is not an http(s) or ws(s) URL: {s!r}")
-        ws = scheme.startswith("ws")
         host = u.hostname or ""
         try:
             explicit = u.port
@@ -295,11 +327,14 @@ def url_rule(target: str, path: Optional[str] = None) -> Dict[str, Any]:
     p = p.strip() if p else ""
     if p and not p.startswith("/"):
         p = "/" + p
-    base = app_url(fwd["host"], fwd["port"], ws=ws)
+    base = app_url(fwd["host"], fwd["port"], scheme)
+    used = base.split("://", 1)[0]
     return {"host": fwd["host"], "port": fwd["port"], "allow": fwd["entry"],
-            "scheme": base.split("://", 1)[0], "app_url": base,
-            "url": base + (p or "/<path>"), "path": p or None, "websocket": ws,
-            "port_moved": moved, "rules": list(URL_RULES)}
+            "scheme": used, "scheme_given": scheme is not None, "app_url": base,
+            "url": base + (p or "/<path>"), "path": p or None, "websocket": used.startswith("ws"),
+            "port_moved": moved,
+            "hint": None if scheme else scheme_hint(fwd["host"], fwd["port"], p or "/<path>"),
+            "rules": list(URL_RULES)}
 
 
 # ----------------------------------------------------------------------------- key lines

@@ -10,8 +10,10 @@ here, before anything is spawned, in the agent's words. Pins:
     that contradicts the key material, junk;
   * the allow list: port 443 when omitted, one entry per host, an IP address refused, a name that
     is already a tunnel name refused, the agent's host regex;
-  * the URL rule: no port in the URL, http only on 80, wss for a WebSocket app, the port of a real
-    URL moved into the allow entry;
+  * the URL rule: no port in the URL, the port of a real URL moved into the allow entry, and its
+    scheme kept on any port (http:// for a plain-HTTP target, ws:// / wss:// for a WebSocket
+    one); a bare host[:port] keeps the assumed default (http on 80, https elsewhere) and says so
+    where the port does not settle it;
   * the environment table and `--base` following, the argv for either runner — the Docker form
     mounts the state directory, runs as this user, and passes the proxy variables by name only
     when they are set — and the runner search order.
@@ -178,14 +180,57 @@ class TestUrlRule:
         assert r["allow"] == "api.corp.internal:8080" and r["port_moved"] is True
         assert ":8080" not in r["url"]
 
-    def test_http_on_80_stays_http_and_any_other_port_is_https(self):
-        assert T.url_rule("http://plain.corp.internal/chat")["url"] == "http://plain.corp.internal.tun.straiker.ai/chat"
-        assert T.url_rule("http://plain.corp.internal:8080/chat")["url"] == "https://plain.corp.internal.tun.straiker.ai/chat"
+    @pytest.mark.parametrize("url,expected,allow", [
+        # MEASURED 2026-10-14 on a live tunnel: a plain-HTTP target on 8089 behind https:// fails
+        # (Straiker starts TLS with it) and behind http:// works. This rule said https for it.
+        ("http://plain.corp.internal:8089/chat", "http://plain.corp.internal.tun.straiker.ai/chat", "plain.corp.internal:8089"),
+        ("http://plain.corp.internal/chat", "http://plain.corp.internal.tun.straiker.ai/chat", "plain.corp.internal:80"),
+        ("https://api.corp.internal:8443/v1", "https://api.corp.internal.tun.straiker.ai/v1", "api.corp.internal:8443"),
+        ("https://tls.corp.internal:80/x", "https://tls.corp.internal.tun.straiker.ai/x", "tls.corp.internal:80"),
+        ("HTTP://Plain.Corp.Internal:8089/Chat", "http://plain.corp.internal.tun.straiker.ai/Chat", "plain.corp.internal:8089"),
+    ])
+    def test_a_real_urls_scheme_is_kept_on_any_port(self, url, expected, allow):
+        r = T.url_rule(url)
+        assert (r["url"], r["allow"]) == (expected, allow)
+        assert r["scheme"] == expected.split("://")[0] and r["app_url"] == expected.rsplit("/", 1)[0]
+        assert r["scheme_given"] is True and r["hint"] is None
 
-    def test_websocket_apps(self):
-        assert T.url_rule("ws://bot.corp.internal:9000/socket")["url"] == "wss://bot.corp.internal.tun.straiker.ai/socket"
+    def test_websocket_apps_keep_their_scheme_too(self):
+        assert T.url_rule("ws://bot.corp.internal:9000/socket")["url"] == "ws://bot.corp.internal.tun.straiker.ai/socket"
+        assert T.url_rule("wss://bot.corp.internal:9443/socket")["url"] == "wss://bot.corp.internal.tun.straiker.ai/socket"
         assert T.url_rule("ws://bot.corp.internal/socket")["url"] == "ws://bot.corp.internal.tun.straiker.ai/socket"
-        assert T.url_rule("wss://bot.corp.internal/socket")["allow"] == "bot.corp.internal:443"
+        r = T.url_rule("wss://bot.corp.internal/socket")
+        assert r["allow"] == "bot.corp.internal:443" and r["websocket"] is True
+        assert T.url_rule("ws://bot.corp.internal:9000/socket")["allow"] == "bot.corp.internal:9000"
+
+    def test_a_bare_host_port_keeps_the_default_and_says_it_is_assumed(self):
+        """No scheme to keep: https is assumed off 80, as before, and the hint names the http://
+        URL a plain-HTTP target needs instead (the 0.1.4 agent's `check app` warns the same)."""
+        r = T.url_rule("api.corp.internal:8080", path="/v1/chat")
+        assert r["url"] == "https://api.corp.internal.tun.straiker.ai/v1/chat" and r["scheme"] == "https"
+        assert r["scheme_given"] is False
+        assert "https:// is assumed on port 8080" in r["hint"] and "plain HTTP" in r["hint"]
+        assert r["hint"].endswith("http://api.corp.internal.tun.straiker.ai/v1/chat")
+        assert "\n" not in r["hint"]
+        assert T.url_rule("localhost:8089")["hint"].endswith("http://localhost.tun.straiker.ai/<path>")
+
+    @pytest.mark.parametrize("target,url", [
+        ("chat.corp.internal", "https://chat.corp.internal.tun.straiker.ai/<path>"),
+        ("chat.corp.internal:443", "https://chat.corp.internal.tun.straiker.ai/<path>"),
+        ("plain.corp.internal:80", "http://plain.corp.internal.tun.straiker.ai/<path>"),
+    ])
+    def test_no_hint_where_the_port_settles_the_scheme(self, target, url):
+        r = T.url_rule(target)
+        assert r["url"] == url and r["hint"] is None and r["scheme_given"] is False
+
+    @pytest.mark.parametrize("port,hinted", [(80, False), (443, False), (8080, True), (8089, True),
+                                             (8443, True), (3000, True)])
+    def test_scheme_hint_is_said_only_off_80_and_443(self, port, hinted):
+        hint = T.scheme_hint("h.corp", port)
+        assert (hint is not None) is hinted
+        if hinted:
+            assert hint.startswith(f"https:// is assumed on port {port}")
+            assert hint.endswith("http://h.corp.tun.straiker.ai/<path>")
 
     def test_path_flag_wins_over_the_urls_path(self):
         assert T.url_rule("https://a.corp/old", path="/new")["url"] == "https://a.corp.tun.straiker.ai/new"
@@ -199,8 +244,36 @@ class TestUrlRule:
     def test_the_rules_are_stated(self):
         rules = " ".join(T.url_rule("a.corp")["rules"])
         for phrase in ("no port in the URL", "one entry per host", "never an IP address",
-                       "key must be listed on the app", "http:// only"):
+                       "key must be listed on the app", "plain HTTP on any port"):
             assert phrase in rules
+        assert "plain HTTP on port 80" not in rules, "the rule that sent a plain-HTTP target to https://"
+
+
+class TestAppUrl:
+    """The contract: a given scheme is the target's own and is kept on any port; without one it
+    is assumed from the port, the agent's default (http on 80, https on any other)."""
+
+    @pytest.mark.parametrize("port,scheme,expected", [
+        (8089, "http", "http://h.corp.tun.straiker.ai"),
+        (8443, "https", "https://h.corp.tun.straiker.ai"),
+        (80, "https", "https://h.corp.tun.straiker.ai"),
+        (443, "http", "http://h.corp.tun.straiker.ai"),
+        (9000, "WS", "ws://h.corp.tun.straiker.ai"),
+        (9443, "wss", "wss://h.corp.tun.straiker.ai"),
+        (8089, None, "https://h.corp.tun.straiker.ai"),
+        (443, None, "https://h.corp.tun.straiker.ai"),
+        (80, None, "http://h.corp.tun.straiker.ai"),
+    ])
+    def test_a_given_scheme_is_kept_and_a_missing_one_assumed(self, port, scheme, expected):
+        assert T.app_url("h.corp", port, scheme) == expected
+
+    def test_a_scheme_the_tunnel_does_not_carry_is_refused(self):
+        with pytest.raises(T.AllowError, match=r"ftp:// is not an http\(s\) or ws\(s\) URL"):
+            T.app_url("h.corp", 21, "ftp")
+
+    def test_an_allow_entry_has_no_scheme_so_it_keeps_the_default(self):
+        assert [f["app_url"] for f in T.parse_allow(["a.corp:8089", "b.corp:80", "c.corp"])] == [
+            "https://a.corp.tun.straiker.ai", "http://b.corp.tun.straiker.ai", "https://c.corp.tun.straiker.ai"]
 
 
 # --------------------------------------------------------------------------- environments

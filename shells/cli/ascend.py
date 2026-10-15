@@ -7727,8 +7727,8 @@ def cmd_tunnel_url(args):
     print(f"  allow    --allow {r['allow']}"
           + ("   <- the port moved here; it is never in the URL" if r["port_moved"] else
              ("   (port 443 when none is given)" if r["port"] == 443 and ":" not in str(args.target).split("://")[-1] else "")))
-    if r["port"] == 80:
-        print(f"  scheme   {r['scheme']}:// because the app speaks plain HTTP on port 80; any other port is https (wss)")
+    if r["hint"]:
+        print(f"  scheme   {r['hint']}")
     print("  rules")
     for rule in r["rules"]:
         print(f"    - {rule}")
@@ -11186,14 +11186,19 @@ def build_parser():
                            "The app's URL for a target behind the tunnel, and the allow entry that "
                            "goes with it. The URL is https://<host>.tun.straiker.ai/<path> — the "
                            "real host rides inside the name — and never carries a port: the port "
-                           "lives in the agent's allow list, one entry per host. http:// is for an "
-                           "app that speaks plain HTTP on port 80; wss:// for a WebSocket app. The "
-                           "host is a DNS name, never an IP address, since the name is what the "
-                           "agent dials. Offline; nothing is asked of the platform or the agent."),
+                           "lives in the agent's allow list, one entry per host. The scheme is the "
+                           "target's own, on any port: http:// for a target that speaks plain HTTP "
+                           "(https:// makes Straiker start TLS with it), wss:// or ws:// for a "
+                           "WebSocket one. A real URL keeps its scheme; a bare host[:port] gets "
+                           "https:// (http:// on port 80), and on any port but 80 and 443 the "
+                           "output says that is assumed. The host is a DNS name, never an IP "
+                           "address, since the name is what the agent dials. Offline; nothing is "
+                           "asked of the platform or the agent."),
                        epilog=("examples:\n"
                                "  ascend tunnel url chat.corp.internal\n"
                                "  ascend tunnel url api.corp.internal:8080 --path /v1/chat\n"
                                "  ascend tunnel url https://api.corp.internal:8080/v1/chat    # the app's real URL\n"
+                               "  ascend tunnel url http://localhost:8089/chat                # plain HTTP: http:// is kept\n"
                                "  ascend tunnel url ws://bot.corp.internal:9000/socket --json"))
     s.add_argument("target", metavar="HOST[:PORT]|URL",
                    help="the target as host[:port], or its real URL (its port and path are read from it)")

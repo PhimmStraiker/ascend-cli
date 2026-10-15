@@ -330,6 +330,44 @@ def test_url_plain_output(cli):
     assert "URL      http://plain.corp.internal.tun.straiker.ai/chat" in out
     assert "allow    --allow plain.corp.internal:80" in out
     assert "no port in the URL" in out and "never an IP address" in out
+    assert "any other port is https" not in out, "the old rule, which sent plain HTTP off 80 to https://"
+
+
+def _scheme_lines(text):
+    return [ln for ln in text.splitlines() if ln.lstrip().startswith("scheme ")]
+
+
+def test_url_keeps_a_plain_http_targets_scheme_on_any_port(cli):
+    """MEASURED 2026-10-14 on a live tunnel: a plain-HTTP target on 8089 needs http:// on its
+    tunnel name (https:// makes Straiker start TLS with it). This printed https://."""
+    code, out, _ = cli(["tunnel", "url", "http://localhost:8089", "--json"])
+    assert code == 0
+    d = json.loads(out)["data"]
+    assert d["url"] == "http://localhost.tun.straiker.ai/<path>" and d["scheme"] == "http"
+    assert d["allow"] == "localhost:8089" and d["port_moved"] is True
+    assert d["scheme_given"] is True and d["hint"] is None
+    code, out, _ = cli(["tunnel", "url", "http://localhost:8089"])
+    assert code == 0
+    assert "URL      http://localhost.tun.straiker.ai/<path>" in out
+    assert "allow    --allow localhost:8089" in out and "https://localhost" not in out
+    assert _scheme_lines(out) == []
+    code, out, _ = cli(["tunnel", "url", "https://api.corp.internal:8443/v1", "--json"])
+    assert json.loads(out)["data"]["url"] == "https://api.corp.internal.tun.straiker.ai/v1"
+
+
+def test_url_a_bare_host_port_says_the_scheme_is_assumed(cli):
+    code, out, _ = cli(["tunnel", "url", "api.corp.internal:8080", "--path", "/v1/chat"])
+    assert code == 0
+    assert "URL      https://api.corp.internal.tun.straiker.ai/v1/chat" in out      # the default stays
+    [line] = _scheme_lines(out)
+    assert "https:// is assumed on port 8080" in line
+    assert line.endswith("http://api.corp.internal.tun.straiker.ai/v1/chat")
+    code, out, _ = cli(["tunnel", "url", "api.corp.internal:8080", "--json"])
+    d = json.loads(out)["data"]
+    assert d["scheme_given"] is False and d["hint"].endswith("http://api.corp.internal.tun.straiker.ai/<path>")
+    for settled in ("chat.corp.internal", "chat.corp.internal:443", "plain.corp.internal:80"):
+        code, out, _ = cli(["tunnel", "url", settled])
+        assert code == 0 and _scheme_lines(out) == [], settled
 
 
 # --------------------------------------------------------------------------- check
