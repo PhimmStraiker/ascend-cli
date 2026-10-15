@@ -581,6 +581,36 @@ def _is_public_host(url: str) -> bool:
     return bool(addrs) and all(ipaddress.ip_address(a).is_global for a in addrs)
 
 
+def _self_authenticating(adapter, cfg) -> bool:
+    """True when the derived contract is a PUBLIC, machine-completable login that `target add`
+    (--via auto) routes to a HOSTED LOGIN ADAPTOR — the engine mints or echoes the credential
+    every turn, so the operator has NOTHING to supply.
+
+    This is the single predicate behind BOTH the transport choice (the `not static_auth` adaptor
+    branch of `_choose_transport`, which calls this) and the `self_authenticating` marker
+    `ascend target inspect` emits for `ascend connect`. One function, so the two can never
+    disagree: it reuses the exact signals the transport choice reads and derives nothing of its
+    own. Each `return False` matches a reason `_choose_transport` would otherwise print:
+      * routed by Straiker            -> the platform calls it; not a login the adaptor drives
+      * a local-only adapter          -> only a bridge runs custom/browser
+      * static auth (or none)         -> the operator carries the key; not self-authenticating
+      * an interactive (human) grant  -> a person must complete it; a bridge, not the engine
+      * not reachable from the cloud  -> the engine cannot dial it, so no hosted adaptor
+    """
+    from runtime.discovery import codegen_js as _cj
+    shaped = {**(cfg or {}), "adapter": adapter or (cfg or {}).get("adapter") or "direct_api"}
+    endpoint = _cj.raw_url(shaped) or (cfg or {}).get("endpoint") or (cfg or {}).get("url") or ""
+    if _routed_by_straiker(endpoint):
+        return False
+    if (adapter or "") in LOCAL_ONLY_ADAPTERS:
+        return False
+    if _auth_type(cfg) not in DYNAMIC_AUTH_KINDS:
+        return False
+    if _login_needs_human(cfg):
+        return False
+    return _is_public_host(endpoint)
+
+
 def _choose_transport(args, adapter, cfg):
     """adaptor, api or bridge, and the reason in words.
 
@@ -635,12 +665,16 @@ def _choose_transport(args, adapter, cfg):
                  f"  reach it through a tunnel (a .tun.straiker.ai name), or for now:\n"
                  f"    ascend target add ... --via bridge      ({BRIDGE_DEPRECATION})",
                  error_code="adaptor_target_private")
-        if not static_auth:
+        if _self_authenticating(adapter, cfg):
             # A public target whose login is a MACHINE handshake (oauth2 client_credentials/
             # password/refresh, csrf, derived_multihop): the engine runs a login-capable adaptor
             # generated from the contract -- `target add` emits a login scaffold whose generated
             # JavaScript mints or echoes the credential every turn. Nothing runs on this machine.
             # This is the fix: a dynamic-auth public target used to fall to the deprecated bridge.
+            # `_self_authenticating` is this exact condition (public + a machine login, past the
+            # routed/local/human/private guards above), equal to `not static_auth` here by
+            # construction. It is the ONE predicate `ascend target inspect` also reads to set its
+            # `self_authenticating` marker, so the transport choice and the marker never disagree.
             return "adaptor", (f"a hosted adaptor generated from this contract, including its "
                                f"{handshake!r} login: the platform runs it, nothing runs on this "
                                f"machine")
@@ -826,6 +860,14 @@ def cmd_target_inspect(args):
     out["reachable_from_cloud"] = _is_public_host(url)
     out["routed_by_straiker"] = routed
     out["transport"] = ("api" if out["reachable_from_cloud"] else "bridge")
+    # A public login the hosted adaptor completes end to end — the engine mints or echoes the
+    # credential every turn — has nothing for the operator to supply, so `ascend connect` must not
+    # stop to prompt for a throwaway bearer. The SAME predicate the transport choice uses decides
+    # it, off the contract this inspect derived: set the marker on exactly the targets `target add
+    # --via auto` would route to a hosted login adaptor, and the two can never disagree. Set only
+    # when true, so a static-auth, human-login, private or contract-less target is unchanged.
+    if _self_authenticating(out.get("adapter"), out):
+        out["self_authenticating"] = True
     try:
         c = _client(args)
         hits = [a for a in c._rows(c.list_apps())
