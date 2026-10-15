@@ -256,15 +256,33 @@ class TestRoutedSecondHosts:
         ("https://auth.corp.internal:8443/v1/sessions", "https://auth.corp.internal.tun.straiker.ai/v1/sessions", "auth.corp.internal:8443"),
         ("https://auth.corp.internal/v1", "https://auth.corp.internal.tun.straiker.ai/v1", "auth.corp.internal:443"),
         ("http://ids.corp.internal/api?x=1", "http://ids.corp.internal.tun.straiker.ai/api?x=1", "ids.corp.internal:80"),
-        ("http://ids.corp.internal:8080/api", "https://ids.corp.internal.tun.straiker.ai/api", "ids.corp.internal:8080"),
+        ("http://ids.corp.internal:8080/api", "http://ids.corp.internal.tun.straiker.ai/api", "ids.corp.internal:8080"),
+        ("https://tls.corp.internal:80/x", "https://tls.corp.internal.tun.straiker.ai/x", "tls.corp.internal:80"),
         ("wss://sock.corp.internal/ws", "wss://sock.corp.internal.tun.straiker.ai/ws", "sock.corp.internal:443"),
         ("ws://sock.corp.internal/ws", "ws://sock.corp.internal.tun.straiker.ai/ws", "sock.corp.internal:80"),
+        ("ws://sock.corp.internal:9000/ws", "ws://sock.corp.internal.tun.straiker.ai/ws", "sock.corp.internal:9000"),
         ("HTTPS://Auth.Corp.Internal:8443/V1", "https://auth.corp.internal.tun.straiker.ai/V1", "auth.corp.internal:8443"),
+        # not a scheme the tunnel carries: routed as https, as it always was
+        ("ftp://files.corp.internal/x", "https://files.corp.internal.tun.straiker.ai/x", "files.corp.internal:443"),
     ])
     def test_the_tunnel_url_rule(self, url, routed, allow):
-        """The host rides inside the name, the port lives in the agent's allow list, http/ws only
-        on port 80 (runtime/tunnel.py's rule, restated for the generator)."""
+        """The host rides inside the name, the port lives in the agent's allow list, and the
+        scheme is the URL's own on any port: a plain-HTTP second host on 8080 stays http://
+        (runtime/tunnel.py's rule, restated for the generator)."""
         assert G.tunnel_url(url) == (routed, allow)
+
+    @pytest.mark.parametrize("url", [
+        "http://ids.corp.internal:8089/api", "http://ids.corp.internal/api?x=1",
+        "https://auth.corp.internal:8443/v1", "https://auth.corp.internal/v1",
+        "https://tls.corp.internal:80/x", "ws://sock.corp.internal:9000/ws",
+        "wss://sock.corp.internal/ws", "wss://sock.corp.internal:9443/ws",
+        "HTTP://Ids.Corp.Internal:8089/Api"])
+    def test_the_generator_and_tunnel_url_give_the_same_answer(self, url):
+        """Two copies of one rule: the generator routes a second host, `ascend tunnel url` routes
+        the app. Both once said https for plain HTTP off port 80; this holds them together."""
+        import tunnel as T
+        r = T.url_rule(url)
+        assert G.tunnel_url(url) == (r["url"], r["allow"])
 
     def test_a_public_app_is_untouched(self):
         for cfg in (SSE_CREATE, SESSION_IN_PATH, POLL):

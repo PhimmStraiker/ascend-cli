@@ -300,18 +300,20 @@ def tunnel_url(url: str) -> Tuple[str, str]:
     """A real URL as the engine reaches it through the customer's tunnel, plus the allow entry
     the agent needs: `https://auth.corp.internal:8443/v1` -> (`https://auth.corp.internal.tun.straiker.ai/v1`,
     `auth.corp.internal:8443`). The tunnel rule: the host rides inside the name, the port lives in
-    the agent's allow list, plain http(s)/ws(s) only, http/ws only on port 80."""
+    the agent's allow list, and the scheme is the URL's own on any port, since it is what the host
+    speaks (a plain-HTTP host behind https:// fails: Straiker starts TLS with it). The same rule
+    as runtime/tunnel.py's url_rule; a test holds the two to the same answers."""
     u = urlsplit(url)
     host = (u.hostname or "").lower()
     scheme = (u.scheme or "https").lower()
+    if scheme not in ("http", "https", "ws", "wss"):
+        scheme = "https"
     try:
         port = u.port
     except ValueError:
         port = None
     if port is None:
         port = 80 if scheme in ("http", "ws") else 443
-    secure = port != 80
-    scheme = ("ws" if scheme.startswith("ws") else "http") + ("s" if secure else "")
     path = (u.path or "") + (f"?{u.query}" if u.query else "")
     return f"{scheme}://{host}{TUNNEL_SUFFIX}{path}", f"{host}:{port}"
 
