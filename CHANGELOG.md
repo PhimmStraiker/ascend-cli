@@ -13,6 +13,13 @@ them is visible at a glance. A growing Regressions section is a process signal, 
 
 ### Fixed
 
+- **A fleet start costs one settle window, not one per wave.** `assess run` with several
+  `--app` values now submits every run together (up to 16 at once) and then confirms them all
+  inside ONE shared settle window. It used to run 8 workers that each blocked in their own 45 s
+  window, so 13 apps took two waves and ~98 s before the call returned; they now take about one
+  window plus submission. Each run's verdict (started, not started, unconfirmed, recovered) is
+  the single-app one, unchanged; the single-app path keeps its own window.
+
 - **Adapter shape guidance distinguishes raw v1 replies from template extraction.**
   The existing return example is explicitly response-template-only, with additive
   compatibility guidance for genuine scalar assistant text and conflicting nested

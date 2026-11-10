@@ -1940,8 +1940,19 @@ def cmd_control_detach(args):
     _print_app_controls(app)
 
 
+# Apps a fleet start submits at once. Submission is the cheap part (create + pause/resume, ~1-3 s
+# each); confirmation is one shared settle window afterwards (`AscendAPI.confirm_started_many`).
+FLEET_START_WORKERS = 16
+
+
 def _assess_run_many(args, c, refs, scope_ids=None):
     """Start one assessment per app, concurrently, then WAIT for the fleet like the single form.
+
+    Two phases. SUBMIT: every app's run is created and set going together, up to
+    FLEET_START_WORKERS at once, with no settle window per app. CONFIRM: every submitted run is
+    then watched inside ONE shared settle window, so N apps cost about one window — measured
+    2026-11-10, 13 apps on 8 workers that each blocked in their own 45 s window took two waves and
+    ~98 s. The per-run verdict (`started` True / False / None) is the single-app one, unchanged.
 
     Each run is created with wait=False so they start together; `_wait_for_fleet` then follows
     all of them to a terminal state and prints one summary. A fleet that returned immediately
@@ -1962,6 +1973,24 @@ def _assess_run_many(args, c, refs, scope_ids=None):
         except SystemExit:
             resolved.append((ref, None))
 
+    feedback = ("started", "auto_paused", "unconfirmed", "error", "stalled",
+                "reused_assessment", "recovery_note", "recovery_needs_action",
+                "resumes", "scope_warning", "diagnosis")
+
+    def row_of(ref, appid, ensure, r):
+        row = {"app": ref, "app_id": appid, "assessment_id": r.get("assessment_id"),
+               "status": r.get("status"), "recovered": bool(r.get("recovered")),
+               "note": r.get("recovery_note"), "bridge": ensure}
+        for key in feedback:
+            if key in r:
+                row[key] = r[key]
+        if (r.get("started") is False or r.get("stalled")) and not row.get("diagnosis"):
+            # Paused is an observed state, not a cause or permission to replay a target.
+            row["diagnosis"] = ("The assessment exists, but no start/pause cause was supplied. "
+                                "Inspect this exact assessment and retained verification "
+                                "evidence; do not create a duplicate.")
+        return row
+
     def go(item):
         ref, appid = item
         if not appid:
@@ -1974,26 +2003,35 @@ def _assess_run_many(args, c, refs, scope_ids=None):
             # AscendAPI.create_assessment already verifies against the server when the response
             # is lost, and flags the result `recovered` — one implementation for both paths, so
             # the single-app and fleet forms cannot disagree about whether a run exists.
-            r = c.run(appid, args.name, wait=False)
-            row = {"app": ref, "app_id": appid, "assessment_id": r.get("assessment_id"),
-                   "status": r.get("status"), "recovered": bool(r.get("recovered")),
-                   "note": r.get("recovery_note"), "bridge": ensure}
-            for key in ("started", "auto_paused", "unconfirmed", "error", "stalled",
-                        "reused_assessment", "recovery_note", "recovery_needs_action",
-                        "resumes", "scope_warning", "diagnosis"):
-                if key in r:
-                    row[key] = r[key]
-            if (r.get("started") is False or r.get("stalled")) and not row.get("diagnosis"):
-                # Paused is an observed state, not a cause or permission to replay a target.
-                row["diagnosis"] = ("The assessment exists, but no start/pause cause was supplied. "
-                                    "Inspect this exact assessment and retained verification "
-                                    "evidence; do not create a duplicate.")
-            return row
+            # SUBMIT only (confirm=False): the settle window is shared by the whole fleet below.
+            r = c.run(appid, args.name, wait=False, confirm=False)
+            if r.get("awaiting_confirmation") and r.get("assessment_id"):
+                return {"_submitted": (ref, appid, ensure, r)}
+            return row_of(ref, appid, ensure, r)
         except Exception as e:
             return {"app": ref, "app_id": appid, "error": f"{type(e).__name__}: {e}"}
 
-    with ThreadPoolExecutor(max_workers=min(8, len(resolved))) as pool:
+    with ThreadPoolExecutor(max_workers=max(1, min(FLEET_START_WORKERS, len(resolved)))) as pool:
         out = list(pool.map(go, resolved))
+    # CONFIRM: every submitted run, inside ONE shared settle window, in input order.
+    submitted = [i for i, r in enumerate(out) if "_submitted" in r]
+    if submitted:
+        pairs = [(out[i]["_submitted"][1], out[i]["_submitted"][3]["assessment_id"]) for i in submitted]
+        try:
+            states = c.confirm_started_many(pairs)
+        except Exception as e:  # noqa: BLE001 — the runs exist; only their start is unread
+            states = [{"status": "unknown", "started": None, "auto_paused": False,
+                       "unconfirmed": True, "error": f"{type(e).__name__}: {e}"} for _ in pairs]
+        for i, state in zip(submitted, states):
+            ref, appid, ensure, r = out[i]["_submitted"]
+            if state.get("recovered"):
+                done = dict(state)       # the read failed and the run was recovered from its state
+            else:
+                # Exactly what run() returns when it confirms the run itself: the settled state,
+                # under the submission's identity and any create-time recovery.
+                done = {**state, **{k: v for k, v in r.items()
+                                    if k not in ("status", "started", "awaiting_confirmation")}}
+            out[i] = row_of(ref, appid, ensure, done)
     received = [r for r in out if r.get("assessment_id")]
     started = [r for r in received if r.get("started") is True]
     # As in the single-app API path, a wait may follow an unread start, but must
