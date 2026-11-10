@@ -34,7 +34,9 @@ concurrency:
 
 jobs:
   tests:
-    runs-on: ubuntu-latest
+    # Pinned: `ubuntu-latest` moved to 26.04 (2026-11-10), where setup-python has no 3.9, so the
+    # 3.9 leg failed before running a single test. 24.04 still carries both matrix versions.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
