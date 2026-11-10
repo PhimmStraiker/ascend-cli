@@ -103,6 +103,10 @@ TERMINAL_STATUSES = frozenset(
 # diagnosis there is made against that model (`_diagnose_not_started` in the CLI).
 SETTLE_SECONDS = 45
 SETTLE_EVERY = 5
+# A fleet start confirms every run it submitted inside ONE shared window (`confirm_started_many`).
+# Measured 2026-11-10 on a 13-app start: eight workers, each blocking in its own 45 s window, made
+# two waves and ~98 s before the call returned; one shared window makes it ~one settle for any size.
+FLEET_CONFIRM_WORKERS = 16
 
 
 def is_finished(a: Any) -> bool:
@@ -858,7 +862,7 @@ class AscendAPI:
     def run(self, app_id: str, name: str, *, wait: bool = True,
             interval: int = 20, timeout: int = 7200, on_tick=None,
             new: bool = False, settle: Optional[int] = None,
-            resume_on_pause: int = 0) -> Any:
+            resume_on_pause: int = 0, confirm: bool = True) -> Any:
         """Start an assessment on an existing app, PROVE it started, and (optionally) poll.
 
         Reuses an unfinished assessment on the app instead of creating another (pass new=True to
@@ -870,6 +874,12 @@ class AscendAPI:
         When ``wait`` is True this returns ONLY a terminal payload, a run that did not start, or
         raises. It used to return a non-terminal row after a transport error mid-poll, which the
         CLI then reported as a finished run.
+
+        ``confirm=False`` (only with ``wait=False``) submits the run — create or reuse, then the
+        pause/resume that sets it going — and returns WITHOUT the settle window, marked
+        ``awaiting_confirmation``. The caller owes that run a ``confirm_started`` read: a fleet
+        start submits every app first and confirms them all in one shared window
+        (``confirm_started_many``) instead of one window per app.
         """
         t0 = time.time()
         def terminal_now():
@@ -898,6 +908,14 @@ class AscendAPI:
             if str(a.get("status", "")).lower() != "running":
                 self._safe_transition(self.pause, app_id, aid, want="paused")
                 self._safe_transition(self.resume, app_id, aid, want="running")
+            if not confirm and not wait:
+                # Submitted, not yet confirmed: no status is claimed. The caller confirms it.
+                out = {"status": "submitted", "started": None, "awaiting_confirmation": True,
+                       "app_id": app_id, "assessment_id": aid, "reused_assessment": bool(reused)}
+                if recovered:
+                    out.update({"recovered": True, "recovery_note": recovery_note,
+                                "recovery_needs_action": False})
+                return out
             state = self.confirm_started(app_id, aid, settle=settle)
             out = {**state, "app_id": app_id, "assessment_id": aid,
                    "reused_assessment": bool(reused)}
@@ -948,14 +966,8 @@ class AscendAPI:
             # AND running is a transport hiccup the CLI already absorbed — nothing for the
             # operator to do. Recovered but `created`/`paused` needs them to resume it. The flag
             # lets the CLI say which; the full note stays in --json either way.
-            needs_action = status in ("created", "paused")
             if not wait:
-                if needs_action:
-                    note += ". It is NOT running — resume it with `ascend assess resume`."
-                return {**state, "app_id": app_id, "assessment_id": aid,
-                        "started": status == "running",
-                        "recovered": True, "recovery_note": note,
-                        "recovery_needs_action": needs_action}
+                return self._recovered_unwaited(app_id, aid, exc, state)
             # The caller asked to WAIT. Returning a non-terminal row here is how `assess run`
             # exited 0 in two seconds with the assessment still running -- a pipeline read that as
             # a passing security gate before a single probe had been answered. Recover the state,
@@ -1018,6 +1030,60 @@ class AscendAPI:
         held = status == "running" or is_finished(state)
         return {"status": status or "unknown", "started": held,
                 "auto_paused": (not held) and "running" in seen and status == "paused"}
+
+    def confirm_started_many(self, pairs, *, settle: Optional[float] = None,
+                             every: Optional[int] = None,
+                             workers: Optional[int] = None) -> List[Dict[str, Any]]:
+        """`confirm_started` for many runs inside ONE shared settle window, in input order.
+
+        Every run in `pairs` ((app_id, assessment_id), already submitted) is watched against the
+        same deadline, fixed once here — after the last submission — so each run has been alive
+        for at least the whole window when its verdict is read, and N runs cost one window rather
+        than one per run or one per wave of workers. Each run's verdict is exactly the single-run
+        one (`started` True / False / None with `unconfirmed`); a read that raises is reported as
+        unconfirmed for that run alone, never for its neighbours.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+        settle = SETTLE_SECONDS if settle is None else settle
+        every = SETTLE_EVERY if every is None else every
+        workers = FLEET_CONFIRM_WORKERS if workers is None else workers
+        pairs = list(pairs)
+        if not pairs:
+            return []
+        deadline = time.time() + settle
+
+        def one(pair) -> Dict[str, Any]:
+            app_id, aid = pair
+            try:
+                return self.confirm_started(app_id, aid, settle=max(0.0, deadline - time.time()),
+                                            every=every)
+            except Exception as exc:  # noqa: BLE001 — one unreadable run is not the fleet's verdict
+                # The same recovery the single-app path makes: read the run's real state and
+                # report it as recovered; a run whose state cannot be read is unconfirmed.
+                state = self._state_of(app_id, aid)
+                if state is None:
+                    return {"status": "unknown", "started": None, "auto_paused": False,
+                            "unconfirmed": True, "error": f"{type(exc).__name__}: {str(exc)[:160]}"}
+                return self._recovered_unwaited(app_id, aid, exc, state)
+
+        with ThreadPoolExecutor(max_workers=max(1, min(int(workers), len(pairs)))) as pool:
+            return list(pool.map(one, pairs))
+
+    @staticmethod
+    def _recovered_unwaited(app_id: str, aid: str, exc: BaseException,
+                            state: Dict[str, Any]) -> Dict[str, Any]:
+        """A run whose start could not be followed after it was created, reported from its real
+        state for a caller that is not waiting: running is started, created/paused needs action."""
+        status = str(state.get("status", "")).lower()
+        note = (f"the connection dropped ({type(exc).__name__}: {str(exc)[:160]}) after the "
+                f"assessment was created; it is on the platform with status '{status or 'unknown'}'")
+        needs_action = status in ("created", "paused")
+        if needs_action:
+            note += ". It is NOT running — resume it with `ascend assess resume`."
+        return {**state, "app_id": app_id, "assessment_id": aid,
+                "started": status == "running",
+                "recovered": True, "recovery_note": note,
+                "recovery_needs_action": needs_action}
 
     def _state_of(self, app_id: str, aid: str):
         """Best-effort read of an assessment's real state. None if we cannot tell."""
