@@ -193,3 +193,73 @@ def test_single_app_run_still_confirms_by_default():
     sub = c.run('aapp_one', 'r', wait=False, confirm=False)
     assert sub['awaiting_confirmation'] is True and sub['started'] is None
     assert sub['status'] == 'submitted' and sub['assessment_id'] == 'asmt_aapp_one'
+
+
+def _start_argv(monkeypatch, platform, argv):
+    client = platform.client()
+    monkeypatch.setattr(ascend, '_client', lambda args: client)
+    out, err, code = io.StringIO(), io.StringIO(), 0
+    t0 = time.monotonic()
+    with redirect_stdout(out), redirect_stderr(err):
+        try:
+            ascend.main(argv)
+        except SystemExit as exc:
+            code = exc.code
+    return time.monotonic() - t0, code, out.getvalue()
+
+
+def test_submit_only_returns_at_submission_with_every_id_and_no_settle(offline, monkeypatch):
+    """--submit-only (with --no-wait): the 45 s window is the caller's. MEASURED 2026-11-11: a 13-app
+    start took 68.7 s, 45 s of it the window; a host that follows each run reads the same verdict there."""
+    platform = FakePlatform(APPS, paused={APPS[3]})
+    argv = ['--json', 'assess', 'run', '--name', 'fleet', '--no-wait', '--submit-only',
+            *[part for app in APPS for part in ('--app', app)]]
+    elapsed, code, stdout = _start_argv(monkeypatch, platform, argv)
+    rows = json.loads(stdout)
+    assert code == 0, 'a fleet whose every run was submitted is not a failure'
+    assert [row['app_id'] for row in rows] == list(APPS)
+    assert all(row['assessment_id'] == 'asmt_' + row['app_id'] for row in rows)
+    assert all(row['status'] == 'submitted' and row['started'] is None and row['submitted'] is True
+               and row['settle'] == 'deferred' for row in rows), rows[0]
+    assert not any('diagnosis' in row or 'unconfirmed' in row for row in rows)
+    assert not [v for v, _ in platform.calls if v == 'get'], 'no settle read: the window was skipped'
+    assert elapsed < SETTLE / 2, f'{elapsed:.2f}s: submission waited on a window'
+    for app in APPS:
+        assert [v for v, a in platform.calls if a == app] == ['create', 'pause', 'resume']
+
+
+def test_submit_only_without_no_wait_keeps_the_waiting_form(offline, monkeypatch):
+    """--submit-only is a no-wait option: the waiting form still confirms and follows each run."""
+    platform = FakePlatform(APPS[:2])
+    monkeypatch.setattr(ascend, '_wait_for_fleet', lambda args, c, following: {
+        r['app_id']: {'status': 'complete', 'id': r['assessment_id']} for r in following})
+    argv = ['--json', 'assess', 'run', '--name', 'fleet', '--submit-only',
+            *[part for app in APPS[:2] for part in ('--app', app)]]
+    _, code, stdout = _start_argv(monkeypatch, platform, argv)
+    doc = json.loads(stdout)
+    assert all(row['started'] is True and 'submitted' not in row for row in doc['started'])
+    assert [v for v, _ in platform.calls if v == 'get'], 'the window ran'
+
+
+def test_submit_only_still_fails_a_fleet_with_a_run_that_was_never_created(offline, monkeypatch):
+    platform = FakePlatform(APPS[:3])
+    client = platform.client()
+    real_create = client.create_assessment
+
+    def create(app, name):
+        if app == APPS[1]:
+            raise api.AscendAPIError('synthetic 500 on create')
+        return real_create(app, name)
+    client.create_assessment = create
+    monkeypatch.setattr(ascend, '_client', lambda args: client)
+    argv = ['--json', 'assess', 'run', '--name', 'fleet', '--no-wait', '--submit-only',
+            *[part for app in APPS[:3] for part in ('--app', app)]]
+    out, code = io.StringIO(), 0
+    with redirect_stdout(out), redirect_stderr(io.StringIO()):
+        try:
+            ascend.main(argv)
+        except SystemExit as exc:
+            code = exc.code
+    rows = {row['app']: row for row in json.loads(out.getvalue())}
+    assert code == 1 and 'error' in rows[APPS[1]] and not rows[APPS[1]].get('assessment_id')
+    assert rows[APPS[0]]['submitted'] is True and rows[APPS[2]]['submitted'] is True
