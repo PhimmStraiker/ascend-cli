@@ -507,6 +507,7 @@ create->pause->resume->poll an assessment
 | `--resume-on-pause` | `N` | `0` | while waiting, put the run back on its feet up to N times if the PLATFORM pauses it (measured: a run against a healthy target is paused roughly every 90s). The count is always reported. 0 disables. |
 | `--new` | — | — | create a fresh assessment even if one on this app has not finished (default: pick the unfinished one up — assessments cannot be deleted) |
 | `--no-wait` | — | — | return once the run is CONFIRMED started (about 45s), not when it finishes |
+| `--submit-only` | — | — | with --no-wait on several apps: return as soon as every run is SUBMITTED (its id, status 'submitted', started unknown) and skip the settle window; the caller owes each run a confirmation read |
 | `--interval` | `INTERVAL` | `20` | seconds between status polls |
 | `--timeout` | `TIMEOUT` | `7200` | max seconds to wait for completion |
 | `--force` | — | — | run even if the selected controls would generate zero probes |

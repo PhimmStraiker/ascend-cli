@@ -1975,7 +1975,11 @@ def _assess_run_many(args, c, refs, scope_ids=None):
 
     feedback = ("started", "auto_paused", "unconfirmed", "error", "stalled",
                 "reused_assessment", "recovery_note", "recovery_needs_action",
-                "resumes", "scope_warning", "diagnosis")
+                "resumes", "scope_warning", "diagnosis", "submitted", "settle")
+    # --submit-only (with --no-wait): return as soon as every run is submitted, with its id, and leave
+    # the settle window to the caller (a host that follows each run in the background reads the same
+    # verdict there). MEASURED 2026-11-11: a 13-app start took 68.7 s, 45 s of it this window.
+    submit_only = bool(getattr(args, "submit_only", False)) and bool(getattr(args, "no_wait", False))
 
     def row_of(ref, appid, ensure, r):
         row = {"app": ref, "app_id": appid, "assessment_id": r.get("assessment_id"),
@@ -2015,7 +2019,14 @@ def _assess_run_many(args, c, refs, scope_ids=None):
         out = list(pool.map(go, resolved))
     # CONFIRM: every submitted run, inside ONE shared settle window, in input order.
     submitted = [i for i, r in enumerate(out) if "_submitted" in r]
-    if submitted:
+    if submitted and submit_only:
+        for i in submitted:
+            ref, appid, ensure, r = out[i]["_submitted"]
+            # Submitted, not confirmed: no start is claimed and none is denied; the window is owed.
+            out[i] = row_of(ref, appid, ensure, {**{k: v for k, v in r.items() if k != "awaiting_confirmation"},
+                                                 "status": "submitted", "started": None,
+                                                 "submitted": True, "settle": "deferred"})
+    elif submitted:
         pairs = [(out[i]["_submitted"][1], out[i]["_submitted"][3]["assessment_id"]) for i in submitted]
         try:
             states = c.confirm_started_many(pairs)
@@ -2034,6 +2045,7 @@ def _assess_run_many(args, c, refs, scope_ids=None):
             out[i] = row_of(ref, appid, ensure, done)
     received = [r for r in out if r.get("assessment_id")]
     started = [r for r in received if r.get("started") is True]
+    deferred = [r for r in received if r.get("submitted") is True and r.get("started") is None]
     # As in the single-app API path, a wait may follow an unread start, but must
     # not poll or restart a run the platform explicitly reported did not start.
     following = [r for r in received if r.get("started") is not False]
@@ -2050,16 +2062,20 @@ def _assess_run_many(args, c, refs, scope_ids=None):
                 bstate = ("bridge up" if b.get("ensured") else
                           "NO BRIDGE" if (b.get("skip") or b.get("error")) else "native")
                 state = ("started" if r.get("started") is True else
-                         "NOT STARTED" if r.get("started") is False else "UNCONFIRMED")
+                         "NOT STARTED" if r.get("started") is False else
+                         "SUBMITTED" if r.get("submitted") else "UNCONFIRMED")
                 print(f"  {state:11}  {r['app']:28} {r['assessment_id']}  [{bstate}]{tag}")
                 if r.get("diagnosis"):
                     print(f"      {r['diagnosis']}")
                 elif r.get("unconfirmed"):
                     print("      assessment exists; its start could not be confirmed. Inspect this run; do not create a duplicate.")
+                elif r.get("submitted"):
+                    print("      submitted; not yet confirmed running — watch it, do not create a duplicate.")
             else:
                 print(f"  FAILED   {r['app']:28} {r.get('error')}")
-        print(f"\n  {len(started)}/{len(out)} assessment(s) confirmed started "
-              f"(bridges auto-started for bridge-type apps)")
+        print(f"\n  {len(started)}/{len(out)} assessment(s) confirmed started"
+              + (f", {len(deferred)} submitted (start not yet confirmed)" if deferred else "")
+              + " (bridges auto-started for bridge-type apps)")
         if received and not waiting:
             print("  watch them:  ascend assess watch --all")
         if unbridged:
@@ -2070,7 +2086,7 @@ def _assess_run_many(args, c, refs, scope_ids=None):
     failed_start = (len(received) < len(out) or bool(unbridged)
                     or any(r.get("started") is False for r in received))
     if not waiting:
-        if failed_start or len(started) < len(out):
+        if failed_start or len(started) + len(deferred) < len(out):
             sys.exit(EXIT_ERROR)
         return
     # Wait, exactly as the single-app form does. Fire-and-forget read as success to a pipeline
@@ -10481,7 +10497,11 @@ def build_parser():
                         "pauses it (measured: a run against a healthy target is paused roughly every "
                         "90s). The count is always reported. 0 disables.")
     s.add_argument("--new", action="store_true", help="create a fresh assessment even if one on this app has not finished (default: pick the unfinished one up — assessments cannot be deleted)")
-    s.add_argument("--no-wait", action="store_true", help="return once the run is CONFIRMED started (about 45s), not when it finishes"); s.add_argument("--interval", type=int, default=20, help="seconds between status polls")
+    s.add_argument("--no-wait", action="store_true", help="return once the run is CONFIRMED started (about 45s), not when it finishes")
+    s.add_argument("--submit-only", action="store_true",
+                   help="with --no-wait on several apps: return as soon as every run is SUBMITTED (its id, status "
+                        "'submitted', started unknown) and skip the settle window; the caller owes each run a "
+                        "confirmation read"); s.add_argument("--interval", type=int, default=20, help="seconds between status polls")
     s.add_argument("--timeout", type=int, default=7200, help="max seconds to wait for completion")
     s.add_argument("--force", action="store_true", help="run even if the selected controls would generate zero probes")
     s.add_argument("--with-recon", action="store_true",
